@@ -32,6 +32,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.config import settings
 from app.correlation import set_trace_id
 from app.log_setup import configure_logging
+from app.models.session import SessionManager
+
+# 全局会话生命周期管理器（B-24）
+_session_manager = SessionManager()
 
 if TYPE_CHECKING:
     from starlette.types import ASGIApp, Message, Receive, Scope, Send
@@ -151,11 +155,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """
     # 启动
     configure_logging()
+    _session_manager.start()  # B-24：启动后台会话清理任务
     logger.info("服务启动", version=app.version)
 
     yield
 
     # 关闭
+    await _session_manager.stop()  # B-24：停止后台会话清理任务
     logger.info("服务关闭")
     app.state.started = False
 
@@ -205,6 +211,16 @@ def create_app() -> FastAPI:
     # ---- 注册路由 ----
     from app.api.connection import router as connection_router
     app.include_router(connection_router)
+    from app.api.chat import router as chat_router
+    from app.api.chat import sessions_router
+    app.include_router(chat_router)
+    app.include_router(sessions_router)
+    from app.api.query import router as query_router
+    app.include_router(query_router)
+    from app.api.report import router as report_router
+    app.include_router(report_router)
+    from app.api.troubleshoot import router as troubleshoot_router
+    app.include_router(troubleshoot_router)
 
     return app
 

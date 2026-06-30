@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import StrEnum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -155,6 +155,35 @@ class ConnectionUpdateRequest(BaseModel):
     extra_params: dict[str, Any] | None = None
 
 
+class ChatRequest(BaseModel):
+    """SSE 对话流请求体（api-contract §1.2 POST /api/chat/stream）。"""
+    connection_id: str = Field(
+        ..., description="目标数据库连接 ID",
+    )
+    message: str = Field(
+        ..., min_length=1, max_length=4096,
+        description="用户消息",
+        examples=["最近一小时慢查询有哪些？"],
+    )
+    mode: Literal["natural_language", "sql_editor"] = Field(
+        default="natural_language",
+        description="输入模式：natural_language（自然语言）或 sql_editor（SQL 编辑器直接输入）",
+    )
+    session_id: str | None = Field(
+        default=None,
+        description="会话 ID。null=新会话，非空=续接已有会话",
+    )
+    password: str | None = Field(
+        default=None,
+        description="连接密码。由浏览器 localStorage 持有，每次请求传入（AGENTS.md §8.2）。"
+        "密码仅存于内存，不落盘。",
+    )
+    context: dict[str, Any] | None = Field(
+        default=None,
+        description="前端附加上下文，如 {selected_table, user_role}",
+    )
+
+
 # =============================================================================
 # 响应 Schema
 # =============================================================================
@@ -190,18 +219,16 @@ class ConnectionResponse(BaseModel):
 class ConnectionListResponse(BaseModel):
     """分页连接列表响应（api-contract §1.1）。
 
-    注意：pageSize 字段使用 Pydantic alias 以匹配前端 camelCase 约定，
-    Python 内部使用 snake_case。
+    注意：序列化时 page_size → pageSize（camelCase 约定），
+    Python 代码统一使用 snake_case。
     """
     items: list[ConnectionResponse] = Field(..., description="连接列表")
     total: int = Field(..., description="总数")
     page: int = Field(..., description="当前页码")
     page_size: int = Field(
-        default=20, alias="pageSize", validation_alias="pageSize",
+        default=20, serialization_alias="pageSize",
         description="每页条数",
     )
-
-    model_config = {"populate_by_name": True}
 
 
 # =============================================================================
@@ -253,11 +280,9 @@ class SessionListResponse(BaseModel):
     total: int = Field(..., description="总数")
     page: int = Field(..., description="当前页码")
     page_size: int = Field(
-        default=20, alias="pageSize", validation_alias="pageSize",
+        default=20, serialization_alias="pageSize",
         description="每页条数",
     )
-
-    model_config = {"populate_by_name": True}
 
 
 class MessageListResponse(BaseModel):
@@ -266,8 +291,198 @@ class MessageListResponse(BaseModel):
     total: int = Field(..., description="总数")
     page: int = Field(..., description="当前页码")
     page_size: int = Field(
-        default=50, alias="pageSize", validation_alias="pageSize",
+        default=50, serialization_alias="pageSize",
         description="每页条数",
     )
 
-    model_config = {"populate_by_name": True}
+
+# =============================================================================
+# 查询 & 诊断 Schema（api-contract §1.3）
+# =============================================================================
+
+
+class QueryRequest(BaseModel):
+    """直接查询请求体（api-contract §1.3 POST /api/connections/{id}/query）。
+
+    接收 SQL 语句、参数化值和可选执行超时。
+    密码由前端 localStorage 持有，不在服务端持久化。
+    """
+
+    sql: str = Field(
+        ..., min_length=1, max_length=65535,
+        description="要执行的 SQL 语句（只读查询）",
+        examples=["SELECT COUNT(*) FROM users"],
+    )
+    params: dict[str, Any] = Field(
+        default_factory=dict,
+        description="参数化查询值，键为参数名，值为参数值",
+    )
+    max_execution_ms: int = Field(
+        default=30000, ge=1000, le=120000,
+        description="最大执行时间（毫秒），默认 30s",
+    )
+    password: str | None = Field(
+        default=None,
+        description="连接密码。由前端 localStorage 持有，每次请求传入（AGENTS.md §8.2）。"
+        "密码仅存于内存，不落盘。",
+    )
+
+
+class ExplainRequest(BaseModel):
+    """执行计划分析请求体（api-contract §1.3 POST /api/connections/{id}/explain）。"""
+
+    sql: str = Field(
+        ..., min_length=1, max_length=65535,
+        description="要分析执行计划的 SQL 语句",
+        examples=["SELECT * FROM orders WHERE user_id = 123"],
+    )
+    format: str = Field(
+        default="tree",
+        description="输出格式：tree / json / traditional（各数据库方言自动映射）",
+    )
+    password: str | None = Field(
+        default=None,
+        description="连接密码。由前端 localStorage 持有，每次请求传入。",
+    )
+
+
+class SlowQueryItem(BaseModel):
+    """慢查询记录项（api-contract §2.4 SlowQuery）。"""
+
+    sql_text: str = Field(
+        ..., description="慢查询 SQL 文本",
+    )
+    query_time_sec: float = Field(
+        ..., description="查询耗时（秒）",
+    )
+    lock_time_sec: float | None = Field(
+        default=None, description="锁等待时间（秒）",
+    )
+    rows_examined: int = Field(
+        default=0, description="扫描行数",
+    )
+    rows_sent: int = Field(
+        default=0, description="返回行数",
+    )
+    executed_at: str | None = Field(
+        default=None, description="执行时间（ISO 8601 格式）",
+    )
+
+
+class SlowQueryListResponse(BaseModel):
+    """分页慢查询列表响应（api-contract §1.3 GET /api/connections/{id}/slow-queries）。
+
+    若目标数据库未开启慢查询日志，items 为空列表，warning 字段描述原因。
+    """
+
+    items: list[SlowQueryItem] = Field(
+        ..., description="慢查询列表",
+    )
+    total: int = Field(
+        ..., description="总数",
+    )
+    page: int = Field(
+        default=1, description="当前页码",
+    )
+    page_size: int = Field(
+        default=20, serialization_alias="pageSize",
+        description="每页条数",
+    )
+    warning: str | None = Field(
+        default=None,
+        description="若慢查询日志未启用，描述原因；启用时为 null",
+    )
+
+
+# =============================================================================
+# 健康巡检 Schema（api-contract §2.5 HealthReport）
+# =============================================================================
+
+
+class HealthReportItem(BaseModel):
+    """检查项条目（api-contract §2.5 HealthReport items）。"""
+
+    name: str = Field(..., description="检查项名称")
+    status: str = Field(..., description="状态：pass / warning / error / skipped")
+    value: str | None = Field(default=None, description="当前值")
+    threshold: str | None = Field(default=None, description="阈值描述")
+    suggestion: str | None = Field(default=None, description="优化建议")
+    is_destructive: bool = Field(
+        default=False,
+        description="此建议是否会修改数据/结构",
+    )
+
+
+class HealthReportCategory(BaseModel):
+    """检查项分类（api-contract §2.5 HealthReport categories）。"""
+
+    name: str = Field(..., description="类别名（连接/复制/性能/慢查询/存储/安全）")
+    items: list[HealthReportItem] = Field(..., description="该类别下的检查项列表")
+
+
+class HealthReportResponse(BaseModel):
+    """健康巡检报告详情（api-contract §2.5 HealthReport）。
+
+    对应 ORM 模型 ReportModel，用于 GET /api/reports/{id} 响应。
+    """
+
+    id: str = Field(..., description="报告唯一标识")
+    connection_id: str = Field(..., description="关联的连接 ID")
+    status: str = Field(
+        ..., description="报告状态：completed / cancelled / partial",
+    )
+    score: int = Field(..., description="健康评分 0-100")
+    generated_at: datetime = Field(..., description="报告生成时间")
+    duration_sec: float = Field(..., description="巡检总耗时（秒）")
+    severity_counts: dict[str, int] = Field(
+        ..., description="严重级别计数 {error, warning, pass, skipped}",
+    )
+    categories: list[HealthReportCategory] = Field(
+        ..., description="检查项分类列表",
+    )
+
+    model_config = {"from_attributes": True}
+
+
+class HealthReportListResponse(BaseModel):
+    """分页健康巡检报告列表。"""
+
+    items: list[HealthReportResponse] = Field(..., description="报告列表")
+    total: int = Field(..., description="总数")
+    page: int = Field(..., description="当前页码")
+    page_size: int = Field(
+        default=20, serialization_alias="pageSize",
+        description="每页条数",
+    )
+
+
+# =============================================================================
+# 故障排查 Schema（api-contract §1.5 POST /api/connections/{id}/troubleshoot）
+# =============================================================================
+
+
+class TroubleshootRequest(BaseModel):
+    """故障排查请求体（api-contract §1.5 POST /api/connections/{id}/troubleshoot）。
+
+    支持自动检测模式和指定问题类型。password 由前端 localStorage 持有。
+    """
+
+    issue_type: str = Field(
+        default="auto",
+        description="排查类型：auto（自动检测）/ deadlock / connection_flood "
+                    "/ replication_lag / slow_performance / disk_full",
+    )
+    context: str = Field(
+        default="",
+        max_length=2048,
+        description="排查上下文描述（前端补充的用户描述）",
+    )
+    password: str | None = Field(
+        default=None,
+        description="连接密码。由前端 localStorage 持有，每次请求传入。"
+                    "密码仅存于内存，不落盘。",
+    )
+    session_id: str | None = Field(
+        default=None,
+        description="会话 ID，指定后将诊断结论写入该会话的消息历史",
+    )
