@@ -16,6 +16,7 @@ from __future__ import annotations
 from typing import Any, Literal
 
 from langgraph.graph import END, StateGraph
+from langgraph.graph.state import CompiledStateGraph
 
 from app.agent.router import IntentRouter
 from app.agent.state import AgentState, Intent
@@ -183,7 +184,7 @@ def format_response(state: AgentState) -> dict[str, Any]:
 # 构建 StateGraph
 # =============================================================================
 
-def build_agent_graph() -> StateGraph:
+def build_agent_graph() -> CompiledStateGraph:
     """构建 Agent 状态图。
 
     节点顺序（PRD §4.2）：

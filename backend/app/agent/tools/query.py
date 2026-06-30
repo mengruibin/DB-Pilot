@@ -40,7 +40,7 @@ def _build_config(
     """
     return ConnectionCreateRequest(
         name=f"conn_{connection_id}",
-        db_type=db_type,
+        db_type=db_type,  # type: ignore[arg-type] — Pydantic validator handles str→DBType
         host=host,
         port=port,
         database=database,
