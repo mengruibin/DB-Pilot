@@ -243,7 +243,7 @@
 | **验收标准** | 1. `check_connections(connection_id: str) -> dict`：返回 `{"status":"pass","data":{...ConnectionStatus}}`，若使用率>80% 则 `status="warning"`，>95% `status="error"`<br>2. `check_locks(connection_id: str) -> dict`：返回 `{"status":"pass|warning|error","waiting_transactions":<int>,"blocking_trx_id":"..."}`，有锁等待时 status 至少为 warning<br>3. `check_replication(connection_id: str) -> dict`：返回 `{"status":"pass|warning|error","delay_seconds":<int>}`，延迟>10s 为 warning，>60s 为 error；适配器不支持则 `status="skipped"` |
 | **前置依赖** | B-05（至少 MySQL 适配器） |
 | **继承 TODO** | 无 |
-| **状态** | 计划中 |
+| **状态** | 已完成 |
 
 ---
 
@@ -259,7 +259,7 @@
 | **验收标准** | 1. `health_check.py` 中 `HealthCheckEngine` 含 20 项检查注册表，每项含 `category/name/check_fn/threshold/suggestion`<br>2. `run_health_check(connection_id: str, check_items: list[str])` 异步生成器 yield 每个检查项结果（用于 SSE 流式推送）<br>3. 每个检查项结果为 `{current, total, item, status, value, threshold, suggestion}`<br>4. 健康评分公式：`score = floor((pass_count / total_checked) * 100)`，skipped 不计入分母<br>5. 评分分级：0-59=红色/严重、60-79=黄色/警告、80-100=绿色/健康<br>6. 总耗时 < 30s（20 项 × 1.5s/项上限）<br>7. 返回 `{"report_id":"...","score":<int>,"severity_counts":{error, warning, pass, skipped},"categories":[...]}` |
 | **前置依赖** | B-14（共用适配器）、B-15（check_connections/check_locks 复用） |
 | **继承 TODO** | 无 |
-| **状态** | 计划中 |
+| **状态** | 已完成 |
 
 ---
 
@@ -275,7 +275,7 @@
 | **验收标准** | 1. `generate_sql(natural_language: str, schema_context: dict, connection_id: str) -> dict` 返回 `{"sql":"...","explanation":"..."}`<br>2. Prompt 模板注入：目标数据库类型方言声明 + 表/列清单（含注释）+ 用户自然语言<br>3. Prompt 中不含实际数据行（依据 backend AGENTS.md §数据隐私）<br>4. LLM 响应解析：从 markdown 代码块中提取 SQL（正则 ` ```sql ... ``` `）<br>5. 生成的 SQL 经过 `sql_auditor.audit()` 校验<br>6. LLM 调用超时 15s，超时返回 `{"error":"NL2SQL generation timeout"}` |
 | **前置依赖** | B-11（SQL Auditor）、B-12（Agent graph 调用入口） |
 | **继承 TODO** | 无 |
-| **状态** | 计划中 |
+| **状态** | 已完成 |
 
 ---
 
@@ -291,7 +291,7 @@
 | **验收标准** | 1. `analyze_explain(explain_output: str, sql: str, db_type: str) -> dict` 返回 `{"bottleneck":"...","suggestion":"...","estimated_improvement":"...","is_destructive":bool}`<br>2. suggestion 中 `is_destructive=True` 的 SQL（CREATE INDEX/ALTER TABLE）标记 `# SUGGESTION` 注释<br>3. 识别以下瓶颈模式："全表扫描"/"filesort"/"temporary table"/"seq scan"<br>4. LLM 不可用时的降级方案：规则引擎返回 Explain 原始输出 + "请人工分析"（不崩溃） |
 | **前置依赖** | B-17（共用 LLM 调用基础设施） |
 | **继承 TODO** | api-contract §1.3 TODO：explain 解析 fallback 策略（当前实现：LLM + 规则降级） |
-| **状态** | 计划中 |
+| **状态** | 已完成 |
 
 ---
 
