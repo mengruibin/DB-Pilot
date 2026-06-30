@@ -13,6 +13,8 @@
 
 from __future__ import annotations
 
+import asyncio
+from collections.abc import AsyncGenerator
 from typing import Any
 
 import structlog
@@ -325,3 +327,245 @@ async def check_replication(
         }
     except Exception as exc:
         return _safe_tool_call("check_replication", exc)
+
+
+# =============================================================================
+# TroubleshootWorkflow：故障排查工作流编排器（B-23）
+# =============================================================================
+
+
+def _generate_diagnosis(results: list[dict[str, Any]]) -> dict[str, Any]:
+    """根据工具执行结果生成诊断结论（基于规则，无 LLM 依赖）。
+
+    检查结果列表中的每项，按优先级输出最严重的诊断。
+    若全部 pass 则输出健康结论。
+
+    Args:
+        results: 工具调用结果列表，每项含 {tool, status, ...}。
+
+    Returns:
+        {conclusion, severity, suggestion, suggestion_is_destructive}。
+    """
+    has_connections_error = False
+    has_locks_warning = False
+    has_locks_error = False
+    has_replication_warning = False
+    has_replication_error = False
+    lock_waiting_count = 0
+    replication_delay = 0
+
+    for r in results:
+        tool_name = r.get("tool", "")
+        status = r.get("status", "")
+
+        if tool_name == "check_connections" and status == "error":
+            has_connections_error = True
+        elif tool_name == "check_locks":
+            lock_waiting_count = r.get("waiting_transactions", 0)
+            if status == "error":
+                has_locks_error = True
+            elif status == "warning":
+                has_locks_warning = True
+        elif tool_name == "check_replication":
+            replication_delay = r.get("delay_seconds", 0) or 0
+            if status == "error":
+                has_replication_error = True
+            elif status == "warning":
+                has_replication_warning = True
+
+    # 按严重程度降序排列诊断
+    if has_connections_error:
+        return {
+            "conclusion": "数据库连接池即将耗尽，存在大量连接等待",
+            "severity": "error",
+            "suggestion": "检查是否有连接泄漏，增加 max_connections "
+                         "或优化应用连接池配置",
+            "suggestion_is_destructive": True,
+        }
+    if has_locks_error:
+        return {
+            "conclusion": f"检测到严重锁等待（{lock_waiting_count} 个事务在等待）",
+            "severity": "error",
+            "suggestion": "检查阻塞事务详情，必要时执行 KILL 阻塞会话",
+            "suggestion_is_destructive": True,
+        }
+    if has_replication_error:
+        return {
+            "conclusion": f"主从复制延迟严重（{replication_delay}s），超过安全阈值",
+            "severity": "error",
+            "suggestion": "检查从库 IO/SQL 线程状态及网络带宽，"
+                         "评估是否需要扩容从库",
+            "suggestion_is_destructive": False,
+        }
+    if has_locks_warning:
+        return {
+            "conclusion": f"存在锁等待（{lock_waiting_count} 个事务），性能受到影响",
+            "severity": "warning",
+            "suggestion": "检查长时间未提交的事务，优化 SQL 执行顺序减少锁冲突",
+            "suggestion_is_destructive": False,
+        }
+    if has_replication_warning:
+        return {
+            "conclusion": f"主从复制延迟偏高（{replication_delay}s），建议关注",
+            "severity": "warning",
+            "suggestion": "排查从库负载，检查是否有大事务或慢查询影响复制进度",
+            "suggestion_is_destructive": False,
+        }
+
+    return {
+        "conclusion": "未发现明显异常，数据库运行状态正常",
+        "severity": "info",
+        "suggestion": None,
+        "suggestion_is_destructive": False,
+    }
+
+
+class TroubleshootWorkflow:
+    """故障排查工作流编排器（B-23）。
+
+    按照 check_connections → check_locks → check_replication 顺序执行工具，
+    处理超时（>10s 跳过）和异常，生成诊断结论。
+    依据 PRD §5.3 故障类型覆盖、api-contract §1.5 SSE 事件契约。
+    """
+
+    def __init__(self, conn_config: dict[str, Any]) -> None:
+        """初始化工作流。
+
+        Args:
+            conn_config: 连接配置字典，需包含 db_type, host, port, database,
+                        user, password, ssl_enabled, ssl_ca_cert 等键。
+        """
+        self._conn_config = dict(conn_config)
+        self._results: list[dict[str, Any]] = []
+
+    async def run(
+        self,
+        issue_type: str = "auto",
+    ) -> AsyncGenerator[dict[str, Any], None]:
+        """执行故障排查工作流，逐条 yield SSE 事件数据。
+
+        支持 "auto" 自动检测（全部检查）。
+        每个工具调用用 10s 超时保护（AC-4）。
+
+        Args:
+            issue_type: 排查类型（"auto" 自动检测全部项）。
+
+        Yields:
+            {"type": "thinking"|"tool_call"|"tool_result"|"skip"|"diagnosis", ...}。
+        """
+        from app.agent.tools.troubleshoot import (
+            check_connections,
+            check_locks,
+            check_replication,
+        )
+
+        # AC-1：自动检测模式下执行全部三项检查
+        check_steps = [
+            (check_connections, "check_connections", "检查连接池状态...",
+             {"connection_id": self._conn_config.get("connection_id", "")}),
+            (check_locks, "check_locks", "检查锁等待...",
+             {"connection_id": self._conn_config.get("connection_id", "")}),
+            (check_replication, "check_replication", "检查主从复制状态...",
+             {"connection_id": self._conn_config.get("connection_id", "")}),
+        ]
+
+        yield {
+            "type": "thinking",
+            "content": (
+                f"开始故障排查（{issue_type}）："
+                f"依次检查连接数、锁等待和复制状态"
+            ),
+        }
+
+        for tool_fn, tool_name, display, extra_args in check_steps:
+            # AC-2：tool_call 事件
+            yield {
+                "type": "tool_call",
+                "tool": tool_name,
+                "args": {},
+                "display": display,
+            }
+
+            # AC-4：构建工具参数字典
+            tool_args = {**self._conn_config, **extra_args}
+
+            try:
+                # AC-4：10s 超时保护
+                start = asyncio.get_event_loop().time()
+                tr = await asyncio.wait_for(
+                    tool_fn.ainvoke(tool_args),
+                    timeout=10,
+                )
+                elapsed_ms = int(
+                    (asyncio.get_event_loop().time() - start) * 1000,
+                )
+
+                # 检查工具返回中是否有 error
+                if "error" in tr:
+                    yield {
+                        "type": "skip",
+                        "tool": tool_name,
+                        "reason": tr.get("error", "工具执行异常"),
+                    }
+                    continue
+
+                tr["tool"] = tool_name
+                tr["duration_ms"] = elapsed_ms
+                self._results.append(tr)
+
+                status = tr.get("status", "error")
+                summary = f"状态：{status}"
+
+                # AC-2：tool_result 事件
+                yield {
+                    "type": "tool_result",
+                    "tool": tool_name,
+                    "summary": summary,
+                    "status": status,
+                    "duration_ms": elapsed_ms,
+                }
+
+                # AC-7：每步记录日志
+                logger.info("故障排查步骤完成",
+                            tool=tool_name, status=status,
+                            duration_ms=elapsed_ms)
+
+            except TimeoutError:
+                # AC-4：超时 → skip 事件，继续下一步
+                logger.warning("故障排查步骤超时",
+                               tool=tool_name, timeout=10)
+                yield {
+                    "type": "skip",
+                    "tool": tool_name,
+                    "reason": f"{tool_name} 执行超时（>10s）",
+                }
+            except Exception as exc:
+                # AC-4：异常 → skip 事件
+                logger.error("故障排查步骤异常",
+                             tool=tool_name, error=str(exc)[:200])
+                yield {
+                    "type": "skip",
+                    "tool": tool_name,
+                    "reason": f"{tool_name} 执行异常：{exc}",
+                }
+
+        # 生成诊断结论
+        diagnosis = _generate_diagnosis(self._results)
+
+        # AC-3：diagnosis 事件
+        yield {
+            "type": "diagnosis",
+            "conclusion": diagnosis["conclusion"],
+            "severity": diagnosis["severity"],
+            "suggestion": diagnosis["suggestion"],
+            "suggestion_is_destructive": diagnosis["suggestion_is_destructive"],
+        }
+
+        # AC-7：结论记录日志
+        logger.info("故障排查结论",
+                    severity=diagnosis["severity"],
+                    conclusion=diagnosis["conclusion"][:100])
+
+    def get_results(self) -> list[dict[str, Any]]:
+        """获取所有步骤的执行结果列表。"""
+        return list(self._results)
