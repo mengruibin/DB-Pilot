@@ -15,11 +15,14 @@ from __future__ import annotations
 
 from typing import Any
 
+import structlog
 from langchain_core.tools import tool
 
 from app.db.factory import AdapterFactory
 from app.engine.health_check import HealthCheckEngine
 from app.models.schemas import ConnectionCreateRequest
+
+logger = structlog.get_logger(__name__)
 
 
 def _build_config(
@@ -58,6 +61,7 @@ def _safe_tool_call(fn_name: str, exc: Exception) -> dict[str, Any]:
     AGENTS.md §工具函数返回契约：
     工具函数内部捕获异常后返回 {"error": "...", "detail": "..."}
     """
+    logger.error("工具调用失败", tool=fn_name, error=str(exc)[:200])
     return {
         "error": f"{fn_name} 执行失败",
         "detail": f"{type(exc).__name__}: {exc}",
@@ -149,6 +153,9 @@ async def run_health_check(
                 for cat_name, items in categories.items()
             ],
         }
+        score = report["score"]
+        logger.info("工具执行成功", tool="run_health_check",
+                     connection_id=connection_id, score=score)
         return report
     except Exception as exc:
         return _safe_tool_call("run_health_check", exc)

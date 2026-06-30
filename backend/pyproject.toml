@@ -40,6 +40,7 @@ dev = [
     "ruff>=0.5.0",              # Python linter（AGENTS.md §验证与测试要求）
     "pytest>=8.0.0",            # 测试框架
     "pytest-asyncio>=0.23.0",   # 异步测试支持
+    "structlog>=24.0.0",        # 结构化日志（链路追踪与可观测性）
 ]
 
 [tool.ruff]

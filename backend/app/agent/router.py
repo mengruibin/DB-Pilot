@@ -13,7 +13,11 @@ from __future__ import annotations
 import re
 from typing import Any
 
+import structlog
+
 from app.agent.state import Intent
+
+logger = structlog.get_logger(__name__)
 
 # =============================================================================
 # 关键词规则定义
@@ -114,22 +118,37 @@ class IntentRouter:
 
         # 置信度 > 阈值时直接返回（AC-3）
         if best_score >= self._keyword_threshold:
+            logger.info("意图分类完成", intent=best_intent.value,
+                         confidence=round(best_score, 2),
+                         method="keyword")
             return best_intent
 
         # 低置信度时尝试 LLM 分类（AC-4）
         if self._llm_client is not None:
             llm_intent = self._classify_with_llm(user_message)
             if llm_intent is not None:
+                logger.info("意图分类完成", intent=llm_intent.value,
+                             confidence=round(best_score, 2),
+                             method="llm")
                 return llm_intent
 
         # 若仍低于阈值但 QUERY 得分相对较高，倾向 QUERY
         if scores.get(Intent.QUERY, 0.0) >= 0.4 and best_score < 0.6:
+            logger.info("意图分类完成", intent=Intent.QUERY.value,
+                         confidence=round(scores[Intent.QUERY], 2),
+                         method="fallback_query")
             return Intent.QUERY
 
         # 高于最低阈值返回最佳匹配，否则返回 GENERAL
         if best_score >= 0.3:
+            logger.info("意图分类完成", intent=best_intent.value,
+                         confidence=round(best_score, 2),
+                         method="keyword_low")
             return best_intent
 
+        logger.info("意图分类完成", intent=Intent.GENERAL.value,
+                     confidence=round(best_score, 2),
+                     method="default")
         return Intent.GENERAL
 
     def _classify_with_llm(self, user_message: str) -> Intent | None:

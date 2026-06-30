@@ -15,10 +15,13 @@ from __future__ import annotations
 
 from typing import Any
 
+import structlog
 from langchain_core.tools import tool
 
 from app.db.factory import AdapterFactory
 from app.models.schemas import ConnectionCreateRequest
+
+logger = structlog.get_logger(__name__)
 
 
 def _build_config(
@@ -57,6 +60,7 @@ def _safe_tool_call(fn_name: str, exc: Exception) -> dict[str, Any]:
     AGENTS.md §工具函数返回契约：
     工具函数内部捕获异常后返回 {"error": "...", "detail": "..."}
     """
+    logger.error("工具调用失败", tool=fn_name, error=str(exc)[:200])
     return {
         "error": f"{fn_name} 执行失败",
         "detail": f"{type(exc).__name__}: {exc}",
@@ -132,6 +136,8 @@ async def check_connections(
         usage = float(status_data.get("usage_percent", 0))
         status = _classify_usage(usage)
 
+        logger.info("工具执行成功", tool="check_connections",
+                     connection_id=connection_id, status=status)
         return {
             "status": status,
             "data": status_data,
@@ -204,13 +210,19 @@ async def check_locks(
                     blocking_id = str(bid)
                     break
 
+            lock_status = "warning" if waiting_count <= 3 else "error"
+            logger.info("工具执行成功", tool="check_locks",
+                         connection_id=connection_id, status=lock_status,
+                         waiting_transactions=waiting_count)
             return {
-                "status": "warning" if waiting_count <= 3 else "error",
+                "status": lock_status,
                 "waiting_transactions": waiting_count,
                 "blocking_trx_id": blocking_id,
                 "locks": locks,
             }
 
+        logger.info("工具执行成功", tool="check_locks",
+                     connection_id=connection_id, status="pass")
         return {
             "status": "pass",
             "waiting_transactions": 0,
@@ -272,6 +284,8 @@ async def check_replication(
         capabilities = adapter.get_capabilities()
         if not capabilities.supports_replication:
             await adapter.disconnect()
+            logger.info("工具执行成功", tool="check_replication",
+                         connection_id=connection_id, status="skipped")
             return {
                 "status": "skipped",
                 "delay_seconds": None,
@@ -282,6 +296,8 @@ async def check_replication(
 
         # 若适配器返回 skipped，透传
         if repl_status.get("status") == "skipped":
+            logger.info("工具执行成功", tool="check_replication",
+                         connection_id=connection_id, status="skipped")
             return {
                 "status": "skipped",
                 "delay_seconds": None,
@@ -300,6 +316,9 @@ async def check_replication(
         else:
             status = "pass"
 
+        logger.info("工具执行成功", tool="check_replication",
+                     connection_id=connection_id, status=status,
+                     delay_seconds=delay_sec)
         return {
             "status": status,
             "delay_seconds": delay_sec,

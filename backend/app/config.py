@@ -87,6 +87,24 @@ class Settings(BaseSettings):
         description="会话空闲超时（分钟），PRD §8.2 要求 30 分钟自动清理。",
     )
 
+    # ==================== 日志与可观测性 ====================
+    LOG_LEVEL: str = Field(
+        default="INFO",
+        description="日志级别：DEBUG / INFO / WARNING / ERROR。",
+    )
+    LOG_FORMAT: str = Field(
+        default="text",
+        description="日志输出格式：json（生产）或 text（开发彩色控制台）。",
+    )
+    LOG_FILE: str | None = Field(
+        default=None,
+        description="日志文件路径（可选）。为空时仅输出到 stderr。",
+    )
+    LOG_TRACE_ENABLED: bool = Field(
+        default=True,
+        description="是否启用链路追踪。关闭后 trace_id 仍生成但不强制透传。",
+    )
+
     # ==================== 校验 ====================
 
     @field_validator("LLM_API_KEY", "LLM_MODEL", "DATABASE_URL")

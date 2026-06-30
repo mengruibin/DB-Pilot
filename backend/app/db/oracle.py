@@ -14,8 +14,12 @@ from __future__ import annotations
 
 from typing import Any
 
+import structlog
+
 from app.db.base import AdapterCapabilities, BaseAdapter
 from app.models.schemas import ConnectionCreateRequest
+
+logger = structlog.get_logger("app.db.oracle")
 
 # SAFETY: oracledb 在 connect() 时懒加载，不在模块层级 import
 _ORACLEDB_AVAILABLE: bool = False
@@ -68,10 +72,16 @@ class OracleAdapter(BaseAdapter):
                 dsn=dsn,
             )
             self._connected = True
+            logger.info("Oracle 连接成功",
+                        host=config.host, port=config.port,
+                        database=config.database)
             return True
 
         except Exception as exc:
             self._connected = False
+            logger.warning("Oracle 连接失败",
+                           host=config.host, port=config.port,
+                           error=str(exc)[:100])
             # SAFETY: 连接失败异常消息仅包含 host:port
             raise ConnectionError(
                 f"Oracle 连接失败 [{config.host}:{config.port}]"
@@ -83,6 +93,7 @@ class OracleAdapter(BaseAdapter):
         if self._conn is not None:
             await self._conn.close()
             self._conn = None
+            logger.debug("Oracle 连接已关闭")
         self._connected = False
 
     async def test_connection(self) -> bool:
@@ -125,6 +136,9 @@ class OracleAdapter(BaseAdapter):
                 columns = [desc[0] for desc in cur.description] if cur.description else []
 
             elapsed = int((time.monotonic() - start) * 1000)
+            logger.debug("Oracle 查询完成",
+                         sql=sql[:200], execution_time_ms=elapsed,
+                         rows_returned=len(rows))
             return {
                 "columns": columns,
                 "rows": [list(row) for row in rows],
@@ -135,8 +149,10 @@ class OracleAdapter(BaseAdapter):
             }
 
         except TimeoutError:
+            logger.warning("Oracle 查询超时", sql=sql[:200])
             raise TimeoutError("Oracle 查询超时（>30s）") from None
         except Exception as exc:
+            logger.error("Oracle 查询异常", sql=sql[:200], error=str(exc)[:200])
             raise ValueError(f"SQL 执行错误：{exc}") from exc
 
     # ================== 元数据 ==================
@@ -293,6 +309,7 @@ class OracleAdapter(BaseAdapter):
 
         # DBMS_XPLAN.DISPLAY 返回格式化文本
         plan_lines = [row[0] for row in result["rows"]]
+        logger.debug("Oracle EXPLAIN 完成", sql=sql[:200])
         return {
             "explain_output": "\n".join(plan_lines),
             "format": "text",

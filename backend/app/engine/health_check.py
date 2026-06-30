@@ -15,7 +15,11 @@ from collections.abc import AsyncGenerator, Callable, Coroutine
 from dataclasses import dataclass
 from typing import Any
 
+import structlog
+
 from app.db.base import BaseAdapter
+
+logger = structlog.get_logger(__name__)
 
 # =============================================================================
 # 检查项定义
@@ -454,6 +458,8 @@ class HealthCheckEngine:
                 "suggestion": suggestion,
             }
             result_store.append(result)
+            logger.info("健康检查完成", item=check.name, status=status,
+                         category=check.category)
             yield result
 
         report = self._build_report(result_store, total)
@@ -495,6 +501,10 @@ class HealthCheckEngine:
         score = math.floor(
             (pass_count / denominator) * 100
         ) if denominator > 0 else 100
+
+        logger.info("健康巡检报告", score=score,
+                     error=error_count, warning=warning_count,
+                     pass_count=pass_count, skipped=skipped_count)
 
         return {
             "score": score,

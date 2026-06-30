@@ -15,11 +15,14 @@ from __future__ import annotations
 
 from typing import Any
 
+import structlog
 from langchain_core.tools import tool
 
 from app.db.factory import AdapterFactory
 from app.engine.sql_auditor import audit
 from app.models.schemas import ConnectionCreateRequest
+
+logger = structlog.get_logger(__name__)
 
 
 def _build_config(
@@ -58,6 +61,7 @@ def _safe_tool_call(fn_name: str, exc: Exception) -> dict[str, Any]:
     AGENTS.md §工具函数返回契约：
     工具函数内部捕获异常后返回 {"error": "...", "detail": "..."}
     """
+    logger.error("工具调用失败", tool=fn_name, error=str(exc)[:200])
     return {
         "error": f"{fn_name} 执行失败",
         "detail": f"{type(exc).__name__}: {exc}",
@@ -111,6 +115,8 @@ async def list_tables(
         tables = await adapter.get_tables(database)
         await adapter.disconnect()
 
+        logger.info("工具执行成功", tool="list_tables",
+                     connection_id=connection_id, table_count=len(tables))
         return {"tables": tables}
     except Exception as exc:
         return _safe_tool_call("list_tables", exc)
@@ -166,6 +172,9 @@ async def describe_table(
         indexes = await adapter.get_indexes(database, table_name)
         await adapter.disconnect()
 
+        logger.info("工具执行成功", tool="describe_table",
+                     connection_id=connection_id, table_name=table_name,
+                     column_count=len(columns), index_count=len(indexes))
         return {"columns": columns, "indexes": indexes}
     except Exception as exc:
         return _safe_tool_call("describe_table", exc)
@@ -221,6 +230,8 @@ async def run_query(
     # SAFETY: 不跳过 SQL 审计直接执行用户/LLM 生成的 SQL
     audit_result = audit(sql, db_type=db_type, user_role=user_role)
     if not audit_result.passed:
+        logger.warning("工具审计拦截", tool="run_query", sql=sql[:200],
+                        connection_id=connection_id)
         return {
             "error": "SQL 审计未通过",
             "detail": "语句包含危险操作，已被拦截",
@@ -262,6 +273,10 @@ async def run_query(
             ]
             masked_rows.append(masked_row)
 
+        logger.info("工具执行成功", tool="run_query",
+                     connection_id=connection_id,
+                     total_rows=result.get("total_rows", 0),
+                     audit_status="passed")
         return {
             "columns": result["columns"],
             "rows": masked_rows,

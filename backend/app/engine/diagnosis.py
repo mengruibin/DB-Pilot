@@ -15,12 +15,17 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from typing import Any
 
 import httpx
+import structlog
 
 from app.config import settings
 from app.prompts.diagnosis import build_diagnosis_prompt, rule_based_analyze
+
+logger = structlog.get_logger(__name__)
+
 
 # =============================================================================
 # 常量
@@ -177,6 +182,8 @@ async def analyze_explain(
     """
     try:
         # Step 1: 构建 Prompt 并调用 LLM
+        logger.info("诊断 LLM 开始分析", sql=sql[:100], db_type=db_type)
+        start_time = time.monotonic()
         system_prompt, user_prompt = build_diagnosis_prompt(
             explain_output=explain_output,
             sql=sql,
@@ -184,13 +191,20 @@ async def analyze_explain(
         )
 
         llm_response = await _call_llm(system_prompt, user_prompt)
+        elapsed = time.monotonic() - start_time
 
         # Step 2: 解析 LLM 响应
         parsed = _extract_json(llm_response)
         if parsed:
+            bottleneck = parsed.get("bottleneck", "")[:100]
+            logger.info("诊断 LLM 分析成功", sql=sql[:100],
+                        bottleneck=bottleneck,
+                        elapsed_ms=round(elapsed * 1000))
             return _normalize_analysis(parsed)
 
         # Step 3: LLM 返回了有效文本但未包含可解析 JSON → 降级到规则引擎
+        logger.warning("诊断 LLM 响应格式异常，降级到规则引擎",
+                       sql=sql[:100], db_type=db_type)
         fallback = rule_based_analyze(explain_output, sql)
         fallback["bottleneck"] = (
             f"{fallback['bottleneck']}（LLM 响应格式异常，使用规则分析）"
@@ -199,6 +213,8 @@ async def analyze_explain(
 
     except (TimeoutError, RuntimeError):
         # AC-4: LLM 不可用时降级到规则引擎
+        logger.warning("诊断 LLM 不可用，降级到规则引擎",
+                       sql=sql[:100], db_type=db_type)
         fallback = rule_based_analyze(explain_output, sql)
         fallback["bottleneck"] = (
             f"{fallback['bottleneck']}（LLM 服务暂不可用，使用规则分析）"
@@ -206,6 +222,7 @@ async def analyze_explain(
         return fallback
     except Exception as exc:
         # 兜底：即使规则引擎也不可用，返回原始信息
+        logger.error("诊断引擎异常", sql=sql[:100], error=str(exc)[:200])
         return {
             "bottleneck": "分析过程异常",
             "suggestion": f"请人工分析以下 EXPLAIN 输出：\n{explain_output[:300]}",

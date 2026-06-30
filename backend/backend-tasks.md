@@ -304,7 +304,7 @@
 | **关联契约** | api-contract §1.2 POST /api/chat/stream（7 种 type 契约表）；backend AGENTS.md §SSE 流式格式 |
 | **输入** | B-12 Agent Graph、B-03 Session/Message ORM |
 | **输出物** | `backend/app/api/chat.py` |
-| **验收标准** | 1. 接受 `{connection_id, message, mode, session_id, context}`<br>2. `session_id=null` 时创建新 Session（title 由首条消息截取前 30 字符生成）<br>3. 返回 `Content-Type: text/event-stream`，每条消息格式 `event: message\ndata: {json}\n\n`<br>4. 事件顺序严格遵守：`thinking` → `tool_call` → `tool_result`（可多轮）→ `sql` → `result` → `done`<br>5. `error` 事件后不发后续事件，直接 `done`<br>6. `done` 事件含 `session_id` + `tokens_used`<br>7. 120s 无消息自动 `done` 关闭<br>8. User Message 和 Assistant 响应写入 `messages` 表<br>9. `data_preview` 仅返回前 100 行（完整数据通过分页接口获取）<br>10. 首 Token（第一个 `thinking` 事件）延迟 < 2s |
+| **验收标准** | 1. 接受 `{connection_id, message, mode, session_id, context}`<br>2. `session_id=null` 时创建新 Session（title 由首条消息截取前 30 字符生成）<br>3. 返回 `Content-Type: text/event-stream`，每条消息格式 `event: message\ndata: {json}\n\n`<br>4. 事件顺序严格遵守：`thinking` → `tool_call` → `tool_result`（可多轮）→ `sql` → `result` → `done`<br>5. `error` 事件后不发后续事件，直接 `done`<br>6. `done` 事件含 `session_id` + `tokens_used`<br>7. 120s 无消息自动 `done` 关闭<br>8. User Message 和 Assistant 响应写入 `messages` 表<br>9. `data_preview` 仅返回前 100 行（完整数据通过分页接口获取）<br>10. 首 Token（第一个 `thinking` 事件）延迟 < 2s<br>11. **可观测性**：SSE 连接建立/关闭、thinking/sql/result/error/done 各事件触发时记录结构化日志 |
 | **前置依赖** | B-12、B-13、B-03 |
 | **继承 TODO** | api-contract T-2（SSE 使用 POST + fetch ReadableStream） |
 | **状态** | 计划中 |
@@ -320,7 +320,7 @@
 | **关联契约** | api-contract §1.2 POST /api/chat/cancel；frontend AGENTS.md §1（长任务取消按钮） |
 | **输入** | B-19 SSE 流管理 |
 | **输出物** | `backend/app/api/chat.py` 中追加 `cancel_chat` 端点 |
-| **验收标准** | 1. 接受 `{session_id}`，返回 204<br>2. 后端取消 Agent 执行：调用 `asyncio.Task.cancel()` 取消当前 session 的 Agent 协程<br>3. 若工具已在目标数据库执行 SQL，发送 `KILL QUERY <connection_id>`<br>4. 回滚未提交事务<br>5. 更新 Session status 为 `"closed"`<br>6. 取消后前端 SSE 流收到 `done` 事件（非 error 事件） |
+| **验收标准** | 1. 接受 `{session_id}`，返回 204<br>2. 后端取消 Agent 执行：调用 `asyncio.Task.cancel()` 取消当前 session 的 Agent 协程<br>3. 若工具已在目标数据库执行 SQL，发送 `KILL QUERY <connection_id>`<br>4. 回滚未提交事务<br>5. 更新 Session status 为 `"closed"`<br>6. 取消后前端 SSE 流收到 `done` 事件（非 error 事件）<br>7. **可观测性**：取消操作全程记录日志（发起取消、KILL QUERY、回滚、状态更新各步骤） |
 | **前置依赖** | B-19 |
 | **继承 TODO** | 无 |
 | **状态** | 计划中 |
@@ -336,7 +336,7 @@
 | **关联契约** | api-contract §1.3（query/explain/slow-queries 三个端点） |
 | **输入** | B-11 SQL Auditor、B-05 Adapter |
 | **输出物** | `backend/app/api/query.py`（或追加至 `connection.py`） |
-| **验收标准** | 1. `POST /api/connections/{id}/query` 接收 `{sql, params, max_execution_ms}`，经审计后执行，返回契约 §1.3 QueryResult<br>2. SQL 审计拦截返回 400（非 500）<br>3. `POST /api/connections/{id}/explain` 接收 `{sql, format}`，返回 `{explain_output, parsed, format}`<br>4. `GET /api/connections/{id}/slow-queries?time_range=1h&limit=20&page=1&pageSize=20` 返回契约 §1.3 分页响应<br>5. 慢查询日志未启用时返回 200 + warning（非 500） |
+| **验收标准** | 1. `POST /api/connections/{id}/query` 接收 `{sql, params, max_execution_ms}`，经审计后执行，返回契约 §1.3 QueryResult<br>2. SQL 审计拦截返回 400（非 500）<br>3. `POST /api/connections/{id}/explain` 接收 `{sql, format}`，返回 `{explain_output, parsed, format}`<br>4. `GET /api/connections/{id}/slow-queries?time_range=1h&limit=20&page=1&pageSize=20` 返回契约 §1.3 分页响应<br>5. 慢查询日志未启用时返回 200 + warning（非 500）<br>6. **可观测性**：每个 API 端点函数入口/出口记录结构化日志，SQL 审计拦截/通过、EXPLAIN 执行等关键步骤均有日志 |
 | **前置依赖** | B-11、B-05、B-18（explain parsed 字段依赖诊断引擎） |
 | **继承 TODO** | 无 |
 | **状态** | 计划中 |
@@ -352,7 +352,7 @@
 | **关联契约** | api-contract §1.4（health-check SSE + reports CRUD）、§2.5 HealthReport |
 | **输入** | B-16 HealthCheckEngine |
 | **输出物** | `backend/app/api/report.py` |
-| **验收标准** | 1. `POST /api/connections/{id}/health-check` 接受 `{check_items, timeout_sec}`，返回 SSE 流<br>2. SSE 事件类型：`check_progress`/`check_warning`/`check_error`/`health_result`（区别于 chat SSE）<br>3. 巡检完成后报告持久化到 `reports` 表（ORM 模型由本任务新增）<br>4. `GET /api/reports?connection_id=...&page=1&pageSize=20` 返回历史报告列表<br>5. `GET /api/reports/{id}` 返回完整报告详情<br>6. 巡检总耗时 < 30s（每项 ≤ 1.5s），超时项标记 `skipped` 继续<br>7. 取消逻辑：接收 cancel → 完成当前检查项 → 生成部分报告标记 `status="partial"` |
+| **验收标准** | 1. `POST /api/connections/{id}/health-check` 接受 `{check_items, timeout_sec}`，返回 SSE 流<br>2. SSE 事件类型：`check_progress`/`check_warning`/`check_error`/`health_result`（区别于 chat SSE）<br>3. 巡检完成后报告持久化到 `reports` 表（ORM 模型由本任务新增）<br>4. `GET /api/reports?connection_id=...&page=1&pageSize=20` 返回历史报告列表<br>5. `GET /api/reports/{id}` 返回完整报告详情<br>6. 巡检总耗时 < 30s（每项 ≤ 1.5s），超时项标记 `skipped` 继续<br>7. 取消逻辑：接收 cancel → 完成当前检查项 → 生成部分报告标记 `status="partial"`<br>8. **可观测性**：巡检 SSE 连接生命周期（开始/每项检查/取消/完成）记录结构化日志，每项检查记录耗时和状态 |
 | **前置依赖** | B-16、B-20（共用取消机制） |
 | **继承 TODO** | api-contract T-9（报告导出格式——Phase 4+ 实现） |
 | **状态** | 计划中 |
@@ -368,7 +368,7 @@
 | **关联契约** | api-contract §1.5 POST /api/connections/{id}/troubleshoot、§2.6 TroubleshootResult |
 | **输入** | B-15 故障排查工具、B-12 Agent Graph |
 | **输出物** | `backend/app/agent/tools/troubleshoot.py` 中追加 TroubleshootWorkflow，`backend/app/api/chat.py` 中追加端点 |
-| **验收标准** | 1. 接受 `{issue_type, context}`，"auto" 时自动检测（依次 check_connections → check_locks → check_replication）<br>2. SSE 流事件类型：`thinking`/`tool_call`/`tool_result`/`diagnosis`<br>3. `diagnosis` 事件含 `{conclusion, severity, suggestion, suggestion_is_destructive}`<br>4. 工具调用超时（>10s）跳过当前步骤，发 `skip` 事件继续下一步<br>5. `suggestion_is_destructive: true` 时前端渲染需确认按钮<br>6. 排查完成后结论写入当前 Session 的 messages |
+| **验收标准** | 1. 接受 `{issue_type, context}`，"auto" 时自动检测（依次 check_connections → check_locks → check_replication）<br>2. SSE 流事件类型：`thinking`/`tool_call`/`tool_result`/`diagnosis`<br>3. `diagnosis` 事件含 `{conclusion, severity, suggestion, suggestion_is_destructive}`<br>4. 工具调用超时（>10s）跳过当前步骤，发 `skip` 事件继续下一步<br>5. `suggestion_is_destructive: true` 时前端渲染需确认按钮<br>6. 排查完成后结论写入当前 Session 的 messages<br>7. **可观测性**：排查工作流每一步（check_connections/check_locks/check_replication）记录耗时和状态（pass/warning/error/skip），结论生成时记录 severity |
 | **前置依赖** | B-15、B-19（共用 SSE 基础设施） |
 | **继承 TODO** | 无 |
 | **状态** | 计划中 |
@@ -384,7 +384,7 @@
 | **关联契约** | api-contract §2.2 Session 约束（空闲 30min 关闭）；backend AGENTS.md §安全与合规红线（会话超时清理） |
 | **输入** | B-03 Session/Message ORM |
 | **输出物** | `backend/app/models/session.py` 中追加 `SessionManager` 类，`backend/app/api/chat.py` 中追加 `GET /api/sessions` / `GET /api/sessions/{id}/messages` |
-| **验收标准** | 1. 后台 `asyncio.Task` 每 60s 扫描 `status="active"` 且 `last_active_at < NOW() - 30min` 的 Session，更新 `status="closed"`<br>2. 关闭时清除内存中的连接凭据<br>3. `GET /api/sessions?connection_id=...&status=active` 返回会话列表<br>4. `GET /api/sessions/{id}/messages?page=1&pageSize=50` 返回消息历史（不含 `result_preview` 中的完整数据行——仅返回前 20 行预览）<br>5. 跨会话数据隔离：查询 Session A 的消息不会返回 Session B 的结果数据 |
+| **验收标准** | 1. 后台 `asyncio.Task` 每 60s 扫描 `status="active"` 且 `last_active_at < NOW() - 30min` 的 Session，更新 `status="closed"`<br>2. 关闭时清除内存中的连接凭据<br>3. `GET /api/sessions?connection_id=...&status=active` 返回会话列表<br>4. `GET /api/sessions/{id}/messages?page=1&pageSize=50` 返回消息历史（不含 `result_preview` 中的完整数据行——仅返回前 20 行预览）<br>5. 跨会话数据隔离：查询 Session A 的消息不会返回 Session B 的结果数据<br>6. **可观测性**：空闲超时清理后台任务每次扫描记录扫描数量、清理的 session_id 列表；消息查询 API 记录查询参数和返回条数 |
 | **前置依赖** | B-03、B-19 |
 | **继承 TODO** | 无 |
 | **状态** | 计划中 |
@@ -400,7 +400,7 @@
 | **关联契约** | api-contract §1.4 GET /api/reports/{id}/export、T-9（报告导出格式） |
 | **输入** | B-22 HealthReport 数据 |
 | **输出物** | `backend/app/api/report.py` 中追加 `export_report` 端点 |
-| **验收标准** | 1. `GET /api/reports/{id}/export?format=html` 返回 HTML 报告（Content-Type: text/html）<br>2. `GET /api/reports/{id}/export?format=pdf` 返回 PDF 文件（Content-Disposition: attachment）<br>3. HTML 模板用 Jinja2 渲染，含健康评分环形图（内联 CSS）、分类检查项列表（三色标记）<br>4. PDF 用 WeasyPrint 从 HTML 生成<br>5. 导出文件含水印：`Generated by DB-Pilot | <timestamp> UTC` （用户标识待 T-3 决策后追加） |
+| **验收标准** | 1. `GET /api/reports/{id}/export?format=html` 返回 HTML 报告（Content-Type: text/html）<br>2. `GET /api/reports/{id}/export?format=pdf` 返回 PDF 文件（Content-Disposition: attachment）<br>3. HTML 模板用 Jinja2 渲染，含健康评分环形图（内联 CSS）、分类检查项列表（三色标记）<br>4. PDF 用 WeasyPrint 从 HTML 生成<br>5. 导出文件含水印：`Generated by DB-Pilot | <timestamp> UTC` （用户标识待 T-3 决策后追加）<br>6. **可观测性**：报告导出请求记录 format 参数和 report_id，渲染/导出耗时 |
 | **前置依赖** | B-22 |
 | **继承 TODO** | api-contract T-3（导出水印 User 字段）、T-9（后端生成方案） |
 | **状态** | 计划中 |
@@ -416,7 +416,7 @@
 | **关联契约** | backend AGENTS.md §LLM 集成（Claude 默认，OpenAI 兼容） |
 | **输入** | B-01 config.py（LLM_API_KEY, LLM_MODEL 等） |
 | **输出物** | `backend/app/engine/llm_client.py` |
-| **验收标准** | 1. `LLMClient` 类支持 `chat(messages, model, stream=True) -> AsyncIterator[str]`<br>2. 默认使用 Anthropic SDK；环境变量 `LLM_PROVIDER=openai` 切换为 OpenAI SDK<br>3. 流式输出 chunk 统一为 `{"type":"text_delta","text":"..."}` 格式<br>4. `LLM_CLASSIFIER_MODEL` 独立配置用于 Intent 分类（默认 Haiku）<br>5. `LLM_MAIN_MODEL` 用于 NL2SQL/诊断/故障排查（默认 Opus）<br>6. token 消耗统计返回给调用方（用于 Session.tokens_used_total 累加）<br>7. API Key 硬编码检查：grep `SK-` / `sk-ant-` 无匹配 |
+| **验收标准** | 1. `LLMClient` 类支持 `chat(messages, model, stream=True) -> AsyncIterator[str]`<br>2. 默认使用 Anthropic SDK；环境变量 `LLM_PROVIDER=openai` 切换为 OpenAI SDK<br>3. 流式输出 chunk 统一为 `{"type":"text_delta","text":"..."}` 格式<br>4. `LLM_CLASSIFIER_MODEL` 独立配置用于 Intent 分类（默认 Haiku）<br>5. `LLM_MAIN_MODEL` 用于 NL2SQL/诊断/故障排查（默认 Opus）<br>6. token 消耗统计返回给调用方（用于 Session.tokens_used_total 累加）<br>7. API Key 硬编码检查：grep `SK-` / `sk-ant-` 无匹配<br>8. **可观测性**：每次 LLM 调用记录 model、prompt 长度、响应 token 数、耗时（ms）；异常时记录错误类型和状态码 |
 | **前置依赖** | B-01 |
 | **继承 TODO** | 无 |
 | **状态** | 计划中 |
@@ -432,7 +432,7 @@
 | **关联契约** | backend AGENTS.md §验证与测试要求（每个适配器类型至少一个集成测试） |
 | **输入** | B-05 MySQLAdapter |
 | **输出物** | `backend/tests/test_adapter_mysql.py`、`backend/tests/conftest.py`（共享 fixtures） |
-| **验收标准** | 1. `conftest.py` 提供 `mysql_test_config` fixture（从环境变量 `TEST_MYSQL_URL` 读取）<br>2. `test_mysql_connect()`：连接成功返回 True<br>3. `test_mysql_get_tables()`：返回非空表列表<br>4. `test_mysql_get_columns()`：指定表返回列列表含 name/type/is_primary 字段<br>5. `test_mysql_execute_select()`：SELECT 1 返回 `{"columns":["1"],"rows":[[1]]}`<br>6. `test_mysql_explain()`：EXPLAIN SELECT 1 返回非空字符串<br>7. 所有测试可通过 `pytest -m "integration" --no-header -q` 运行<br>8. 连接到测试数据库失败时 SKIP 而非 FAIL（`pytest.skip("TEST_MYSQL_URL not configured")`） |
+| **验收标准** | 1. `conftest.py` 提供 `mysql_test_config` fixture（从环境变量 `TEST_MYSQL_URL` 读取）<br>2. `test_mysql_connect()`：连接成功返回 True<br>3. `test_mysql_get_tables()`：返回非空表列表<br>4. `test_mysql_get_columns()`：指定表返回列列表含 name/type/is_primary 字段<br>5. `test_mysql_execute_select()`：SELECT 1 返回 `{"columns":["1"],"rows":[[1]]}`<br>6. `test_mysql_explain()`：EXPLAIN SELECT 1 返回非空字符串<br>7. 所有测试可通过 `pytest -m "integration" --no-header -q` 运行<br>8. 连接到测试数据库失败时 SKIP 而非 FAIL（`pytest.skip("TEST_MYSQL_URL not configured")`）<br>9. **可观测性**：集成测试中验证适配器日志输出——connect/execute/disconnect 产生的 structlog 可在测试中捕获和断言 |
 | **前置依赖** | B-05 |
 | **继承 TODO** | 无 |
 | **状态** | 计划中 |
@@ -448,14 +448,28 @@
 | **关联契约** | backend AGENTS.md §验证与测试要求（每个 API 端点至少一个 pytest 测试） |
 | **输入** | B-08-B-25 全部 API 端点 |
 | **输出物** | `backend/tests/test_api_connections.py`、`backend/tests/test_api_chat.py`、`backend/tests/test_api_health.py`、`backend/tests/test_api_troubleshoot.py` |
-| **验收标准** | 1. `test_create_connection_201()`：POST /api/connections 返回 201<br>2. `test_create_connection_invalid_db_type_422()`：POST 非法 db_type 返回 422<br>3. `test_test_connection_200()`：POST /connections/{id}/test 返回 success=true<br>4. `test_execute_query_audit_blocked()`：POST /connections/{id}/query 含 DROP 返回 400<br>5. `test_chat_stream_200()`：POST /api/chat/stream 返回 SSE 流，首个事件 type=thinking<br>6. `test_chat_cancel_204()`：POST /api/chat/cancel 返回 204<br>7. `test_health_check_sse()`：巡检 SSE 流以 health_result 事件结束<br>8. `test_session_timeout()`：模拟 30min 无操作后 session status 变为 closed<br>9. 全链路测试使用 `httpx.AsyncClient` + `pytest-asyncio` |
+| **验收标准** | 1. `test_create_connection_201()`：POST /api/connections 返回 201<br>2. `test_create_connection_invalid_db_type_422()`：POST 非法 db_type 返回 422<br>3. `test_test_connection_200()`：POST /connections/{id}/test 返回 success=true<br>4. `test_execute_query_audit_blocked()`：POST /connections/{id}/query 含 DROP 返回 400<br>5. `test_chat_stream_200()`：POST /api/chat/stream 返回 SSE 流，首个事件 type=thinking<br>6. `test_chat_cancel_204()`：POST /api/chat/cancel 返回 204<br>7. `test_health_check_sse()`：巡检 SSE 流以 health_result 事件结束<br>8. `test_session_timeout()`：模拟 30min 无操作后 session status 变为 closed<br>9. 全链路测试使用 `httpx.AsyncClient` + `pytest-asyncio`<br>10. **可观测性**：全链路测试中验证日志传播——请求 X-Request-ID 在 structlog 日志中出现，可追溯完整调用链 |
 | **前置依赖** | B-19、B-21、B-22、B-23、B-24 |
 | **继承 TODO** | api-contract T-1（响应格式按方案 C 验证）、T-3（当前无鉴权头） |
 | **状态** | 计划中 |
 
 ---
 
-## 任务依赖拓扑图
+## B-29：可观测性基础设施——链路追踪与结构化日志
+
+| 字段 | 内容 |
+|------|------|
+| **ID** | B-29 |
+| **标题** | 全链路追踪（contextvars）+ 结构化日志（structlog）+ 访问日志中间件 |
+| **关联契约** | AGENTS.md §安全与合规红线（敏感字段日志掩盖）、AGENTS.md §API 与数据契约（X-Request-ID 透传） |
+| **输入** | 已完成的 B-01~B-18 全部代码 |
+| **输出物** | `backend/app/correlation.py`、`backend/app/log_setup.py` |
+| **修改文件** | `backend/app/config.py`（日志配置字段）、`backend/app/main.py`（中间件增强）、`backend/.env.example`（日志配置项）、`backend/app/db/base.py`、`backend/app/db/mysql.py`、`backend/app/db/postgresql.py`、`backend/app/db/oracle.py`、`backend/app/agent/router.py`、`backend/app/agent/graph.py`、`backend/app/engine/sql_auditor.py`、`backend/app/engine/nl2sql.py`、`backend/app/engine/diagnosis.py`、`backend/app/engine/health_check.py`、`backend/app/agent/tools/query.py`、`backend/app/agent/tools/diagnosis.py`、`backend/app/agent/tools/troubleshoot.py`、`backend/app/agent/tools/health.py`、`backend/app/api/connection.py` |
+| **验收标准** | 1. `RequestIDMiddleware` 将 X-Request-ID 写入 contextvars（trace_id_var），全链路 structlog 自动绑定<br>2. `AccessLogMiddleware` 记录每个 HTTP 请求的 method/path/status_code/duration_ms<br>3. 所有适配器 connect/execute/disconnect 方法带有结构化日志，password 不出现在日志中<br>4. 所有引擎函数（audit/nl2sql/diagnosis/health_check）入口和出口带有日志<br>5. 所有 @tool 函数调用带有日志，异常时记录 traceback<br>6. 所有 API 端点入口和出口带有日志<br>7. 日志敏感字段掩盖（password/token/secret 自动替换为 "***"）<br>8. SQL 日志截断至 200 字符，不记录实际数据行<br>9. `.env` 支持 `LOG_LEVEL`/`LOG_FORMAT`/`LOG_FILE` 配置<br>10. `ruff check --select E,F,I,N,UP,B,SIM` 零错误 |
+| **前置依赖** | B-01（main.py 中间件）、B-05/B-06/B-07（适配器层插桩） |
+| **状态** | 已完成 |
+
+---
 
 ```
 B-01 ──────────────────────────────────────────────────┐

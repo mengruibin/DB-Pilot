@@ -15,11 +15,14 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
+import structlog
 from langgraph.graph import END, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
 from app.agent.router import IntentRouter
 from app.agent.state import AgentState, Intent
+
+logger = structlog.get_logger(__name__)
 
 # =============================================================================
 # 路由判断函数
@@ -58,6 +61,8 @@ def classify_node(state: AgentState) -> dict[str, Any]:
     user_message = state.get("user_message", "")
     intent = router.classify(user_message)
 
+    logger.info("图节点执行", node="classify_node", intent=intent.value)
+
     # 将用户消息追加到 messages
     new_messages = list(state.get("messages", []))
     new_messages.append({
@@ -77,6 +82,9 @@ def nl2sql_node(state: AgentState) -> dict[str, Any]:
     调用工具：list_tables → describe_table → run_query。
     实际工具调用由 B-13/B-17 实现，当前为骨架。
     """
+    intent = state.get("intent", "")
+    logger.info("图节点执行", node="nl2sql_node", intent=intent.value if intent else "unknown")
+
     messages = list(state.get("messages", []))
     messages.append({
         "type": "thinking",
@@ -94,6 +102,9 @@ def diagnosis_node(state: AgentState) -> dict[str, Any]:
     调用工具：get_slow_queries → explain_query。
     实际工具调用由 B-14/B-18 实现。
     """
+    intent = state.get("intent", "")
+    logger.info("图节点执行", node="diagnosis_node", intent=intent.value if intent else "unknown")
+
     messages = list(state.get("messages", []))
     messages.append({
         "type": "thinking",
@@ -111,6 +122,10 @@ def troubleshoot_node(state: AgentState) -> dict[str, Any]:
     调用工具：check_connections → check_locks → check_replication。
     实际工具调用由 B-15 实现。
     """
+    intent = state.get("intent", "")
+    intent_val = intent.value if intent else "unknown"
+    logger.info("图节点执行", node="troubleshoot_node", intent=intent_val)
+
     messages = list(state.get("messages", []))
     messages.append({
         "type": "thinking",
@@ -128,6 +143,9 @@ def healthcheck_node(state: AgentState) -> dict[str, Any]:
     调用 HealthCheckEngine 执行 20 项检查。
     实际检查逻辑由 B-16 实现。
     """
+    intent = state.get("intent", "")
+    logger.info("图节点执行", node="healthcheck_node", intent=intent.value if intent else "unknown")
+
     messages = list(state.get("messages", []))
     messages.append({
         "type": "thinking",
@@ -144,6 +162,9 @@ def general_node(state: AgentState) -> dict[str, Any]:
 
     处理非数据库操作类问题（如帮助信息、闲聊）。
     """
+    intent = state.get("intent", "")
+    logger.info("图节点执行", node="general_node", intent=intent.value if intent else "unknown")
+
     messages = list(state.get("messages", []))
     messages.append({
         "type": "thinking",
@@ -170,6 +191,8 @@ def format_response(state: AgentState) -> dict[str, Any]:
     将工具调用结果和 LLM 输出组装为 SSE 事件序列。
     实际格式化逻辑由 B-19 SSE 端点实现。
     """
+    logger.info("图节点执行", node="format_response")
+
     messages = list(state.get("messages", []))
     # 添加 done 标记
     messages.append({

@@ -11,10 +11,12 @@
 from __future__ import annotations
 
 import html
+import time
 import uuid
 from datetime import UTC, datetime
 from typing import Any
 
+import structlog
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -28,6 +30,8 @@ from app.models.schemas import (
     ConnectionResponse,
     ConnectionUpdateRequest,
 )
+
+logger = structlog.get_logger(__name__)
 
 router = APIRouter(prefix="/api/connections", tags=["Connections"])
 
@@ -66,6 +70,8 @@ async def list_connections(
     connections = result.scalars().all()
 
     items = [ConnectionResponse.model_validate(c) for c in connections]
+    logger.info("API 请求完成", endpoint="list_connections",
+                 total=total, page=page, page_size=actual_page_size)
     return ConnectionListResponse(
         items=items,
         total=total,
@@ -110,6 +116,8 @@ async def create_connection(
     await session.commit()
     await session.refresh(db_conn)
 
+    logger.info("API 请求完成", endpoint="create_connection",
+                 connection_id=conn_id, name=body.name)
     return ConnectionResponse.model_validate(db_conn)
 
 
@@ -133,6 +141,8 @@ async def get_connection(
     )
     db_conn = result.scalar_one_or_none()
     if db_conn is None:
+        logger.warning("API 请求失败", endpoint="get_connection",
+                        connection_id=connection_id, reason="not_found")
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail={
@@ -140,6 +150,8 @@ async def get_connection(
                 "user_message": f"连接 {connection_id} 不存在或已删除",
             },
         )
+    logger.info("API 请求完成", endpoint="get_connection",
+                 connection_id=connection_id)
     return ConnectionResponse.model_validate(db_conn)
 
 
@@ -163,6 +175,8 @@ async def update_connection(
     )
     db_conn = result.scalar_one_or_none()
     if db_conn is None:
+        logger.warning("API 请求失败", endpoint="update_connection",
+                        connection_id=connection_id, reason="not_found")
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail={
@@ -181,6 +195,8 @@ async def update_connection(
 
     await session.commit()
     await session.refresh(db_conn)
+    logger.info("API 请求完成", endpoint="update_connection",
+                 connection_id=connection_id)
     return ConnectionResponse.model_validate(db_conn)
 
 
@@ -203,6 +219,8 @@ async def delete_connection(
     )
     db_conn = result.scalar_one_or_none()
     if db_conn is None:
+        logger.warning("API 请求失败", endpoint="delete_connection",
+                        connection_id=connection_id, reason="not_found")
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail={
@@ -213,6 +231,8 @@ async def delete_connection(
 
     await session.delete(db_conn)
     await session.commit()
+    logger.info("API 请求完成", endpoint="delete_connection",
+                 connection_id=connection_id)
     # 返回 204（无响应体）
 
 
@@ -233,7 +253,6 @@ async def test_connection(
     失败时更新 status=unreachable（AC-4, AC-5）。
     错误信息不包含密码（frontend AGENTS.md §2）。
     """
-    import time
 
     # 从数据库获取连接配置
     result = await session.execute(
@@ -241,6 +260,8 @@ async def test_connection(
     )
     db_conn = result.scalar_one_or_none()
     if db_conn is None:
+        logger.warning("API 请求失败", endpoint="test_connection",
+                        connection_id=connection_id, reason="not_found")
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail={
@@ -277,6 +298,9 @@ async def test_connection(
         await session.commit()
 
         caps = adapter.get_capabilities()
+        logger.info("API 请求完成", endpoint="test_connection",
+                     connection_id=connection_id, success=True,
+                     latency_ms=latency_ms)
         return {
             "success": True,
             "latency_ms": latency_ms,
@@ -294,6 +318,9 @@ async def test_connection(
         db_conn.status = "unreachable"
         db_conn.last_tested_at = datetime.now(UTC)
         await session.commit()
+
+        logger.warning("API 请求完成", endpoint="test_connection",
+                        connection_id=connection_id, success=False)
 
         return {
             "success": False,
@@ -324,6 +351,8 @@ async def get_metadata(
     )
     db_conn = result.scalar_one_or_none()
     if db_conn is None:
+        logger.warning("API 请求失败", endpoint="get_metadata",
+                        connection_id=connection_id, reason="not_found")
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail={
@@ -406,11 +435,17 @@ async def get_metadata(
         # 使用 Starlette Response 添加 Cache-Control 头
         from fastapi.responses import JSONResponse
 
+        logger.info("API 请求完成", endpoint="get_metadata",
+                     connection_id=connection_id,
+                     databases=len(result_data.get("databases", [])),
+                     tables=len(result_data.get("tables", [])))
         response = JSONResponse(content=result_data)
         response.headers["Cache-Control"] = "private, max-age=300"
         return response
 
     except Exception as exc:
+        logger.warning("API 请求失败", endpoint="get_metadata",
+                        connection_id=connection_id, error=str(exc)[:200])
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail={

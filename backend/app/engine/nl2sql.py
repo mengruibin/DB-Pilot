@@ -15,13 +15,18 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from typing import Any
 
 import httpx
+import structlog
 
 from app.config import settings
 from app.engine.sql_auditor import audit
 from app.prompts.nl2sql import build_nl2sql_prompt
+
+logger = structlog.get_logger(__name__)
+
 
 # =============================================================================
 # 常量
@@ -159,6 +164,7 @@ def _extract_sql(text: str) -> tuple[str, str]:
 
     # 无代码块时，将整段文本作为 SQL 尝试
     # SAFETY: 后续 audit() 会拦截危险操作
+    logger.info("NL2SQL 未找到SQL代码块", response_length=len(text))
     return "", text
 
 
@@ -212,12 +218,18 @@ async def generate_sql(
         )
 
         # Step 2: 调用 LLM
+        logger.info("NL2SQL 开始生成", query=natural_language[:100],
+                     connection_id=connection_id, db_type=db_type)
+        start_time = time.monotonic()
         llm_response = await _call_llm(system_prompt, user_prompt)
+        elapsed = time.monotonic() - start_time
 
         # Step 3: 提取 SQL
         sql, explanation = _extract_sql(llm_response)
 
         if not sql:
+            logger.warning("NL2SQL 未生成SQL", connection_id=connection_id,
+                           query=natural_language[:100], elapsed_ms=round(elapsed * 1000))
             return {
                 "error": "NL2SQL generation failed",
                 "detail": "LLM 响应中未生成有效的 SQL",
@@ -228,6 +240,9 @@ async def generate_sql(
         audit_result = audit(sql, db_type=db_type, user_role="standard")
 
         if not audit_result.passed:
+            logger.warning("NL2SQL 审计拦截", connection_id=connection_id,
+                           sql=sql[:200],
+                           violations=[v.type for v in audit_result.violations])
             return {
                 "sql": sql,
                 "explanation": explanation,
@@ -240,6 +255,9 @@ async def generate_sql(
             }
 
         # Step 5: 返回结果
+        logger.info("NL2SQL 生成成功", connection_id=connection_id,
+                     elapsed_ms=round(elapsed * 1000),
+                     audit_status="passed", is_readonly=audit_result.is_readonly)
         return {
             "sql": sql,
             "explanation": explanation,
@@ -249,6 +267,8 @@ async def generate_sql(
 
     except TimeoutError:
         # AC-6: LLM 调用超时 15s
+        logger.warning("NL2SQL 超时", connection_id=connection_id,
+                       query=natural_language[:100])
         return {
             "error": "NL2SQL generation timeout",
             "detail": "LLM 调用超过 15 秒未响应，请重试或简化查询",

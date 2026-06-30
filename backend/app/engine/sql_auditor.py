@@ -17,7 +17,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 import sqlglot
+import structlog
 from sqlglot import exp
+
+logger = structlog.get_logger(__name__)
+
 
 # =============================================================================
 # 数据类型
@@ -160,11 +164,20 @@ def audit(
     # Step 4: 判定只读
     is_readonly = not has_ddl and not has_dml_non_select and len(violations) == 0
 
-    return AuditResult(
+    result = AuditResult(
         passed=len(violations) == 0,
         is_readonly=is_readonly,
         violations=violations,
     )
+
+    if result.passed:
+        logger.info("SQL审计通过", sql=sql[:200], db_type=db_type, user_role=user_role)
+    else:
+        logger.warning("SQL审计拦截", sql=sql[:200], db_type=db_type,
+                       user_role=user_role,
+                       violations=[v.type for v in result.violations])
+
+    return result
 
 
 # =============================================================================
