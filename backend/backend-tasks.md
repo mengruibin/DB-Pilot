@@ -227,7 +227,7 @@
 | **验收标准** | 1. `explain_query(connection_id: str, sql: str, format: str = "tree") -> dict`：先审计 SQL，通过后调适配器 `explain()`，返回 `{"explain_output":"...","format":"tree"}`<br>2. 如适配器 `supports_explain=False`，返回 `{"error":"该数据库类型不支持 EXPLAIN"}`<br>3. `get_slow_queries(connection_id: str, time_range: str = "1h", limit: int = 20) -> dict`：调用适配器 `get_slow_queries()`，返回 `{"items":[...],"total":<int>}`<br>4. 异常返回 `{"error":"...","detail":"..."}` |
 | **前置依赖** | B-13（共用适配器连接池） |
 | **继承 TODO** | api-contract T-8（慢查询阈值联动——当前固定 limit=20） |
-| **状态** | 计划中 |
+| **状态** | 已完成 |
 
 ---
 
