@@ -1,0 +1,66 @@
+[project]
+# 项目元数据
+name = "db-pilot"
+version = "0.1.0"
+description = "DB-Pilot: AI 驱动的数据库运维助手"
+requires-python = ">=3.12"  # AGENTS.md 要求 Python 3.12+（PEP 695 类型参数语法）
+license = { text = "MIT" }
+readme = "../README.md"
+authors = [
+    { name = "DB-Pilot Team" },
+]
+keywords = ["database", "ai", "agent", "dba", "langgraph"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: System Administrators",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Database",
+]
+
+# 核心依赖（版本约束与 AGENTS.md §技术栈约束 一致）
+dependencies = [
+    "fastapi>=0.115.0",           # REST + SSE API 框架（PRD §6.1）
+    "uvicorn[standard]>=0.30.0",  # ASGI 服务器
+    "langgraph>=0.3.0",           # Agent 状态图编排（PRD §6.1）
+    "sqlalchemy>=2.0.0",         # 内部 ORM（会话/连接配置持久化，PRD §6.1）
+    "pydantic>=2.0",             # 请求/响应模型 + 配置管理（PRD §6.1）
+    "pydantic-settings>=2.0",    # 从 .env/环境变量加载 Settings
+    "sqlglot>=25.0.0",           # 多方言 SQL 解析与安全审计（PRD §6.1, §8.1）
+    "httpx>=0.27.0",             # 异步 HTTP 客户端（替代同步 requests，AGENTS.md §禁止项）
+    "python-dotenv>=1.0.0",      # .env 文件加载
+    "aiosqlite>=0.20.0",         # 异步 SQLite 驱动（SQLAlchemy async 需要）
+    "alembic>=1.13.0",           # 数据库迁移管理（B-02 引入）
+]
+
+[project.optional-dependencies]
+# 开发依赖
+dev = [
+    "ruff>=0.5.0",              # Python linter（AGENTS.md §验证与测试要求）
+    "pytest>=8.0.0",            # 测试框架
+    "pytest-asyncio>=0.23.0",   # 异步测试支持
+]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+extend-exclude = ["alembic/", ".venv/", "__pycache__/"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "UP", "B", "SIM"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["app"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[tool.setuptools.packages.find]
+include = ["app*"]
