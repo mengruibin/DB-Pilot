@@ -13,15 +13,13 @@ NL2SQL 引擎——自然语言转 SQL。
 
 from __future__ import annotations
 
-import json
 import re
 import time
 from typing import Any
 
-import httpx
 import structlog
 
-from app.config import settings
+from app.engine.llm_client import LLMClient
 from app.engine.sql_auditor import audit
 from app.prompts.nl2sql import build_nl2sql_prompt
 
@@ -32,9 +30,7 @@ logger = structlog.get_logger(__name__)
 # 常量
 # =============================================================================
 
-_ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
-_ANTHROPIC_VERSION = "2023-06-01"
-"""Anthropic Messages API 版本号"""
+# LLM 调用通过统一的 LLMClient（B-26），不再在此处硬编码 API URL。
 
 _DEFAULT_MAX_TOKENS = 1024
 """LLM 响应的最大 token 数"""
@@ -53,72 +49,11 @@ _DIALECT_LABELS: dict[str, str] = {
 }
 
 
-# =============================================================================
-# LLM 调用
-# =============================================================================
-
-
 def _get_dialect_label(db_type: str) -> str:
     """获取数据库类型的显示标签。"""
     return _DIALECT_LABELS.get(db_type, db_type.upper())
 
 
-async def _call_llm(
-    system_prompt: str,
-    user_prompt: str,
-) -> str:
-    """调用 Anthropic Messages API 获取 LLM 响应。
-
-    使用 httpx 异步客户端直接调用 Anthropic API。
-    （B-26 LLM Client 就绪后应重构为使用统一客户端）
-
-    Args:
-        system_prompt: 系统提示（角色定义 + 规则）。
-        user_prompt: 用户提示（Schema + 查询）。
-
-    Returns:
-        LLM 响应的文本内容。
-
-    Raises:
-        TimeoutError: LLM 调用超时（>LLM_TIMEOUT_SEC）。
-        RuntimeError: LLM API 返回错误或无法获取有效响应。
-    """
-    headers = {
-        "x-api-key": settings.LLM_API_KEY,
-        "anthropic-version": _ANTHROPIC_VERSION,
-        "content-type": "application/json",
-    }
-    payload = {
-        "model": settings.LLM_MODEL,
-        "max_tokens": _DEFAULT_MAX_TOKENS,
-        "system": system_prompt,
-        "messages": [
-            {"role": "user", "content": user_prompt},
-        ],
-    }
-
-    async with httpx.AsyncClient(timeout=httpx.Timeout(_LLM_TIMEOUT_SEC)) as client:
-        try:
-            response = await client.post(
-                _ANTHROPIC_API_URL,
-                headers=headers,
-                content=json.dumps(payload),
-            )
-        except httpx.TimeoutException as exc:
-            raise TimeoutError("NL2SQL generation timeout") from exc
-
-    if response.status_code != 200:
-        raise RuntimeError(
-            f"LLM API 返回错误（{response.status_code}）：{response.text[:200]}"
-        )
-
-    data = response.json()
-    content_blocks = data.get("content", [])
-    for block in content_blocks:
-        if block.get("type") == "text":
-            return block.get("text", "")
-
-    raise RuntimeError("LLM 响应中未找到文本内容")
 
 
 # =============================================================================
@@ -217,11 +152,18 @@ async def generate_sql(
             user_query=natural_language,
         )
 
-        # Step 2: 调用 LLM
+        # Step 2: 调用 LLM（通过统一 LLMClient，支持自定义 API URL 和 provider 切换）
         logger.info("NL2SQL 开始生成", query=natural_language[:100],
                      connection_id=connection_id, db_type=db_type)
         start_time = time.monotonic()
-        llm_response = await _call_llm(system_prompt, user_prompt)
+        client = LLMClient()
+        resp = await client.chat(
+            messages=[{"role": "user", "content": user_prompt}],
+            system=system_prompt,
+            max_tokens=_DEFAULT_MAX_TOKENS,
+            timeout=_LLM_TIMEOUT_SEC,
+        )
+        llm_response = resp.text
         elapsed = time.monotonic() - start_time
 
         # Step 3: 提取 SQL

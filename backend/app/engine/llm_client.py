@@ -110,6 +110,7 @@ class LLMClient:
         system: str | None = None,
         model: str | None = None,
         max_tokens: int = 1024,
+        timeout: int | None = None,
     ) -> LLMResponse:
         """非流式 LLM 调用（AC-1）。
 
@@ -118,6 +119,7 @@ class LLMClient:
             system: 系统提示词（仅 Anthropic 支持 system 参数）。
             model: 模型名。None 表示用 settings.LLM_MODEL。
             max_tokens: 最大输出 token 数。
+            timeout: 超时秒数。None 表示使用默认值 30s。
 
         Returns:
             LLMResponse 包含响应文本和用量统计。
@@ -137,11 +139,11 @@ class LLMClient:
         try:
             if self._provider == "anthropic":
                 text, usage = await self._call_anthropic(
-                    messages, system, actual_model, max_tokens,
+                    messages, system, actual_model, max_tokens, timeout,
                 )
             else:
                 text, usage = await self._call_openai(
-                    messages, system, actual_model, max_tokens,
+                    messages, system, actual_model, max_tokens, timeout,
                 )
 
             elapsed_ms = int((time.monotonic() - start) * 1000)
@@ -177,6 +179,7 @@ class LLMClient:
         system: str | None = None,
         model: str | None = None,
         max_tokens: int = 1024,
+        timeout: int | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
         """流式 LLM 调用（AC-1, AC-3）。
 
@@ -189,6 +192,7 @@ class LLMClient:
             system: 系统提示词。
             model: 模型名。None 表示用 settings.LLM_MODEL。
             max_tokens: 最大输出 token 数。
+            timeout: 超时秒数。None 表示使用默认值 30s。
 
         Yields:
             标准化流式 chunk。
@@ -206,7 +210,7 @@ class LLMClient:
         try:
             if self._provider == "anthropic":
                 async for chunk in self._stream_anthropic(
-                    messages, system, actual_model, max_tokens,
+                    messages, system, actual_model, max_tokens, timeout,
                 ):
                     if chunk["type"] == "text_delta":
                         collected.append(chunk["text"])
@@ -219,7 +223,7 @@ class LLMClient:
                         yield chunk
             else:
                 async for chunk in self._stream_openai(
-                    messages, system, actual_model, max_tokens,
+                    messages, system, actual_model, max_tokens, timeout,
                 ):
                     if chunk["type"] == "text_delta":
                         collected.append(chunk["text"])
@@ -254,8 +258,11 @@ class LLMClient:
         system: str | None,
         model: str,
         max_tokens: int,
+        timeout: int | None = None,
     ) -> tuple[str, LLMUsage | None]:
         """Anthropic Messages API 非流式调用。"""
+        actual_timeout = timeout or _LLM_TIMEOUT_SEC
+        api_url = settings.LLM_API_URL or _ANTHROPIC_API_URL
         headers = {
             "x-api-key": settings.LLM_API_KEY,
             "anthropic-version": _ANTHROPIC_VERSION,
@@ -270,13 +277,16 @@ class LLMClient:
             payload["system"] = system
 
         async with httpx.AsyncClient(
-            timeout=httpx.Timeout(_LLM_TIMEOUT_SEC),
+            timeout=httpx.Timeout(actual_timeout),
         ) as client:
-            response = await client.post(
-                _ANTHROPIC_API_URL,
-                headers=headers,
-                content=json.dumps(payload),
-            )
+            try:
+                response = await client.post(
+                    api_url,
+                    headers=headers,
+                    content=json.dumps(payload),
+                )
+            except httpx.TimeoutException as exc:
+                raise TimeoutError("Anthropic API 调用超时") from exc
 
         if response.status_code != 200:
             raise RuntimeError(
@@ -295,8 +305,11 @@ class LLMClient:
         system: str | None,
         model: str,
         max_tokens: int,
+        timeout: int | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
         """Anthropic Messages API 流式调用。"""
+        actual_timeout = timeout or _LLM_TIMEOUT_SEC
+        api_url = settings.LLM_API_URL or _ANTHROPIC_API_URL
         headers = {
             "x-api-key": settings.LLM_API_KEY,
             "anthropic-version": _ANTHROPIC_VERSION,
@@ -312,9 +325,9 @@ class LLMClient:
             payload["system"] = system
 
         async with httpx.AsyncClient(
-            timeout=httpx.Timeout(_LLM_TIMEOUT_SEC),
+            timeout=httpx.Timeout(actual_timeout),
         ) as client, client.stream(
-            "POST", _ANTHROPIC_API_URL,
+            "POST", api_url,
             headers=headers,
             content=json.dumps(payload),
         ) as stream:
@@ -373,8 +386,11 @@ class LLMClient:
         system: str | None,
         model: str,
         max_tokens: int,
+        timeout: int | None = None,
     ) -> tuple[str, LLMUsage | None]:
         """OpenAI Chat Completions API 非流式调用。"""
+        actual_timeout = timeout or _LLM_TIMEOUT_SEC
+        api_url = settings.LLM_API_URL or _OPENAI_API_URL
         headers = {
             "authorization": f"Bearer {settings.LLM_API_KEY}",
             "content-type": "application/json",
@@ -388,13 +404,16 @@ class LLMClient:
             payload["messages"].insert(0, {"role": "system", "content": system})
 
         async with httpx.AsyncClient(
-            timeout=httpx.Timeout(_LLM_TIMEOUT_SEC),
+            timeout=httpx.Timeout(actual_timeout),
         ) as client:
-            response = await client.post(
-                _OPENAI_API_URL,
-                headers=headers,
-                content=json.dumps(payload),
-            )
+            try:
+                response = await client.post(
+                    api_url,
+                    headers=headers,
+                    content=json.dumps(payload),
+                )
+            except httpx.TimeoutException as exc:
+                raise TimeoutError("OpenAI API 调用超时") from exc
 
         if response.status_code != 200:
             raise RuntimeError(
@@ -413,8 +432,11 @@ class LLMClient:
         system: str | None,
         model: str,
         max_tokens: int,
+        timeout: int | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
         """OpenAI Chat Completions API 流式调用。"""
+        actual_timeout = timeout or _LLM_TIMEOUT_SEC
+        api_url = settings.LLM_API_URL or _OPENAI_API_URL
         headers = {
             "authorization": f"Bearer {settings.LLM_API_KEY}",
             "content-type": "application/json",
@@ -429,9 +451,9 @@ class LLMClient:
             payload["messages"].insert(0, {"role": "system", "content": system})
 
         async with httpx.AsyncClient(
-            timeout=httpx.Timeout(_LLM_TIMEOUT_SEC),
+            timeout=httpx.Timeout(actual_timeout),
         ) as client, client.stream(
-            "POST", _OPENAI_API_URL,
+            "POST", api_url,
             headers=headers,
             content=json.dumps(payload),
         ) as stream:

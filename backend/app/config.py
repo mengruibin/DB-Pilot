@@ -56,6 +56,12 @@ class Settings(BaseSettings):
         default="anthropic",
         description="LLM 提供方切换：anthropic 或 openai。",
     )
+    LLM_API_URL: str = Field(
+        default="",
+        description="自定义 LLM API URL。为空时使用 provider 默认地址。"
+        "（Anthropic: https://api.anthropic.com/v1/messages, "
+        "OpenAI: https://api.openai.com/v1/chat/completions）",
+    )
 
     # ==================== 内部数据库 ====================
     DATABASE_URL: str = Field(

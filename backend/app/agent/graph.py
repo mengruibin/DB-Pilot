@@ -21,6 +21,7 @@ from langgraph.graph.state import CompiledStateGraph
 
 from app.agent.router import IntentRouter
 from app.agent.state import AgentState, Intent
+from app.engine.llm_client import LLMClient
 
 logger = structlog.get_logger(__name__)
 
@@ -52,14 +53,15 @@ def route_to_engine(state: AgentState) -> Literal[
 # 节点函数
 # =============================================================================
 
-def classify_node(state: AgentState) -> dict[str, Any]:
+async def classify_node(state: AgentState) -> dict[str, Any]:
     """Step 2: 意图分类节点。
 
     调用 IntentRouter 对用户消息进行分类，将结果写入 state.intent。
+    低置信度时通过 LLMClient 调用轻量模型分类。
     """
-    router = IntentRouter()
+    router = IntentRouter(llm_client=LLMClient())
     user_message = state.get("user_message", "")
-    intent = router.classify(user_message)
+    intent = await router.classify(user_message)
 
     logger.info("图节点执行", node="classify_node", intent=intent.value)
 

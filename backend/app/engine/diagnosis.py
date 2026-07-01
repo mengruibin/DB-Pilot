@@ -18,10 +18,9 @@ import re
 import time
 from typing import Any
 
-import httpx
 import structlog
 
-from app.config import settings
+from app.engine.llm_client import LLMClient
 from app.prompts.diagnosis import build_diagnosis_prompt, rule_based_analyze
 
 logger = structlog.get_logger(__name__)
@@ -31,61 +30,12 @@ logger = structlog.get_logger(__name__)
 # 常量
 # =============================================================================
 
-_ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
-_ANTHROPIC_VERSION = "2023-06-01"
+# LLM 调用通过统一的 LLMClient（B-26），不再在此处硬编码 API URL。
 
 _LLM_TIMEOUT_SEC = 15
 """LLM 调用超时时间（与 B-17 NL2SQL 一致）"""
 
 _DEFAULT_MAX_TOKENS = 1024
-
-
-# =============================================================================
-# LLM 调用（与 B-17 保持一致模式，B-26 就绪后可重构为统一客户端）
-# =============================================================================
-
-
-async def _call_llm(
-    system_prompt: str,
-    user_prompt: str,
-) -> str:
-    """调用 Anthropic Messages API 分析 EXPLAIN 输出。"""
-    headers = {
-        "x-api-key": settings.LLM_API_KEY,
-        "anthropic-version": _ANTHROPIC_VERSION,
-        "content-type": "application/json",
-    }
-    payload = {
-        "model": settings.LLM_MODEL,
-        "max_tokens": _DEFAULT_MAX_TOKENS,
-        "system": system_prompt,
-        "messages": [
-            {"role": "user", "content": user_prompt},
-        ],
-    }
-
-    async with httpx.AsyncClient(timeout=httpx.Timeout(_LLM_TIMEOUT_SEC)) as client:
-        try:
-            response = await client.post(
-                _ANTHROPIC_API_URL,
-                headers=headers,
-                content=json.dumps(payload),
-            )
-        except httpx.TimeoutException as exc:
-            raise TimeoutError("Diagnosis LLM analysis timeout") from exc
-
-    if response.status_code != 200:
-        raise RuntimeError(
-            f"LLM API 返回错误（{response.status_code}）：{response.text[:200]}"
-        )
-
-    data = response.json()
-    content_blocks = data.get("content", [])
-    for block in content_blocks:
-        if block.get("type") == "text":
-            return block.get("text", "")
-
-    raise RuntimeError("LLM 响应中未找到文本内容")
 
 
 # =============================================================================
@@ -190,7 +140,14 @@ async def analyze_explain(
             db_type=db_type,
         )
 
-        llm_response = await _call_llm(system_prompt, user_prompt)
+        client = LLMClient()
+        resp = await client.chat(
+            messages=[{"role": "user", "content": user_prompt}],
+            system=system_prompt,
+            max_tokens=_DEFAULT_MAX_TOKENS,
+            timeout=_LLM_TIMEOUT_SEC,
+        )
+        llm_response = resp.text
         elapsed = time.monotonic() - start_time
 
         # Step 2: 解析 LLM 响应

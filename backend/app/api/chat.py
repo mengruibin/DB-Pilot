@@ -29,6 +29,7 @@ from app.agent.router import IntentRouter
 from app.agent.state import Intent
 from app.correlation import set_connection_id
 from app.database import async_session_factory, get_session
+from app.engine.llm_client import LLMClient
 from app.models.connection import ConnectionConfigModel
 from app.models.schemas import (
     ChatRequest,
@@ -719,8 +720,8 @@ async def _stream_events(
             )
 
             # ========== Step 2: 意图分类 ==========
-            router = IntentRouter()
-            intent = router.classify(body.message)
+            router = IntentRouter(llm_client=LLMClient())
+            intent = await router.classify(body.message)
             assistant_content_parts.append(f"分析用户意图：{intent.value}")
 
             yield _format_sse({
