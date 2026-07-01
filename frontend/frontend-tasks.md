@@ -18,7 +18,7 @@
 | **验收标准** | 1. `npm install && npm run dev` 启动成功，浏览器访问 `localhost:5173` 可见空白 AppLayout<br>2. 路由：`/` → ChatView、`/connections` → ConnectionView、`/reports` → ReportView<br>3. Sidebar 常驻左侧，含三个导航项（对话/连接/报告），点击切换路由<br>4. TypeScript 类型文件 `types/chat.ts`/`connection.ts`/`report.ts` 含 api-contract §二 全部实体类型定义，字段名与后端 Pydantic schema 完全一致<br>5. `tsconfig.json` 开启 `strict: true` |
 | **前置依赖** | 无 |
 | **继承 TODO** | frontend AGENTS.md D-1（框架待定——当前按 Vue 3 默认实现）、D-2（UI 库待定——当前按 Naive UI 默认实现）、D-5（状态管理待定——当前按 Pinia 默认实现）、D-7（SSE HTTP 方法——当前按 POST + fetch 实现） |
-| **状态** | 计划中 |
+| **状态** | 已完成 |
 
 ---
 
@@ -34,7 +34,7 @@
 | **验收标准** | 1. `connectionStore.connections` 从 `GET /api/connections` 加载，结果写入 Pinia state<br>2. `connectionStore.activeId` 变更时触发连接测试（POST /api/connections/{id}/test）<br>3. store 内的 `connections` 数组不包含 `password` 字段（API 不返回）<br>4. 页面刷新后从 localStorage 恢复 `connections`，但不恢复 `activeId`——需重新测试连接<br>5. `client.ts` 封装 fetch/axios，自动注入 `X-Request-ID`（UUID v4），统一处理 4xx/5xx 解析 `user_message`<br>6. `connectionStore.status` 映射：`unknown="unknown"`/`healthy="healthy"`/`unreachable="unreachable"`/`degraded="degraded"` |
 | **前置依赖** | F-01 |
 | **继承 TODO** | api-contract T-1（响应信封——当前按方案 C 直接数据体解析） |
-| **状态** | 计划中 |
+| **状态** | 已完成 |
 
 ---
 
@@ -50,7 +50,7 @@
 | **验收标准** | 1. ConnectionList 渲染已保存连接卡片（name/db_type/host:port/database + 🟢🟡🔴 状态灯），空列表展示引导文案<br>2. 卡片点击将 `connectionStore.activeId` 设为此连接 ID<br>3. ConnectionForm 含字段：name（文本框）/ db_type（下拉 mysql\|postgresql\|oracle）/ host / port（自动默认值）/ database / user / password（type=password，autocomplete="off"） / SSL 折叠区<br>4. 密码输入框不自动填充（`autocomplete="new-password"`）<br>5. 编辑已有连接时密码字段始终显示 `••••••••` 占位符，用户不手动修改则不更新密码<br>6. 提交前校验：`name` 非空 1-64 字符；`host` 非空；`port` 1-65535；`db_type` 枚举三者之一<br>7. 创建成功后跳转到连接列表<br>8. 测试按钮调用 `POST /api/connections/{id}/test`，成功显示延迟+版本+capabilities，失败显示 `user_message` 不含密码 |
 | **前置依赖** | F-02 |
 | **继承 TODO** | api-contract §1.1 TODO（是否支持 Unix socket——表单当前仅 TCP 输入） |
-| **状态** | 计划中 |
+| **状态** | 已完成 |
 
 ---
 
@@ -66,7 +66,7 @@
 | **验收标准** | 1. `connectionStore.activeId == null` → 显示灰色 "未连接" 状态<br>2. `status="healthy"` → 🟢 绿色圆点 + `host:port/database` + 悬停 Tooltip 显示最后测试时间<br>3. `status="connecting"` → 🟡 黄色圆点脉冲动画 + "连接中..."<br>4. `status="unreachable"` → 🔴 红色圆点 + "连接断开" + 「重连」按钮<br>5. 状态变化后 UI 在 1 秒内完成切换（`transition: all 0.3s ease`）<br>6. 意外断开（status 从 healthy 变为 unreachable 且非用户主动断开）→ 弹出 Toast 通知持续 5s 自动收起 |
 | **前置依赖** | F-02 |
 | **继承 TODO** | 无 |
-| **状态** | 计划中 |
+| **状态** | 已完成 |
 
 ---
 
@@ -82,7 +82,7 @@
 | **验收标准** | 1. `connect(url, body)` 发起 POST 请求（`method: 'POST', headers: {'Accept': 'text/event-stream'}`），读取 `response.body.getReader()`<br>2. 正确解析 `event: message\ndata: {json}\n\n` 格式，逐条回调 `onEvent(type, payload)`<br>3. 7 种事件类型各有独立回调注册：`onThinking`/`onToolCall`/`onToolResult`/`onSql`/`onResult`/`onError`/`onDone`<br>4. 网络中断时触发 `onDisconnect(reason)` 回调，保留已接收内容<br>5. `onError` 事件触发后自动忽略后续事件——SSE 流中以第一个 error 为准<br>6. 120s 无消息触发超时回调 `onTimeout()`<br>7. `disconnect()` 方法主动关闭连接（调用 `reader.cancel()`）<br>8. 未注册处理分支的 type 打印 console.warn 不崩溃 |
 | **前置依赖** | F-01（依赖 TypeScript 类型） |
 | **继承 TODO** | api-contract T-2（当前 POST + fetch 实现） |
-| **状态** | 计划中 |
+| **状态** | 已完成 |
 
 ---
 
@@ -98,7 +98,7 @@
 | **验收标准** | 1. `chatStore.messages` 为消息数组，每条符合 api-contract §2.2 Message 结构<br>2. `sendMessage(connectionId, message, mode)` 调用 POST /api/chat/stream<br>3. SSE `thinking` → 追加 thinking 类型消息（`role="assistant"`, `content=thinking.text`）<br>4. SSE `tool_call` → 追加 tool_call 类型消息（含 tool/display 展示）<br>5. SSE `tool_result` → 更新对应 tool_call 消息的 status=done + duration_ms<br>6. SSE `sql` → 追加 sql 类型消息（含 sql_content/audit_status/is_readonly）<br>7. SSE `result` → 追加 result 类型消息（含 summary/data_preview/duration_ms）<br>8. SSE `error` → 追加 error 类型消息<br>9. SSE `done` → `isStreaming=false`，更新 `currentSession.id` 和 `tokens_used`<br>10. `isStreaming=true` 期间 InputArea 显示「停止」按钮<br>11. `inputMode` 在 'natural_language'/'sql_editor' 间切换，持久化到 localStorage |
 | **前置依赖** | F-05 |
 | **继承 TODO** | 无 |
-| **状态** | 计划中 |
+| **状态** | 已完成 |
 
 ---
 
@@ -114,7 +114,7 @@
 | **验收标准** | 1. MessageList 使用虚拟滚动（消息超过 50 条时仅渲染可视区域 ± 5 条）<br>2. MessageBubble 根据 `message.type` 分发：`natural_language`→纯文本气泡 / `sql`→SqlBlock / `result`→ResultTable / `thinking`→可折叠推理区 / `tool_call`→步骤卡片 / `error`→ErrorCard<br>3. thinking 内容默认折叠，显示"正在思考..."标题 + 实时耗时计数器（毫秒递增）<br>4. tool_call 步骤以列表形式展示，已完成标记 ✅ + 耗时，进行中显示加载动画<br>5. SSE 流进行中时，最后一条 assistant 消息显示打字光标闪烁<br>6. 新消息到来时自动滚动到底部（若用户未手动向上滚动超过 200px） |
 | **前置依赖** | F-06（chatStore）、F-08（SqlBlock）、F-09（ResultTable）、F-12（ErrorCard）——组件级依赖可通过 stub 先降级 |
 | **继承 TODO** | 无 |
-| **状态** | 计划中 |
+| **状态** | 已完成 |
 
 ---
 
@@ -130,7 +130,7 @@
 | **验收标准** | 1. SQL 文本以语法高亮渲染（关键字蓝色、字符串绿色、数字橙色、注释灰色），使用 Monaco Editor 只读 diff 视图或 Prism.js SQL grammar<br>2. `is_readonly: false` 时 SQL 块顶部显示 🟡 "此操作将修改数据" 警告条<br>3. `audit_status: "rejected"` 时 SQL 块红色边框 + "SQL 审计未通过：<原因>"<br>4. 复制按钮：点击复制 SQL 全文到剪贴板<br>5. 若 SQL 含存在凭据字面量模式（如 `IDENTIFIED BY 'xxx'`），渲染时已将凭据部分替换为 `'***'` 展示（依据 frontend AGENTS.md §2）<br>6. 危险关键字（DROP/DELETE/TRUNCATE/ALTER/UPDATE）以红色波浪线标注（视觉警告 ≠ 自动阻止） |
 | **前置依赖** | F-01 |
 | **继承 TODO** | frontend AGENTS.md D-3（代码编辑器选型——当前使用 Prism.js 轻量方案，Monaco 后续懒加载引入） |
-| **状态** | 计划中 |
+| **状态** | 已完成 |
 
 ---
 
@@ -374,9 +374,9 @@ F-01 ─────────────────────────
 
 | 状态 | 后端任务 | 前端任务 | 合计 |
 |------|---------|---------|------|
-| 计划中 | 28 | 21 | 49 |
+| 计划中 | 28 | 13 | 41 |
 | 开发中 | 0 | 0 | 0 |
-| 已完成 | 0 | 0 | 0 |
+| 已完成 | 0 | 8 | 8 |
 | 已验收 | 0 | 0 | 0 |
 
 ### 后端按 Phase 分组
