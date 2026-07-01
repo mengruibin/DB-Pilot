@@ -491,7 +491,7 @@ data: {"type":"diagnosis","conclusion":"事务 #82491 长时间未提交导致�
 
 **约束**：
 - [ ] MUST `name` 在单个用户/会话范围内唯一
-- [ ] MUST `password` 字段在服务端仅存于内存，不序列化到 SQLite（依据 PRD §8.2）
+- [ ] MUST `password` 字段在服务端仅存于内存，不持久化到数据库（依据 PRD §8.2）
 - [ ] MUST `db_type` 校验枚举值，拒绝未支持的类型
 
 #### ConnectionStatus（依据 PRD §6.2 `get_connections_status()`）

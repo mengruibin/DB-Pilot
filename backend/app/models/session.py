@@ -7,14 +7,18 @@ Session 与 Message ORM 模型。
 
 from __future__ import annotations
 
+import asyncio
 import uuid
-from datetime import datetime
+from contextlib import suppress
+from datetime import UTC, datetime
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, func
-from sqlalchemy.dialects.sqlite import JSON as SQLITE_JSON
+import structlog
+from sqlalchemy import JSON, DateTime, ForeignKey, Integer, String, Text, func, select
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from app.database import Base
+from app.database import Base, async_session_factory
+
+logger = structlog.get_logger(__name__)
 
 
 class SessionModel(Base):
@@ -112,11 +116,11 @@ class MessageModel(Base):
     )
     # 查询结果预览（JSON，最多 20 行），AGENTS.md §数据隐私
     result_preview: Mapped[dict | None] = mapped_column(
-        SQLITE_JSON, nullable=True, default=None,
+        JSON, nullable=True, default=None,
     )
     # 错误信息：{"error_code": "...", "user_message": "..."}
     error_info: Mapped[dict | None] = mapped_column(
-        SQLITE_JSON, nullable=True, default=None,
+        JSON, nullable=True, default=None,
     )
     # 消息创建时间
     created_at: Mapped[datetime] = mapped_column(
@@ -134,3 +138,85 @@ class MessageModel(Base):
 
     def __repr__(self) -> str:
         return f"<Message id={self.id!r} role={self.role!r} type={self.message_type!r}>"
+
+
+# =============================================================================
+# SessionManager：会话生命周期管理（B-24）
+# =============================================================================
+
+
+class SessionManager:
+    """会话生命周期管理器。
+
+    负责后台扫描并关闭超时空闲会话（30min 无活跃）。
+    依据 PRD §8.2：会话空闲 30 分钟后自动 status = "closed"。
+    依据 AGENTS.md §安全与合规红线：会话超时清理。
+    """
+
+    def __init__(self) -> None:
+        self._task: asyncio.Task | None = None
+        self._stop_event = asyncio.Event()
+
+    def start(self) -> None:
+        """启动后台空闲会话清理任务（由 app lifespan 调用）。"""
+        self._stop_event.clear()
+        self._task = asyncio.create_task(self._cleanup_loop())
+        logger.info("SessionManager 已启动")
+
+    async def stop(self) -> None:
+        """停止后台清理任务（由 app lifespan 调用）。"""
+        self._stop_event.set()
+        if self._task and not self._task.done():
+            self._task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self._task
+        logger.info("SessionManager 已停止")
+
+    async def _cleanup_loop(self) -> None:
+        """后台循环：每 60s 扫描一次空闲会话（AC-1）。"""
+        while not self._stop_event.is_set():
+            try:
+                await self._close_idle_sessions()
+                # 等待 60s，或被 stop_event 中断
+                await asyncio.wait_for(self._stop_event.wait(), timeout=60)
+            except TimeoutError:
+                continue  # 超时 = 60s 到达，继续下一轮扫描
+            except Exception:
+                logger.exception("SessionManager 清理循环异常")
+                await asyncio.sleep(60)
+
+    async def _close_idle_sessions(self) -> None:
+        """查询并关闭超时空闲会话（AC-2）。
+
+        扫描 `status="active"` 且 `last_active_at < NOW() - 30min` 的会话，
+        更新 status 为 "closed"。
+        """
+        from datetime import timedelta
+
+        cutoff = datetime.now(UTC) - timedelta(minutes=30)
+
+        async with async_session_factory() as db:
+            try:
+                result = await db.execute(
+                    select(SessionModel).where(
+                        SessionModel.status == "active",
+                        SessionModel.last_active_at < cutoff,
+                    )
+                )
+                sessions = result.scalars().all()
+
+                for s in sessions:
+                    s.status = "closed"
+                    s.last_active_at = datetime.now(UTC)
+
+                await db.commit()
+
+                if sessions:
+                    # AC-6：可观测性——记录清理数量和 session ID 列表
+                    logger.info("空闲会话已清理", count=len(sessions),
+                                ids=[s.id for s in sessions])
+                else:
+                    logger.debug("空闲会话扫描完毕，无超时会话")
+            except Exception:
+                await db.rollback()
+                logger.exception("空闲会话清理异常")

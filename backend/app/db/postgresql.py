@@ -13,8 +13,12 @@ from __future__ import annotations
 
 from typing import Any
 
+import structlog
+
 from app.db.base import AdapterCapabilities, BaseAdapter
 from app.models.schemas import ConnectionCreateRequest
+
+logger = structlog.get_logger("app.db.postgresql")
 
 # SAFETY: asyncpg 在 connect() 时懒加载，不在模块层级 import
 _ASYNCPG_AVAILABLE: bool = False
@@ -72,10 +76,16 @@ class PostgresAdapter(BaseAdapter):
             async with self._pool.acquire() as conn:
                 await conn.execute("SELECT 1")
             self._connected = True
+            logger.info("PostgreSQL 连接成功",
+                        host=config.host, port=config.port,
+                        database=config.database)
             return True
 
         except Exception as exc:
             self._connected = False
+            logger.warning("PostgreSQL 连接失败",
+                           host=config.host, port=config.port,
+                           error=str(exc)[:100])
             # SAFETY: 连接失败异常消息仅包含 host:port
             raise ConnectionError(
                 f"PostgreSQL 连接失败 [{config.host}:{config.port}]"
@@ -87,6 +97,7 @@ class PostgresAdapter(BaseAdapter):
         if self._pool is not None:
             await self._pool.close()
             self._pool = None
+            logger.debug("PostgreSQL 连接已关闭")
         self._connected = False
 
     async def test_connection(self) -> bool:
@@ -130,6 +141,9 @@ class PostgresAdapter(BaseAdapter):
                 columns = list(rows[0].keys()) if rows else []
 
             elapsed = int((time.monotonic() - start) * 1000)
+            logger.debug("PostgreSQL 查询完成",
+                         sql=sql[:200], execution_time_ms=elapsed,
+                         rows_returned=len(rows))
             return {
                 "columns": columns,
                 "rows": [list(row.values()) for row in rows],
@@ -140,8 +154,10 @@ class PostgresAdapter(BaseAdapter):
             }
 
         except TimeoutError:
+            logger.warning("PostgreSQL 查询超时", sql=sql[:200])
             raise TimeoutError("PostgreSQL 查询超时（>30s）") from None
         except Exception as exc:
+            logger.error("PostgreSQL 查询异常", sql=sql[:200], error=str(exc)[:200])
             raise ValueError(f"SQL 执行错误：{exc}") from exc
 
     # ================== 元数据 ==================
@@ -300,6 +316,7 @@ class PostgresAdapter(BaseAdapter):
         except Exception as exc:
             err_msg = str(exc).lower()
             if "pg_stat_statements" in err_msg or "does not exist" in err_msg:
+                logger.warning("慢查询日志不可访问", error=str(exc)[:100])
                 return {
                     "items": [],
                     "warning": "pg_stat_statements 扩展未安装或权限不足，"
@@ -314,6 +331,7 @@ class PostgresAdapter(BaseAdapter):
         仅获取执行计划，不实际执行查询。
         """
         result = await self.execute(f"EXPLAIN (FORMAT JSON, ANALYZE false) {sql}")
+        logger.debug("PostgreSQL EXPLAIN 完成", sql=sql[:200])
         return {
             "explain_output": result["rows"][0][0] if result["rows"] else "",
             "format": "json",

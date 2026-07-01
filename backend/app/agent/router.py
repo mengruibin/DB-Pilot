@@ -3,7 +3,7 @@
 
 使用两层策略：
   1. 快速规则匹配（关键词正则，置信度 >0.8 时直接返回）
-  2. 低置信度时调用 Haiku 轻量模型（通过 LLMClient）分类
+  2. 低置信度时调用轻量模型（通过 LLMClient）分类
 
 依据 PRD §6.3 意图路由流程。
 """
@@ -13,7 +13,13 @@ from __future__ import annotations
 import re
 from typing import Any
 
+import structlog
+
 from app.agent.state import Intent
+from app.config import settings
+from app.engine.llm_client import LLMClient
+
+logger = structlog.get_logger(__name__)
 
 # =============================================================================
 # 关键词规则定义
@@ -82,18 +88,18 @@ class IntentRouter:
         # -> Intent.DIAGNOSIS
     """
 
-    def __init__(self, llm_client: Any | None = None) -> None:
+    def __init__(self, llm_client: LLMClient | None = None) -> None:
         """初始化意图路由器。
 
         Args:
             llm_client: 可选的 LLM 客户端实例。若提供，在低置信度时
-                调用 LLM 分类（当前实现仅使用关键词匹配，LLM 降级预留）。
+                调用 LLM 分类（通过 LLM_CLASSIFIER_MODEL 轻量模型）。
         """
         self._llm_client = llm_client
         # 关键词匹配的置信度阈值（> 此值直接返回，不调用 LLM）
         self._keyword_threshold = 0.8
 
-    def classify(self, user_message: str) -> Intent:
+    async def classify(self, user_message: str) -> Intent:
         """将用户消息分类为预定义意图。
 
         使用两层策略（PRD §6.3）：
@@ -114,40 +120,70 @@ class IntentRouter:
 
         # 置信度 > 阈值时直接返回（AC-3）
         if best_score >= self._keyword_threshold:
+            logger.info("意图分类完成", intent=best_intent.value,
+                         confidence=round(best_score, 2),
+                         method="keyword")
             return best_intent
 
         # 低置信度时尝试 LLM 分类（AC-4）
         if self._llm_client is not None:
-            llm_intent = self._classify_with_llm(user_message)
+            llm_intent = await self._classify_with_llm(user_message)
             if llm_intent is not None:
+                logger.info("意图分类完成", intent=llm_intent.value,
+                             confidence=round(best_score, 2),
+                             method="llm")
                 return llm_intent
 
         # 若仍低于阈值但 QUERY 得分相对较高，倾向 QUERY
         if scores.get(Intent.QUERY, 0.0) >= 0.4 and best_score < 0.6:
+            logger.info("意图分类完成", intent=Intent.QUERY.value,
+                         confidence=round(scores[Intent.QUERY], 2),
+                         method="fallback_query")
             return Intent.QUERY
 
         # 高于最低阈值返回最佳匹配，否则返回 GENERAL
         if best_score >= 0.3:
+            logger.info("意图分类完成", intent=best_intent.value,
+                         confidence=round(best_score, 2),
+                         method="keyword_low")
             return best_intent
 
+        logger.info("意图分类完成", intent=Intent.GENERAL.value,
+                     confidence=round(best_score, 2),
+                     method="default")
         return Intent.GENERAL
 
-    def _classify_with_llm(self, user_message: str) -> Intent | None:
+    async def _classify_with_llm(self, user_message: str) -> Intent | None:
         """使用 LLM 对低置信度消息进行分类。
 
-        预留接口：B-26 实现 LLMClient 后启用。
-        调用 config.py 中的 LLM_CLASSIFIER_MODEL（默认 Haiku）进行快速分类。
+        调用 LLMClient 并指定 LLM_CLASSIFIER_MODEL（默认 Haiku）进行快速分类。
+        超时 10s，异常时静默降级（返回 None，由 classify() 走 fallback 逻辑）。
 
         Args:
             user_message: 用户消息。
 
         Returns:
-            Intent 枚举值，或 None（LLM 不可用时）。
+            Intent 枚举值，或 None（LLM 不可用或分类失败时）。
         """
-        # TODO: B-26 实现 LLM 调用后启用
-        # llm 分类 prompt 模板：
-        #   请将以下数据库运维相关的问题分类为以下意图之一：
-        #   QUERY, DIAGNOSIS, TROUBLESHOOT, HEALTH_CHECK, GENERAL
-        #   仅返回意图名称，不要包含其他内容。
-        #   消息：{user_message}
-        return None
+        if self._llm_client is None:
+            return None
+
+        prompt = (
+            "请将以下数据库运维相关的问题分类为以下意图之一：\n"
+            "QUERY, DIAGNOSIS, TROUBLESHOOT, HEALTH_CHECK, GENERAL\n"
+            "仅返回意图名称，不要包含其他内容。\n"
+            f"消息：{user_message}"
+        )
+
+        try:
+            resp = await self._llm_client.chat(
+                messages=[{"role": "user", "content": prompt}],
+                model=settings.LLM_CLASSIFIER_MODEL,
+                max_tokens=50,
+                timeout=10,
+            )
+            intent_name = resp.text.strip().upper()
+            return Intent(intent_name)
+        except Exception:
+            logger.warning("LLM 意图分类失败，降级到规则匹配", exc_info=True)
+            return None

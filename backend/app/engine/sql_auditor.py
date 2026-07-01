@@ -17,7 +17,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 import sqlglot
+import structlog
 from sqlglot import exp
+
+logger = structlog.get_logger(__name__)
+
 
 # =============================================================================
 # 数据类型
@@ -160,11 +164,20 @@ def audit(
     # Step 4: 判定只读
     is_readonly = not has_ddl and not has_dml_non_select and len(violations) == 0
 
-    return AuditResult(
+    result = AuditResult(
         passed=len(violations) == 0,
         is_readonly=is_readonly,
         violations=violations,
     )
+
+    if result.passed:
+        logger.info("SQL审计通过", sql=sql[:200], db_type=db_type, user_role=user_role)
+    else:
+        logger.warning("SQL审计拦截", sql=sql[:200], db_type=db_type,
+                       user_role=user_role,
+                       violations=[v.type for v in result.violations])
+
+    return result
 
 
 # =============================================================================
@@ -205,7 +218,7 @@ def _check_multiple_statements(sql: str) -> Violation | None:
     return None
 
 
-def _get_statement_type(statement: exp.Expression) -> str:
+def _get_statement_type(statement: exp.Expr) -> str:
     """从 sqlglot AST 节点中提取语句类型。"""
     # 映射 sqlglot 表达式类型到字符串类型
     if isinstance(statement, exp.Drop):
@@ -234,7 +247,7 @@ def _get_statement_type(statement: exp.Expression) -> str:
         return "SELECT"
     if isinstance(statement, exp.Union):
         return "UNION"
-    if isinstance(statement, exp.Explain):
+    if isinstance(statement, exp.Describe):
         return "EXPLAIN"
     if isinstance(statement, exp.SetItem):
         return "SET"
@@ -244,7 +257,7 @@ def _get_statement_type(statement: exp.Expression) -> str:
 
 def _check_statement_type(
     stmt_type: str,
-    statement: exp.Expression,
+    statement: exp.Expr,
     user_role: str,
 ) -> list[Violation]:
     """根据语句类型和用户角色检查是否违规。"""
@@ -273,10 +286,10 @@ def _has_data_export_pattern(sql_upper: str) -> bool:
     return "INTO OUTFILE" in sql_upper or "INTO DUMPFILE" in sql_upper
 
 
-def _extract_target_name(statement: exp.Expression) -> str:
+def _extract_target_name(statement: exp.Expr) -> str:
     """从语句中提取操作目标名称（如表名、数据库名）。"""
     try:
-        if isinstance(statement, (exp.Drop, exp.Alter, exp.Truncate)) and statement.this:
+        if isinstance(statement, (exp.Drop, exp.Alter, exp.TruncateTable)) and statement.this:
             return statement.this.sql() or ""
         if isinstance(statement, (exp.Delete, exp.Update)) and statement.this:
             return statement.this.sql() or ""

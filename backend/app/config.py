@@ -56,12 +56,18 @@ class Settings(BaseSettings):
         default="anthropic",
         description="LLM 提供方切换：anthropic 或 openai。",
     )
+    LLM_API_URL: str = Field(
+        default="",
+        description="自定义 LLM API URL。为空时使用 provider 默认地址。"
+        "（Anthropic: https://api.anthropic.com/v1/messages, "
+        "OpenAI: https://api.openai.com/v1/chat/completions）",
+    )
 
     # ==================== 内部数据库 ====================
     DATABASE_URL: str = Field(
         default="",
-        description="内部 SQLite 数据库连接串。必填。"
-        "示例：sqlite+aiosqlite:///./data/db_pilot.db",
+        description="内部数据库连接串（支持 mysql+aiomysql 或 sqlite+aiosqlite）。必填。"
+        "示例：mysql+aiomysql://root:password@127.0.0.1:3306/db_pilot",
     )
 
     # ==================== 服务端 ====================
@@ -85,6 +91,24 @@ class Settings(BaseSettings):
         default=30,
         ge=1,
         description="会话空闲超时（分钟），PRD §8.2 要求 30 分钟自动清理。",
+    )
+
+    # ==================== 日志与可观测性 ====================
+    LOG_LEVEL: str = Field(
+        default="INFO",
+        description="日志级别：DEBUG / INFO / WARNING / ERROR。",
+    )
+    LOG_FORMAT: str = Field(
+        default="text",
+        description="日志输出格式：json（生产）或 text（开发彩色控制台）。",
+    )
+    LOG_FILE: str | None = Field(
+        default=None,
+        description="日志文件路径（可选）。为空时仅输出到 stderr。",
+    )
+    LOG_TRACE_ENABLED: bool = Field(
+        default=True,
+        description="是否启用链路追踪。关闭后 trace_id 仍生成但不强制透传。",
     )
 
     # ==================== 校验 ====================
