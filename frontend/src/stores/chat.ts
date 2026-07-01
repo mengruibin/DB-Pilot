@@ -13,6 +13,7 @@ import { ref, computed, watch } from 'vue'
 import { useSSE } from '@/composables/useSSE'
 import { cancelChat as apiCancelChat } from '@/api/chat'
 import type { Session } from '@/types/chat'
+import type { FindingSeverity } from '@/types/report'
 import type {
   ThinkingEvent,
   ToolCallEvent,
@@ -34,6 +35,7 @@ export type StoreMessageType =
   | 'sql'         // SQL 代码块
   | 'result'      // 查询结果表格
   | 'error'       // 错误卡片
+  | 'diagnosis'   // 诊断结果卡片
 
 /** Store 内部消息结构 */
 export interface StoreMessage {
@@ -83,6 +85,19 @@ export interface StoreMessage {
 
   // done
   tokensUsed?: number
+
+  // diagnosis
+  findings?: Array<{
+    severity: FindingSeverity
+    category: string
+    title: string
+    detail: string
+    suggestion: string
+    is_destructive: boolean
+    estimated_improvement: string
+    reference: string
+  }>
+  targetSql?: string
 }
 
 // ─── 输入模式 ───

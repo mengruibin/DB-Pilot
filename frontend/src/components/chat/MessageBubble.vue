@@ -12,6 +12,7 @@ import type { StoreMessage } from '@/stores/chat'
 import SqlBlock from '@/components/sql/SqlBlock.vue'
 import ResultTable from '@/components/sql/ResultTable.vue'
 import ErrorCard from '@/components/common/ErrorCard.vue'
+import DiagnosisCard from '@/components/chat/DiagnosisCard.vue'
 
 const props = defineProps<{
   message: StoreMessage
@@ -184,6 +185,14 @@ const resultRows = computed(() => {
             :error-code="message.errorCode"
             :user-message="message.userMessage"
             :content="message.content"
+          />
+        </template>
+
+        <!-- === diagnosis（F-16 DiagnosisCard 组件）=== -->
+        <template v-if="message.type === 'diagnosis' && message.findings">
+          <DiagnosisCard
+            :findings="message.findings"
+            :target-sql="message.targetSql"
           />
         </template>
 
