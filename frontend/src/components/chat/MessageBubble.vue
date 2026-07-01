@@ -10,6 +10,7 @@
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import type { StoreMessage } from '@/stores/chat'
 import SqlBlock from '@/components/sql/SqlBlock.vue'
+import ResultTable from '@/components/sql/ResultTable.vue'
 
 const props = defineProps<{
   message: StoreMessage
@@ -65,6 +66,21 @@ function formatDuration(ms: number): string {
 
 const userInitial = computed(() => {
   return props.message.content.charAt(0).toUpperCase()
+})
+
+// ─── ResultTable 数据转换 ───
+
+const resultColumns = computed(() => {
+  if (!props.message.dataPreview) return []
+  return props.message.dataPreview.columns.map((name) => ({
+    name,
+    type: 'text',
+    is_sensitive: false,
+  }))
+})
+
+const resultRows = computed(() => {
+  return props.message.dataPreview?.rows ?? []
 })
 </script>
 
@@ -150,33 +166,14 @@ const userInitial = computed(() => {
           />
         </template>
 
-        <!-- === result （stub — F-09 完整实现）=== -->
+        <!-- === result（F-09 ResultTable 组件）=== -->
         <template v-if="message.type === 'result'">
-          <div class="result-block stub">
-            <div class="result-header">
-              <span class="result-summary">{{ message.summary }}</span>
-              <span v-if="message.executionTimeMs !== undefined" class="result-duration">
-                {{ formatDuration(message.executionTimeMs) }}
-              </span>
-            </div>
-            <div v-if="message.dataPreview" class="result-preview">
-              <table class="preview-table">
-                <thead>
-                  <tr>
-                    <th v-for="col in message.dataPreview.columns" :key="col">{{ col }}</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <tr v-for="(row, ri) in message.dataPreview.rows.slice(0, 5)" :key="ri">
-                    <td v-for="(cell, ci) in row" :key="ci">{{ cell }}</td>
-                  </tr>
-                </tbody>
-              </table>
-              <p v-if="(message.totalRows ?? 0) > 5" class="result-more">
-                共 {{ message.totalRows }} 行，仅展示前 5 行
-              </p>
-            </div>
-          </div>
+          <ResultTable
+            :columns="resultColumns"
+            :rows="resultRows"
+            :total-rows="message.totalRows ?? resultRows.length"
+            :execution-time-ms="message.executionTimeMs"
+          />
         </template>
 
         <!-- === error （stub — F-12 完整实现）=== -->
