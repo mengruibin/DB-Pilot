@@ -334,11 +334,11 @@
 | **标题** | 前端关键交互行为自动化测试（Vitest + 组件测试） |
 | **关联契约** | frontend AGENTS.md 各章节强制行为指令（13 条 MUST 验证） |
 | **输入** | F-03 ~ F-20 所有组件 |
-| **输出物** | `frontend/tests/components/` 下对应测试文件 |
+| **输出物** | `frontend/tests/components/` 下对应测试文件、`frontend/tests/composables/`、`frontend/tests/setup.ts`、`frontend/vite.config.ts`（含 vitest 配置） |
 | **验收标准** | 1. `test_confirm_dialog_cooldown()`：确认按钮初始 disabled，1.5s 后可点击<br>2. `test_result_table_mask()`：敏感列渲染为 `***`，点击 👁 后 5s 显示明文，5s 后恢复掩码<br>3. `test_input_paste_multiline_sql()`：粘贴 2 行 SQL 弹确认框，确认后才提交<br>4. `test_connection_indicator_1s_switch()`：status 变化后 UI 在 1s 内完成切换<br>5. `test_sql_block_danger_highlight()`：含 DROP/DELETE 的 SQL 红色波浪线标注<br>6. `test_history_encrypt_decrypt()`：写入历史 → localStorage 中为加密数据（非明文）→ 同 session 内读取成功 → 模拟新 session 读取失败<br>7. `test_confirm_dialog_no_skip_checkbox()`：确认对话框中不存在"不再提示"复选框<br>8. `test_error_card_no_alert()`：ErrorCard 不使用 window.alert()<br>9. 所有测试通过 `npx vitest run` 零失败 |
 | **前置依赖** | F-13、F-09、F-10、F-04、F-08、F-15、F-12 |
 | **继承 TODO** | 无 |
-| **状态** | 计划中 |
+| **状态** | 已完成 |
 
 ---
 
@@ -376,7 +376,7 @@ F-01 ─────────────────────────
 |------|---------|---------|------|
 | 计划中 | 28 | 4 | 32 |
 | 开发中 | 0 | 0 | 0 |
-| 已完成 | 0 | 20 | 20 |
+| 已完成 | 0 | 21 | 21 |
 | 已验收 | 0 | 0 | 0 |
 
 ### 后端按 Phase 分组
