@@ -11,7 +11,6 @@ from __future__ import annotations
 from datetime import datetime
 
 from sqlalchemy import JSON, Boolean, DateTime, Integer, String, Text, func
-from sqlalchemy.dialects.sqlite import JSON as SQLITE_JSON
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database import Base
@@ -47,9 +46,9 @@ class ConnectionConfigModel(Base):
     ssl_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     # SSL CA 证书 PEM 格式内容（可选）
     ssl_ca_cert: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
-    # 额外连接参数（JSON 格式）
+    # 额外连接参数（JSON 格式，sa.JSON 兼容 MySQL/SQLite/PostgreSQL）
     extra_params: Mapped[dict | None] = mapped_column(
-        SQLITE_JSON().with_variant(JSON, "mysql").with_variant(JSON, "postgresql"),
+        JSON,
         nullable=True,
         default=None,
     )

@@ -1,18 +1,19 @@
 """
-Alembic 迁移环境配置（异步 SQLite 支持）。
+Alembic 迁移环境配置（异步在线 + 离线模式）。
 
-需要 aiosqlite 驱动来连接 SQLite+aiosqlite URL。
-内部 SQLite 数据库文件置于 backend/data/ 目录（AGENTS.md §安全与合规红线）。
+从 settings.DATABASE_URL 读取实际连接串（支持 mysql+aiomysql 或 sqlite+aiosqlite）。
 """
 
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress
 from logging.config import fileConfig
 
-from alembic import context
 from sqlalchemy.ext.asyncio import create_async_engine
 
+from alembic import context
+from app.config import settings as app_settings
 from app.database import Base
 
 # Alembic Config 对象
@@ -20,18 +21,25 @@ config = context.config
 
 # 配置日志（仅在 alembic.ini 包含日志配置时）
 if config.config_file_name is not None:
-    try:
+    with suppress(KeyError):
         fileConfig(config.config_file_name)
-    except KeyError:
-        pass
 
 # 元数据目标
 target_metadata = Base.metadata
 
 
+def _get_database_url() -> str:
+    """获取数据库连接串（优先 settings，回退 alembic.ini）。"""
+    url = app_settings.DATABASE_URL
+    if not url:
+        url = config.get_main_option("sqlalchemy.url", "")
+    assert url, "DATABASE_URL 未配置（检查 .env 或 alembic.ini）"
+    return url
+
+
 def run_migrations_offline() -> None:
     """离线模式：仅生成 SQL 脚本，不连接数据库。"""
-    url = config.get_main_option("sqlalchemy.url")
+    url = _get_database_url()
     context.configure(
         url=url,
         target_metadata=target_metadata,
@@ -50,9 +58,9 @@ def do_run_migrations(connection) -> None:
 
 
 async def run_async_migrations() -> None:
-    """异步在线模式：创建异步引擎并执行迁移。"""
-    url = config.get_main_option("sqlalchemy.url")
-    engine = create_async_engine(url, poolclass=None)
+    """异步在线模式：从 settings 获取 URL 并执行迁移。"""
+    url = _get_database_url()
+    engine = create_async_engine(url)
 
     async with engine.connect() as connection:
         await connection.run_sync(do_run_migrations)

@@ -12,7 +12,5 @@ __pycache__/
 *.egg-info/
 .venv/
 venv/
-
-# Frontend
-frontend/node_modules/
+node_modules
 frontend/dist/

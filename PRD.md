@@ -419,7 +419,7 @@ DB-Pilot/
 ├── backend/
 │   ├── pyproject.toml
 │   ├── requirements.txt
-│   ├── alembic.ini                 # 内部 SQLite 数据库迁移
+│   ├── alembic.ini                 # 内部数据库迁移
 │   ├── app/
 │   │   ├── main.py                 # FastAPI 应用入口
 │   │   ├── config.py               # 配置管理（环境变量 + .env）

@@ -13,8 +13,12 @@ from __future__ import annotations
 
 from typing import Any
 
+import structlog
+
 from app.db.base import AdapterCapabilities, BaseAdapter
 from app.models.schemas import ConnectionCreateRequest
+
+logger = structlog.get_logger("app.db.mysql")
 
 # SAFETY: aiomysql 在 connect() 时懒加载，不在模块层级 import
 # 依据 AGENTS.md §数据库驱动：适配器层不 import 目标数据库驱动（模块级别）
@@ -73,10 +77,16 @@ class MySQLAdapter(BaseAdapter):
             async with self._pool.acquire() as conn, conn.cursor() as cur:
                 await cur.execute("SELECT 1")
             self._connected = True
+            logger.info("MySQL 连接成功",
+                        host=config.host, port=config.port,
+                        database=config.database)
             return True
 
         except Exception as exc:
             self._connected = False
+            logger.warning("MySQL 连接失败",
+                           host=config.host, port=config.port,
+                           error=str(exc)[:100])
             # SAFETY: 连接失败异常消息仅包含 host:port（AGENTS.md §安全与合规红线）
             raise ConnectionError(
                 f"MySQL 连接失败 [{config.host}:{config.port}] — 请检查网络、用户名和密码"
@@ -88,6 +98,7 @@ class MySQLAdapter(BaseAdapter):
             self._pool.close()
             await self._pool.wait_closed()
             self._pool = None
+            logger.debug("MySQL 连接已关闭")
         self._connected = False
 
     async def test_connection(self) -> bool:
@@ -129,6 +140,9 @@ class MySQLAdapter(BaseAdapter):
                 columns = [desc[0] for desc in cur.description] if cur.description else []
 
             elapsed = int((time.monotonic() - start) * 1000)
+            logger.debug("MySQL 查询完成",
+                         sql=sql[:200], execution_time_ms=elapsed,
+                         rows_returned=len(rows))
             return {
                 "columns": columns,
                 "rows": [list(row) for row in rows],
@@ -139,8 +153,10 @@ class MySQLAdapter(BaseAdapter):
             }
 
         except TimeoutError:
+            logger.warning("MySQL 查询超时", sql=sql[:200])
             raise TimeoutError("MySQL 查询超时（>30s）") from None
         except Exception as exc:
+            logger.error("MySQL 查询异常", sql=sql[:200], error=str(exc)[:200])
             raise ValueError(f"SQL 执行错误：{exc}") from exc
 
     # ================== 元数据 ==================
@@ -275,10 +291,12 @@ class MySQLAdapter(BaseAdapter):
         except Exception as exc:
             err_msg = str(exc).lower()
             if "doesn't exist" in err_msg or "access denied" in err_msg:
+                logger.warning("慢查询日志不可访问", error=str(exc)[:100])
                 return {
                     "items": [],
                     "warning": "mysql.slow_log 表不可访问（可能是未启用慢查询日志或权限不足）",
                 }
+            logger.error("慢查询查询异常", error=str(exc)[:200])
             raise  # 其他异常向上传播
 
     async def explain(self, sql: str) -> dict[str, Any]:
