@@ -11,6 +11,7 @@ import { ref, computed, onMounted, onUnmounted } from 'vue'
 import type { StoreMessage } from '@/stores/chat'
 import SqlBlock from '@/components/sql/SqlBlock.vue'
 import ResultTable from '@/components/sql/ResultTable.vue'
+import ErrorCard from '@/components/common/ErrorCard.vue'
 
 const props = defineProps<{
   message: StoreMessage
@@ -176,21 +177,14 @@ const resultRows = computed(() => {
           />
         </template>
 
-        <!-- === error （stub — F-12 完整实现）=== -->
+        <!-- === error（F-12 ErrorCard 组件）=== -->
         <template v-if="message.type === 'error'">
-          <div class="error-card stub" :class="`severity-${message.severity ?? 'error'}`">
-            <div class="error-icon">
-              <template v-if="message.severity === 'info'">ℹ️</template>
-              <template v-else-if="message.severity === 'warning'">⚠️</template>
-              <template v-else>🛑</template>
-            </div>
-            <div class="error-body">
-              <p class="error-title">
-                {{ message.userMessage || message.content }}
-              </p>
-              <p v-if="message.errorCode" class="error-code">{{ message.errorCode }}</p>
-            </div>
-          </div>
+          <ErrorCard
+            :severity="(message.severity as 'info' | 'warning' | 'error') ?? 'error'"
+            :error-code="message.errorCode"
+            :user-message="message.userMessage"
+            :content="message.content"
+          />
         </template>
 
         <!-- 打字光标（最后一条流式消息） -->
