@@ -18,6 +18,7 @@ from typing import Any
 
 import structlog
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
+from fastapi.responses import JSONResponse
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -273,7 +274,7 @@ async def test_connection(
     # 构建连接配置（密码从前端传入，不持久化）
     test_config = ConnectionCreateRequest(
         name=db_conn.name,
-        db_type=db_conn.db_type,
+        db_type=db_conn.db_type,  # type: ignore[arg-type] — Pydantic validator handles str→DBType
         host=db_conn.host,
         port=db_conn.port,
         database=db_conn.database,
@@ -339,7 +340,7 @@ async def get_metadata(
     connection_id: str,
     password: str = Body(..., embed=True),
     session: AsyncSession = Depends(get_session),  # noqa: B008
-) -> dict:
+) -> JSONResponse:
     """获取数据库 Schema 元数据。
 
     返回 databases、tables、columns、indexes 结构。
@@ -364,7 +365,7 @@ async def get_metadata(
     # 构建连接配置
     config = ConnectionCreateRequest(
         name=db_conn.name,
-        db_type=db_conn.db_type,
+        db_type=db_conn.db_type,  # type: ignore[arg-type] — Pydantic validator handles str→DBType
         host=db_conn.host,
         port=db_conn.port,
         database=db_conn.database,
@@ -431,9 +432,6 @@ async def get_metadata(
             "databases": [_sanitize(d) for d in databases],
             "tables": tables_result,
         }
-
-        # 使用 Starlette Response 添加 Cache-Control 头
-        from fastapi.responses import JSONResponse
 
         logger.info("API 请求完成", endpoint="get_metadata",
                      connection_id=connection_id,

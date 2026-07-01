@@ -63,7 +63,7 @@ class OracleAdapter(BaseAdapter):
             oracledb.defaults.fetch_lobs = False
 
             # 构建 DSN
-            dsn = oracledb.makedsn(config.host, config.port, config.database)
+            dsn = oracledb.makedsn(config.host, config.port or 1521, config.database)
 
             # SAFETY: 参数化连接配置，不拼接连接串
             self._conn = await oracledb.connect_async(

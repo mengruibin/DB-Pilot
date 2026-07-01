@@ -102,7 +102,7 @@ async def _load_and_create_adapter(
     # SAFETY: 密码仅存于内存，不持久化（AGENTS.md §安全与合规红线）
     config = ConnectionCreateRequest(
         name=db_conn.name,
-        db_type=db_conn.db_type,
+        db_type=db_conn.db_type, # type: ignore[arg-type] — Pydantic validator handles str→DBType
         host=db_conn.host,
         port=db_conn.port,
         database=db_conn.database,

@@ -9,6 +9,8 @@ EXPLAIN 诊断 Prompt 模板定义。
 
 from __future__ import annotations
 
+from typing import TypedDict, cast
+
 # =============================================================================
 # 系统提示：SQL 性能分析专家
 # =============================================================================
@@ -58,7 +60,15 @@ DIAGNOSIS_USER_TEMPLATE = """请分析以下 {db_type} 数据库的 EXPLAIN 输�
 # =============================================================================
 
 # AC-3: 可识别的瓶颈模式列表
-BOTTLENECK_PATTERNS: list[dict[str, str]] = [
+class _BottleneckPattern(TypedDict):
+    """瓶颈模式类型定义。"""
+    pattern: str
+    keywords: list[str]
+    suggestion: str
+    is_destructive: bool
+
+
+BOTTLENECK_PATTERNS: list[_BottleneckPattern] = cast(list[_BottleneckPattern], [
     {
         "pattern": "全表扫描",
         "keywords": ["table scan", "full scan", "全表扫描",
@@ -87,7 +97,7 @@ BOTTLENECK_PATTERNS: list[dict[str, str]] = [
         "suggestion": "考虑为过滤条件列创建索引",
         "is_destructive": False,
     },
-]
+])
 
 
 # =============================================================================

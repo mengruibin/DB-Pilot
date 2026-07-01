@@ -32,6 +32,7 @@ target_metadata = Base.metadata
 def run_migrations_offline() -> None:
     """离线模式：仅生成 SQL 脚本，不连接数据库。"""
     url = config.get_main_option("sqlalchemy.url")
+    assert url is not None, "alembic.ini 中缺少 sqlalchemy.url 配置"
     context.configure(
         url=url,
         target_metadata=target_metadata,
@@ -52,6 +53,7 @@ def do_run_migrations(connection) -> None:
 async def run_async_migrations() -> None:
     """异步在线模式：创建异步引擎并执行迁移。"""
     url = config.get_main_option("sqlalchemy.url")
+    assert url is not None, "alembic.ini 中缺少 sqlalchemy.url 配置"
     engine = create_async_engine(url, poolclass=None)
 
     async with engine.connect() as connection:

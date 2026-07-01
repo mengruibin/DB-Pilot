@@ -18,6 +18,7 @@ import sys
 from typing import Any
 
 import structlog
+from structlog.typing import EventDict
 
 from app.config import settings
 
@@ -34,8 +35,8 @@ _SENSITIVE_KEYS: set[str] = {
 def _mask_sensitive_keys(
     logger: structlog.typing.WrappedLogger,  # noqa: ARG001
     method_name: str,  # noqa: ARG001
-    event_dict: dict[str, Any],
-) -> dict[str, Any]:
+    event_dict: EventDict,
+) -> EventDict:
     """掩盖事件字典中的敏感字段值。
 
     对键名匹配 _SENSITIVE_KEYS 的字段，将值替换为 "***"。
@@ -63,8 +64,8 @@ def _mask_sensitive_keys(
 def _add_timestamp(
     logger: structlog.typing.WrappedLogger,  # noqa: ARG001
     method_name: str,  # noqa: ARG001
-    event_dict: dict[str, Any],
-) -> dict[str, Any]:
+    event_dict: EventDict,
+) -> EventDict:
     """添加 ISO 8601 时间戳。"""
     from datetime import UTC, datetime
     event_dict["timestamp"] = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
@@ -74,8 +75,8 @@ def _add_timestamp(
 def _add_logger_name(
     logger: structlog.typing.WrappedLogger,  # noqa: ARG001
     method_name: str,  # noqa: ARG001
-    event_dict: dict[str, Any],
-) -> dict[str, Any]:
+    event_dict: EventDict,
+) -> EventDict:
     """注入 logger 名称到事件字典（structlog 默认不携带）。"""
     # structlog 在处理器中不直接暴露 logger name，我们通过 __name__ 在
     # 调用侧绑定。此处仅确保 level 字段存在

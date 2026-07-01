@@ -74,7 +74,7 @@ def mysql_test_config() -> ConnectionCreateRequest | None:
     params = _parse_mysql_url(url)
     return ConnectionCreateRequest(
         name="test_mysql",
-        db_type="mysql",
+        db_type="mysql",  # type: ignore[arg-type] — Pydantic validator handles str→DBType
         host=params["host"],
         port=params["port"],
         database=params["database"],
