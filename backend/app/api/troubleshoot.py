@@ -61,7 +61,7 @@ async def _resolve_conn_config(
     Args:
         connection_id: 连接 ID。
         password: 前端传入的连接密码。
-        session: 内部 SQLite 数据库会话。
+        session: 内部数据库会话。
 
     Returns:
         包含 db_type, host, port, database, user, password 等字段的 dict。

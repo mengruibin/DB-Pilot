@@ -13,8 +13,7 @@ from contextlib import suppress
 from datetime import UTC, datetime
 
 import structlog
-from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, func, select
-from sqlalchemy.dialects.sqlite import JSON as SQLITE_JSON
+from sqlalchemy import JSON, DateTime, ForeignKey, Integer, String, Text, func, select
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base, async_session_factory
@@ -117,11 +116,11 @@ class MessageModel(Base):
     )
     # 查询结果预览（JSON，最多 20 行），AGENTS.md §数据隐私
     result_preview: Mapped[dict | None] = mapped_column(
-        SQLITE_JSON, nullable=True, default=None,
+        JSON, nullable=True, default=None,
     )
     # 错误信息：{"error_code": "...", "user_message": "..."}
     error_info: Mapped[dict | None] = mapped_column(
-        SQLITE_JSON, nullable=True, default=None,
+        JSON, nullable=True, default=None,
     )
     # 消息创建时间
     created_at: Mapped[datetime] = mapped_column(

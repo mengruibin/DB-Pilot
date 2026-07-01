@@ -66,8 +66,8 @@ class Settings(BaseSettings):
     # ==================== 内部数据库 ====================
     DATABASE_URL: str = Field(
         default="",
-        description="内部 SQLite 数据库连接串。必填。"
-        "示例：sqlite+aiosqlite:///./data/db_pilot.db",
+        description="内部数据库连接串（支持 mysql+aiomysql 或 sqlite+aiosqlite）。必填。"
+        "示例：mysql+aiomysql://root:password@127.0.0.1:3306/db_pilot",
     )
 
     # ==================== 服务端 ====================

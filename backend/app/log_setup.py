@@ -155,7 +155,7 @@ def configure_logging() -> None:
     root_logger.addHandler(handler)
 
     # 减少第三方库的日志噪音
-    for noisy in ("httpx", "httpcore", "urllib3", "aiosqlite"):
+    for noisy in ("httpx", "httpcore", "urllib3", "aiosqlite", "aiomysql"):
         logging.getLogger(noisy).setLevel(max(log_level, logging.WARNING))
 
     # 记录启动日志

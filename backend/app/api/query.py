@@ -49,7 +49,7 @@ async def _load_and_create_adapter(
     Args:
         connection_id: 连接 ID。
         password: 前端传入的连接密码（非持久化）。
-        session: 内部 SQLite 数据库会话。
+        session: 内部数据库会话。
 
     Returns:
         (adapter, config) 元组，调用方负责 connect/disconnect。
@@ -111,7 +111,7 @@ async def execute_query(
     Args:
         connection_id: 连接 ID。
         body: QueryRequest 请求体。
-        session: 内部 SQLite 数据库会话。
+        session: 内部数据库会话。
 
     Returns:
         QueryResult（{columns, rows, total_rows, execution_time_ms, is_readonly, audit_status}）。
@@ -221,7 +221,7 @@ async def execute_explain(
     Args:
         connection_id: 连接 ID。
         body: ExplainRequest 请求体。
-        session: 内部 SQLite 数据库会话。
+        session: 内部数据库会话。
 
     Returns:
         {explain_output, parsed, format}。
@@ -336,7 +336,7 @@ async def list_slow_queries(
         page: 页码。
         page_size: 每页条数。
         password: 连接密码。
-        session: 内部 SQLite 数据库会话。
+        session: 内部数据库会话。
 
     Returns:
         SlowQueryListResponse（分页慢查询列表）。

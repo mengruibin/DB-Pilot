@@ -55,7 +55,7 @@ backend/
 │   ├── config.py        # 全量 Settings，从 .env / 环境变量加载
 │   ├── api/             # 仅薄路由层：参数校验 → 调用 agent/ 或 engine/ → 返回 Response
 │   ├── agent/           # LangGraph 状态图、意图路由、工具定义——Agent 核心逻辑
-│   ├── db/              # 数据库适配器（目标数据库连接，非内部 SQLite）
+│   ├── db/              # 数据库适配器（目标数据库连接，非内部数据库）
 │   ├── engine/          # 无状态引擎：NL2SQL、SQL 审计、诊断、巡检
 │   ├── models/          # Pydantic schemas + SQLAlchemy ORM 模型
 │   └── prompts/         # Prompt 模板定义（Python 字面量，不可含运行时变量）
@@ -132,7 +132,7 @@ backend/
 - [ ] MUST `.env` 文件加入 `.gitignore`，仓库中仅保留 `.env.example` 模板
 - [ ] MUST 服务启动时校验所有 `Settings` 必填字段非空，缺失则拒绝启动
 - [ ] MUST 会话空闲 30 分钟后自动清理内存中的连接凭据（依据 PRD §8.2）
-- [ ] MUST 内部 SQLite 数据库文件置于 `backend/data/` 目录（不暴露在静态文件服务路径下）
+- [ ] MUST 内部数据库连接串通过 `DATABASE_URL` 环境变量配置，不硬编码在代码中
 
 ### 数据隐私
 

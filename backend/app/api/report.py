@@ -76,7 +76,7 @@ async def _load_and_create_adapter(
     Args:
         connection_id: 连接 ID。
         password: 前端传入的连接密码（非持久化）。
-        session: 内部 SQLite 数据库会话。
+        session: 内部数据库会话。
 
     Returns:
         (adapter, config) 元组。

@@ -11,8 +11,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import DateTime, Float, Integer, String, func
-from sqlalchemy.dialects.sqlite import JSON as SQLITE_JSON
+from sqlalchemy import JSON, DateTime, Float, Integer, String, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database import Base
@@ -56,12 +55,12 @@ class ReportModel(Base):
     )
     # 严重级别计数：{error: N, warning: N, pass: N, skipped: N}
     severity_counts: Mapped[dict[str, int] | None] = mapped_column(
-        SQLITE_JSON, nullable=True, default=None,
+        JSON, nullable=True, default=None,
         comment="严重级别计数 JSON：{error, warning, pass, skipped}",
     )
     # 检查项分类列表 JSON（含每项的完整结构）
     categories: Mapped[list[dict[str, Any]] | None] = mapped_column(
-        SQLITE_JSON, nullable=True, default=None,
+        JSON, nullable=True, default=None,
         comment="检查项分类列表 JSON",
     )
 

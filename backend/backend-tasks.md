@@ -16,14 +16,14 @@
 | **关联契约** | api-contract §1.6 错误码（422 Pydantic 校验）、backend AGENTS.md §技术栈约束 |
 | **输入** | PRD §6.1 技术栈表、backend AGENTS.md 禁止项列表 |
 | **输出物** | `backend/app/main.py`、`backend/app/config.py`、`backend/.env.example`、`backend/pyproject.toml`、`backend/requirements.txt` |
-| **验收标准** | 1. `uvicorn app.main:app --reload` 启动成功，`/docs` 可见 Swagger UI<br>2. `Settings` 类从 `.env` 加载必填字段：`LLM_API_KEY`、`LLM_MODEL`、`DATABASE_URL`（内部 SQLite），缺失任一则启动报错退出<br>3. `pyproject.toml` 声明 Python >= 3.12；依赖含 `fastapi>=0.115.0`、`langgraph>=0.3.0`、`sqlalchemy>=2.0.0`、`pydantic>=2.0`、`sqlglot>=25.0.0`<br>4. `ruff check --select E,F,I,N,UP,B,SIM` 零错误<br>5. `X-Request-ID` 中间件注入所有响应头（UUID v4 格式）<br>6. `.env` 已在 `.gitignore` 中，`.env.example` 含所有必填字段注释 |
+| **验收标准** | 1. `uvicorn app.main:app --reload` 启动成功，`/docs` 可见 Swagger UI<br>2. `Settings` 类从 `.env` 加载必填字段：`LLM_API_KEY`、`LLM_MODEL`、`DATABASE_URL`（内部 MySQL），缺失任一则启动报错退出<br>3. `pyproject.toml` 声明 Python >= 3.12；依赖含 `fastapi>=0.115.0`、`langgraph>=0.3.0`、`sqlalchemy>=2.0.0`、`pydantic>=2.0`、`sqlglot>=25.0.0`<br>4. `ruff check --select E,F,I,N,UP,B,SIM` 零错误<br>5. `X-Request-ID` 中间件注入所有响应头（UUID v4 格式）<br>6. `.env` 已在 `.gitignore` 中，`.env.example` 含所有必填字段注释 |
 | **前置依赖** | 无 |
 | **继承 TODO** | api-contract T-1（响应信封格式——默认方案 C 直接数据体）、T-3（认证方案——Phase 1 默认无认证） |
 | **状态** | 已完成 |
 
 ---
 
-## B-02：内部 SQLite 数据模型——连接配置
+## B-02：内部数据模型——连接配置
 
 | 字段 | 内容 |
 |------|------|
@@ -32,14 +32,14 @@
 | **关联契约** | api-contract §2.1 ConnectionConfig 实体、backend AGENTS.md §安全与合规红线（密码不落盘） |
 | **输入** | api-contract §2.1 字段定义 |
 | **输出物** | `backend/app/models/connection.py`（ORM）、`backend/app/models/schemas.py` 中 `ConnectionCreateRequest` / `ConnectionResponse` Pydantic 模型、`backend/alembic/versions/001_create_connections.py` |
-| **验收标准** | 1. ORM 表 `connections` 字段与契约 §2.1 完全一致（id/name/db_type/host/port/database/user/ssl_enabled/ssl_ca_cert/extra_params/created_at/updated_at/last_tested_at/status）<br>2. `password` 字段不存在于 ORM 表中（仅内存持有，不入库）<br>3. `ConnectionResponse` Pydantic model 不含 `password` 字段<br>4. `ConnectionCreateRequest` 校验：`db_type` 枚举 `mysql`/`postgresql`/`oracle`，`name` 1-64 字符，`port` 1-65535<br>5. `alembic upgrade head` 执行成功，SQLite 文件生成于 `backend/data/` 目录<br>6. `status` 字段默认值为 `"unknown"` |
+| **验收标准** | 1. ORM 表 `connections` 字段与契约 §2.1 完全一致（id/name/db_type/host/port/database/user/ssl_enabled/ssl_ca_cert/extra_params/created_at/updated_at/last_tested_at/status）<br>2. `password` 字段不存在于 ORM 表中（仅内存持有，不入库）<br>3. `ConnectionResponse` Pydantic model 不含 `password` 字段<br>4. `ConnectionCreateRequest` 校验：`db_type` 枚举 `mysql`/`postgresql`/`oracle`，`name` 1-64 字符，`port` 1-65535<br>5. `alembic upgrade head` 执行成功，数据库表创建完成<br>6. `status` 字段默认值为 `"unknown"` |
 | **前置依赖** | B-01 |
 | **继承 TODO** | api-contract T-3（`name` 唯一性范围取决于认证方案——当前无认证时为全局唯一） |
 | **状态** | 已完成 |
 
 ---
 
-## B-03：内部 SQLite 数据模型——会话与消息
+## B-03：内部数据模型——会话与消息
 
 | 字段 | 内容 |
 |------|------|
@@ -48,7 +48,7 @@
 | **关联契约** | api-contract §2.2 Session / Message 实体、backend AGENTS.md §安全与合规红线（数据隐私——查询结果不跨会话可读） |
 | **输入** | api-contract §2.2 字段定义 |
 | **输出物** | `backend/app/models/session.py`（ORM）、`backend/app/models/schemas.py` 中 `SessionResponse` / `MessageResponse`、`backend/alembic/versions/002_create_sessions_messages.py` |
-| **验收标准** | 1. `sessions` 表字段：id/connection_id/title/created_at/last_active_at/status/message_count/tokens_used_total<br>2. `messages` 表字段：id/session_id/role/content/message_type/sql_generated/sql_executed/result_preview/error_info/created_at/tokens_used<br>3. `result_preview` 列类型为 JSON（SQLite JSON），最多存储 20 行（契约 §2.2 Message 约束）<br>4. `session_id` → `sessions.id` 外键级联删除<br>5. `status` 枚举约束：`active`/`idle`/`closed`<br>6. `role` 枚举约束：`user`/`assistant`/`system` |
+| **验收标准** | 1. `sessions` 表字段：id/connection_id/title/created_at/last_active_at/status/message_count/tokens_used_total<br>2. `messages` 表字段：id/session_id/role/content/message_type/sql_generated/sql_executed/result_preview/error_info/created_at/tokens_used<br>3. `result_preview` 列类型为 JSON，最多存储 20 行（契约 §2.2 Message 约束）<br>4. `session_id` → `sessions.id` 外键级联删除<br>5. `status` 枚举约束：`active`/`idle`/`closed`<br>6. `role` 枚举约束：`user`/`assistant`/`system` |
 | **前置依赖** | B-01 |
 | **继承 TODO** | 无——契约 §2.2 完全定义 |
 | **状态** | 已完成 |
