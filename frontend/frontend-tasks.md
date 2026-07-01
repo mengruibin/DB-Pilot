@@ -286,11 +286,11 @@
 | **标题** | ReportView 完整实现：巡检触发 → 实时进度 SSE → 评分环形图 → 分类检查项 → 导出 |
 | **关联契约** | api-contract §1.4 health-check SSE + §2.5 HealthReport；frontend AGENTS.md §1（巡检进度逐项更新） |
 | **输入** | F-05 useSSE（health-check SSE 流） |
-| **输出物** | `frontend/src/views/ReportView.vue`、`frontend/src/components/report/HealthScore.vue`、`frontend/src/components/report/CheckItemList.vue`、`frontend/src/components/report/MetricChart.vue`、`frontend/src/stores/report.ts` |
+| **输出物** | `frontend/src/views/ReportView.vue`、`frontend/src/components/report/HealthScore.vue`、`frontend/src/components/report/CheckItemList.vue`、`frontend/src/stores/report.ts`、`frontend/src/api/report.ts` |
 | **验收标准** | 1. 页面顶部：「开始巡检」按钮 + 历史报告列表<br>2. 点击「开始巡检」→ SSE 连接 `POST /api/connections/{id}/health-check`<br>3. 实时进度条："第 7/20 项——慢查询占比"，进度百分比实时更新<br>4. HealthScore 组件：环形图（SVG/CSS），0-59 红色 / 60-79 黄色 / 80-100 绿色，中央数字动画过渡（count-up 效果）<br>5. CheckItemList：按 category 分组（连接/存储/性能/复制/锁/备份/安全/表/日志/配置），每组一张卡片，items 以列表展示（pass 绿色勾 / warning 黄色叹号 / error 红色叉）<br>6. 每项展开可查看 value + threshold + suggestion<br>7. 含 `is_destructive: true` 的 suggestion 渲染带「执行」按钮 → ConfirmDialog<br>8. 巡检完成后「导出」按钮可用：HTML / PDF 两种格式<br>9. score < 60 的报告在列表中红底标记 |
 | **前置依赖** | F-05、F-13 |
 | **继承 TODO** | api-contract T-9（导出格式——当前 HTML 前端渲染 + 浏览器打印，PDF 后续由后端生成） |
-| **状态** | 计划中 |
+| **状态** | 已完成 |
 
 ---
 
@@ -376,7 +376,7 @@ F-01 ─────────────────────────
 |------|---------|---------|------|
 | 计划中 | 28 | 4 | 32 |
 | 开发中 | 0 | 0 | 0 |
-| 已完成 | 0 | 17 | 17 |
+| 已完成 | 0 | 18 | 18 |
 | 已验收 | 0 | 0 | 0 |
 
 ### 后端按 Phase 分组
