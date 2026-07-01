@@ -258,7 +258,7 @@
 | **验收标准** | 1. 渲染 `findings[]` 列表，每项含：severity 图标（🔴🟡🔵）+ title + detail + suggestion<br>2. `is_destructive: true` 的 suggestion 以"建议卡片"形式展示，附带「执行此建议」按钮——点击后弹出 ConfirmDialog<br>3. `is_destructive: false` 的 suggestion 仅展示为可复制代码块<br>4. suggestion 中的 SQL 代码（如 `CREATE INDEX ...`）语法高亮<br>5. `estimated_improvement` 用绿色文字展示预期改善效果<br>6. severity=error 的 finding 排序在前 |
 | **前置依赖** | F-13（ConfirmDialog）、F-08（SqlBlock 复用高亮逻辑） |
 | **继承 TODO** | 无 |
-| **状态** | 计划中 |
+| **状态** | 已完成 |
 
 ---
 
@@ -374,9 +374,9 @@ F-01 ─────────────────────────
 
 | 状态 | 后端任务 | 前端任务 | 合计 |
 |------|---------|---------|------|
-| 计划中 | 28 | 6 | 34 |
+| 计划中 | 28 | 5 | 33 |
 | 开发中 | 0 | 0 | 0 |
-| 已完成 | 0 | 15 | 15 |
+| 已完成 | 0 | 16 | 16 |
 | 已验收 | 0 | 0 | 0 |
 
 ### 后端按 Phase 分组
