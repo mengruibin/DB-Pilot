@@ -9,6 +9,7 @@
  */
 import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import { useSensitiveData, createCopyInterceptor } from '@/composables/useSensitiveData'
+import { useExport } from '@/composables/useExport'
 import type { QueryColumn } from '@/types/chat'
 
 const props = defineProps<{
@@ -98,12 +99,19 @@ const copyInterceptor = createCopyInterceptor(columnSensitive.value)
 
 onMounted(() => {
   document.addEventListener('copy', copyInterceptor)
+  document.addEventListener('click', handleClickOutside)
 })
 
 onUnmounted(() => {
   document.removeEventListener('copy', copyInterceptor)
+  document.removeEventListener('click', handleClickOutside)
   clearAllTimers()
 })
+
+/** 点击外部关闭导出菜单 */
+function handleClickOutside(): void {
+  exportMenuOpen.value = false
+}
 
 // ─── 格式化耗时 ───
 
@@ -139,6 +147,26 @@ const pageNumbers = computed(() => {
   }
   return pages
 })
+
+// ─── 导出 ───
+
+const exportTool = useExport()
+
+/** 导出下拉菜单是否展开 */
+const exportMenuOpen = ref(false)
+
+function toggleExportMenu(): void {
+  exportMenuOpen.value = !exportMenuOpen.value
+}
+
+function handleExport(format: 'csv' | 'excel'): void {
+  exportMenuOpen.value = false
+  exportTool.openExport(format, {
+    columns: props.columns,
+    rows: sortedRows.value,
+    fileName: 'query_result',
+  })
+}
 </script>
 
 <template>
@@ -146,9 +174,36 @@ const pageNumbers = computed(() => {
     <!-- 表头信息 -->
     <div class="table-info">
       <span class="info-summary">查询结果 {{ totalRows }} 行</span>
-      <span v-if="executionTimeMs !== undefined" class="info-duration">
-        {{ formatDuration(executionTimeMs) }}
-      </span>
+      <div class="info-actions">
+        <span v-if="executionTimeMs !== undefined" class="info-duration">
+          {{ formatDuration(executionTimeMs) }}
+        </span>
+        <div class="export-wrapper">
+          <button
+            class="export-btn"
+            title="导出结果"
+            @click="toggleExportMenu"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/>
+              <polyline points="7 10 12 15 17 10"/>
+              <line x1="12" y1="15" x2="12" y2="3"/>
+            </svg>
+            导出
+          </button>
+          <!-- 下拉菜单 -->
+          <Transition name="fade">
+            <div v-if="exportMenuOpen" class="export-dropdown" @click.stop>
+              <button class="dropdown-item" @click="handleExport('csv')">
+                📄 CSV
+              </button>
+              <button class="dropdown-item" @click="handleExport('excel')">
+                📊 Excel
+              </button>
+            </div>
+          </Transition>
+        </div>
+      </div>
     </div>
 
     <!-- 表格 -->
@@ -232,6 +287,61 @@ const pageNumbers = computed(() => {
       </button>
       <span class="page-info">{{ currentPage }} / {{ totalPages }} 页</span>
     </div>
+
+    <!-- ═══ 导出对话框 ═══ -->
+    <Transition name="modal-fade">
+      <div v-if="exportTool.showDialog.value" class="export-overlay" @click.self="exportTool.cancelExport()">
+        <div class="export-dialog">
+          <div class="dialog-header">
+            <h3 class="dialog-title">
+              导出 {{ exportTool.exportFormat.value === 'csv' ? 'CSV' : 'Excel' }}
+            </h3>
+            <button class="dialog-close" @click="exportTool.cancelExport()">✕</button>
+          </div>
+
+          <div class="dialog-body">
+            <p class="dialog-desc">选择要导出的列：</p>
+
+            <div class="column-list">
+              <div
+                v-for="(col, ci) in exportTool.columns.value"
+                :key="ci"
+                class="column-item"
+                :class="{ sensitive: exportTool.sensitiveFlags.value[ci] }"
+              >
+                <label class="col-label">
+                  <input
+                    type="checkbox"
+                    :checked="exportTool.selectedColumns.has(ci)"
+                    @change="exportTool.toggleColumn(ci)"
+                  />
+                  <span class="col-check-name">{{ col.name }}</span>
+                  <span v-if="exportTool.sensitiveFlags.value[ci]" class="col-lock" title="敏感字段">🔒</span>
+                  <span v-if="exportTool.sensitiveFlags.value[ci]" class="sensitive-tag">敏感</span>
+                </label>
+              </div>
+            </div>
+
+            <div v-if="exportTool.hasSensitiveSelected.value" class="sensitive-warning">
+              ⚠️ 将导出包含敏感字段的数据
+            </div>
+          </div>
+
+          <div class="dialog-footer">
+            <button class="footer-btn cancel" @click="exportTool.cancelExport()">
+              取消
+            </button>
+            <button
+              class="footer-btn confirm"
+              :disabled="exportTool.selectedColumns.size === 0 || exportTool.exporting.value"
+              @click="exportTool.confirmExport()"
+            >
+              {{ exportTool.exporting.value ? '导出中...' : `下载 ${exportTool.exportFormat.value === 'csv' ? 'CSV' : 'Excel'}` }}
+            </button>
+          </div>
+        </div>
+      </div>
+    </Transition>
   </div>
 </template>
 
@@ -462,5 +572,276 @@ const pageNumbers = computed(() => {
   font-size: 11px;
   color: var(--text-tertiary);
   font-family: var(--font-mono);
+}
+
+/* ─── 表头操作区 ─── */
+.info-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* 导出按钮 */
+.export-wrapper {
+  position: relative;
+}
+
+.export-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-tertiary);
+  font-family: var(--font-body);
+  font-size: 11px;
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.export-btn:hover {
+  border-color: var(--accent-teal);
+  color: var(--accent-teal);
+  background: rgba(45, 212, 191, 0.06);
+}
+
+/* 下拉菜单 */
+.export-dropdown {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  margin-top: 4px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  z-index: 50;
+  min-width: 120px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
+}
+
+.dropdown-item {
+  display: block;
+  width: 100%;
+  padding: 6px 14px;
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  font-family: var(--font-body);
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.dropdown-item:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+/* ═══ 导出对话框 ═══ */
+.export-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+
+.export-dialog {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-lg);
+  width: 400px;
+  max-width: 90vw;
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.4);
+}
+
+.dialog-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.dialog-title {
+  font-family: var(--font-display);
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin: 0;
+}
+
+.dialog-close {
+  width: 24px;
+  height: 24px;
+  border: none;
+  background: transparent;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  border-radius: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+  transition: all 0.15s;
+}
+
+.dialog-close:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.dialog-body {
+  padding: 12px 16px;
+  flex: 1;
+  overflow-y: auto;
+}
+
+.dialog-desc {
+  font-size: 12px;
+  color: var(--text-tertiary);
+  margin-bottom: 10px;
+}
+
+.column-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.column-item {
+  padding: 4px 8px;
+  border-radius: var(--radius-sm);
+  transition: background 0.15s;
+}
+
+.column-item:hover {
+  background: var(--bg-hover);
+}
+
+.column-item.sensitive {
+  background: rgba(248, 113, 113, 0.04);
+}
+
+.col-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--text-primary);
+}
+
+.col-label input[type="checkbox"] {
+  accent-color: var(--accent-teal);
+}
+
+.col-check-name {
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.col-lock {
+  font-size: 11px;
+  line-height: 1;
+}
+
+.sensitive-tag {
+  font-size: 10px;
+  color: var(--color-error);
+  padding: 0 4px;
+  border: 1px solid rgba(248, 113, 113, 0.25);
+  border-radius: 3px;
+}
+
+.sensitive-warning {
+  margin-top: 8px;
+  padding: 6px 10px;
+  background: rgba(251, 191, 36, 0.08);
+  border: 1px solid rgba(251, 191, 36, 0.2);
+  border-radius: var(--radius-sm);
+  font-size: 11px;
+  color: var(--color-warning);
+}
+
+/* 对话框底部 */
+.dialog-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 10px 16px;
+  border-top: 1px solid var(--border-color);
+}
+
+.footer-btn {
+  padding: 6px 16px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-body);
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.footer-btn.cancel {
+  background: transparent;
+  color: var(--text-tertiary);
+}
+
+.footer-btn.cancel:hover {
+  background: var(--bg-hover);
+  color: var(--text-secondary);
+}
+
+.footer-btn.confirm {
+  background: var(--accent-teal);
+  border-color: var(--accent-teal);
+  color: #0B0E14;
+  font-weight: 600;
+}
+
+.footer-btn.confirm:hover:not(:disabled) {
+  opacity: 0.9;
+}
+
+.footer-btn.confirm:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* 过渡动画 */
+.fade-enter-active,
+.fade-leave-active {
+  transition: opacity 0.15s ease;
+}
+.fade-enter-from,
+.fade-leave-to {
+  opacity: 0;
+}
+
+.modal-fade-enter-active,
+.modal-fade-leave-active {
+  transition: opacity 0.2s ease;
+}
+.modal-fade-enter-active .export-dialog,
+.modal-fade-leave-active .export-dialog {
+  transition: transform 0.2s ease;
+}
+.modal-fade-enter-from,
+.modal-fade-leave-to {
+  opacity: 0;
+}
+.modal-fade-enter-from .export-dialog,
+.modal-fade-leave-to .export-dialog {
+  transform: scale(0.95);
 }
 </style>
