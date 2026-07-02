@@ -41,8 +41,8 @@ export function deleteConnection(id: string) {
 }
 
 /** 测试连接可用性 */
-export function testConnection(id: string) {
-  return http.post<TestConnectionResponse>(`${BASE}/${id}/test`)
+export function testConnection(id: string, password?: string) {
+  return http.post<TestConnectionResponse>(`${BASE}/${id}/test`, { password })
 }
 
 /** 获取连接元数据（库/表/列/索引） */

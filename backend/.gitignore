@@ -16,6 +16,9 @@ venv/
 data/*.db
 data/*.sqlite3
 
+# Log files
+logs/*.log
+
 # IDE
 .vscode/
 .idea/

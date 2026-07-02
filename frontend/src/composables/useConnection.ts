@@ -217,6 +217,10 @@ export function useConnection() {
       testResultText.value = null
       testSuccess.value = null
       try {
+        // 将表单中的密码存入 store 缓存，供 testConnection 使用
+        if (form.password) {
+          store.setPassword(editId.value, form.password)
+        }
         await store.testConnection(editId.value)
         if (store.testResult?.success) {
           testSuccess.value = true
@@ -253,6 +257,7 @@ export function useConnection() {
           ssl_enabled: form.ssl_enabled,
           ssl_ca_cert: form.ssl_ca_cert || undefined,
         })
+        // 密码已在 store.addConnection 中缓存，无需重复操作
         return created
       } else {
         // 更新连接：仅当密码非空时才更新密码

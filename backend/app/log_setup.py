@@ -13,8 +13,9 @@
 from __future__ import annotations
 
 import logging
-import os
 import sys
+from logging.handlers import TimedRotatingFileHandler
+from pathlib import Path
 from typing import Any
 
 import structlog
@@ -89,70 +90,99 @@ def _add_logger_name(
 
 
 def configure_logging() -> None:
-    """配置应用级结构化日志。
+    """配置应用级结构化日志，同时输出到控制台和每日轮转文件。
 
-    在 FastAPI 应用启动时调用一次。根据 settings.LOG_FORMAT 切换格式：
-      - "json": JSON 行输出（生产环境）
-      - "text": 带颜色的可读文本（开发环境）
+    在 FastAPI 应用启动时调用一次。
+    - 控制台：stderr，格式由 LOG_FORMAT 决定（text=彩色/ json=JSON行）
+    - 文件： 按日轮转，始终输出 JSON 格式（便于程序解析）
 
-    根据 settings.LOG_LEVEL 控制日志级别。
-    如果 settings.LOG_FILE 指定了路径，同时写入文件。
+    structlog 处理链设计：
+      - 全局处理器（structlog.configure）：处理元数据（时间戳、脱敏、异常信息），
+        最后通过 ProcessorFormatter.wrap_for_formatter 将事件字典交给 handler 的 formatter
+      - Handler formatter：各自使用不同的最终渲染器
+        （ConsoleRenderer → 控制台 / JSONRenderer → 文件）
+      - foreign_pre_chain：处理非 structlog 来源的日志（如第三方库的 warn/error）
     """
     log_level = getattr(logging, settings.LOG_LEVEL.upper(), logging.INFO)
     log_format = settings.LOG_FORMAT.lower()
+    log_dir = Path(settings.LOG_DIR)
 
-    # ── 通用处理器链 ──
-    # 这些处理器在所有格式之前执行
+    # ── 通用预处理处理器（在渲染之前对所有日志执行） ──
+    # 这些处理器同时用于：
+    #   1) structlog.configure() 中的全局处理器链
+    #   2) ProcessorFormatter.foreign_pre_chain（处理非 structlog 来源日志）
     shared_processors: list[structlog.typing.Processor] = [
         structlog.contextvars.merge_contextvars,
+        structlog.stdlib.add_log_level,
         _add_timestamp,
         _mask_sensitive_keys,
-        structlog.stdlib.add_log_level,
-        structlog.stdlib.ExtraAdder(),  # 保留 extra 字段
+        structlog.processors.format_exc_info,
     ]
 
-    if log_format == "json":
-        # 生产环境：JSON 行
-        processors = shared_processors + [
-            structlog.processors.format_exc_info,
-            structlog.processors.JSONRenderer(),
-        ]
-    else:
-        # 开发环境：彩色控制台
-        processors = shared_processors + [
-            structlog.dev.set_exc_info,
-            structlog.dev.ConsoleRenderer(
-                colors=sys.stderr.isatty(),
-            ),
-        ]
-
+    # ── 配置 structlog 全局处理器链 ──
+    # 注意：不包含渲染器！渲染交给 handler 级别的 formatter。
+    # wrap_for_formatter 将事件字典传递给 handler 的 ProcessorFormatter。
     structlog.configure(
-        processors=processors,
+        processors=shared_processors + [
+            structlog.stdlib.ProcessorFormatter.wrap_for_formatter,
+        ],
         wrapper_class=structlog.stdlib.BoundLogger,
         context_class=dict,
         logger_factory=structlog.stdlib.LoggerFactory(),
         cache_logger_on_first_use=True,
     )
 
-    # ── 配置标准库 logging（structlog 作为底层） ──
-    handler: logging.Handler
-    if settings.LOG_FILE:
-        os.makedirs(os.path.dirname(settings.LOG_FILE) or ".", exist_ok=True)
-        handler = logging.FileHandler(settings.LOG_FILE, encoding="utf-8")
+    # ── 构建 handler 级别的 formatter ──
+    # 控制台：LOG_FORMAT=text 用彩色控制台，json 用 JSON 行
+    if log_format == "json":
+        console_renderer: structlog.typing.Processor = structlog.processors.JSONRenderer()
     else:
-        handler = logging.StreamHandler(sys.stderr)
+        console_renderer = structlog.dev.ConsoleRenderer(colors=sys.stderr.isatty())
 
-    handler.setLevel(log_level)
-
-    # 使用 structlog 的标准库桥接
-    stdlib_formatter = structlog.stdlib.ProcessorFormatter(
-        processors=processors,
+    console_formatter = structlog.stdlib.ProcessorFormatter(
+        processor=console_renderer,
+        foreign_pre_chain=shared_processors,
     )
-    handler.setFormatter(stdlib_formatter)
 
+    # 文件：始终使用 JSON（避免 ANSI 转义码污染日志文件）
+    file_formatter = structlog.stdlib.ProcessorFormatter(
+        processor=structlog.processors.JSONRenderer(),
+        foreign_pre_chain=shared_processors,
+    )
+
+    # ── 配置标准库 logging ──
     root_logger = logging.getLogger()
     root_logger.setLevel(log_level)
-    root_logger.addHandler(handler)
+
+    # 移除现有 handler（防止重复添加，当配置变更重载时）
+    for h in list(root_logger.handlers):
+        root_logger.removeHandler(h)
+
+    # 1. 控制台 handler（stderr）
+    console_handler = logging.StreamHandler(sys.stderr)
+    console_handler.setLevel(log_level)
+    console_handler.setFormatter(console_formatter)
+    root_logger.addHandler(console_handler)
+
+    # 2. 文件 handler（每日轮转）
+    log_dir.mkdir(parents=True, exist_ok=True)
+    if settings.LOG_FILE:
+        log_path = str(Path(settings.LOG_FILE))
+    else:
+        log_path = str(log_dir / "db-pilot.log")
+    # 使用 TimedRotatingFileHandler：每天凌晨轮转，保留 N 天
+    # 轮转后文件命名为：db-pilot.log.2026-07-02，当前日志始终写入 db-pilot.log
+    file_handler = TimedRotatingFileHandler(
+        filename=log_path,
+        when="midnight",
+        interval=1,
+        backupCount=settings.LOG_BACKUP_DAYS,
+        encoding="utf-8",
+        delay=False,
+    )
+    file_handler.setLevel(log_level)
+    file_handler.setFormatter(file_formatter)
+    root_logger.addHandler(file_handler)
 
     # 减少第三方库的日志噪音
     for noisy in ("httpx", "httpcore", "urllib3", "aiosqlite", "aiomysql"):
@@ -164,5 +194,7 @@ def configure_logging() -> None:
         "日志系统已初始化",
         level=settings.LOG_LEVEL,
         format=log_format,
-        log_file=settings.LOG_FILE or "(stderr)",
+        console="stderr",
+        log_file=log_path,
+        backup_days=settings.LOG_BACKUP_DAYS,
     )

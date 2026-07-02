@@ -70,11 +70,11 @@ class MySQLAdapter(BaseAdapter):
                 pool_recycle=3600,
                 maxsize=10,
                 minsize=1,
-                # SAFETY: readonly=True 阻止无意的写操作
-                sql_mode="READ_ONLY",
             )
-            # 验证连接可用
+            # SAFETY: 设置会话为只读事务，阻止无意的写操作
+            # 使用标准 SQL 语法 SET TRANSACTION READ ONLY（兼容 MySQL 5.5+ / MariaDB）
             async with self._pool.acquire() as conn, conn.cursor() as cur:
+                await cur.execute("SET SESSION TRANSACTION READ ONLY")
                 await cur.execute("SELECT 1")
             self._connected = True
             logger.info("MySQL 连接成功",
@@ -84,12 +84,23 @@ class MySQLAdapter(BaseAdapter):
 
         except Exception as exc:
             self._connected = False
+            err_str = str(exc)[:200]
+            # 区分常见错误类型（不暴露密码）
+            if "Access denied" in err_str or "1045" in err_str:
+                err_type = "认证失败"
+            elif "Can't connect" in err_str or "2003" in err_str or "2002" in err_str:
+                err_type = "无法连接（网络/防火墙）"
+            elif "Unknown database" in err_str or "1049" in err_str:
+                err_type = "数据库不存在"
+            else:
+                err_type = "连接异常"
             logger.warning("MySQL 连接失败",
                            host=config.host, port=config.port,
-                           error=str(exc)[:100])
+                           database=config.database, user=config.user,
+                           error_type=err_type, error=err_str)
             # SAFETY: 连接失败异常消息仅包含 host:port（AGENTS.md §安全与合规红线）
             raise ConnectionError(
-                f"MySQL 连接失败 [{config.host}:{config.port}] — 请检查网络、用户名和密码"
+                f"MySQL 连接失败 [{config.host}:{config.port}] — {err_type}，请检查网络、用户名和密码"
             ) from exc
 
     async def disconnect(self) -> None:

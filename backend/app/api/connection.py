@@ -314,14 +314,15 @@ async def test_connection(
             },
         }
 
-    except Exception:
+    except Exception as exc:
         # SAFETY: 错误信息不包含密码（frontend AGENTS.md §2）
         db_conn.status = "unreachable"
         db_conn.last_tested_at = datetime.now(UTC)
         await session.commit()
 
         logger.warning("API 请求完成", endpoint="test_connection",
-                        connection_id=connection_id, success=False)
+                        connection_id=connection_id, success=False,
+                        error=str(exc)[:200])
 
         return {
             "success": False,

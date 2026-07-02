@@ -95,16 +95,26 @@ class Settings(BaseSettings):
 
     # ==================== 日志与可观测性 ====================
     LOG_LEVEL: str = Field(
-        default="INFO",
+        default="DEBUG",
         description="日志级别：DEBUG / INFO / WARNING / ERROR。",
     )
     LOG_FORMAT: str = Field(
         default="text",
         description="日志输出格式：json（生产）或 text（开发彩色控制台）。",
     )
+    LOG_DIR: str = Field(
+        default="logs",
+        description="日志文件输出目录（自动创建）。仅当 LOG_FILE 为空时生效。",
+    )
     LOG_FILE: str | None = Field(
         default=None,
-        description="日志文件路径（可选）。为空时仅输出到 stderr。",
+        description="日志文件路径（可选）。为空时使用 LOG_DIR 按日期自动生成。",
+    )
+    LOG_BACKUP_DAYS: int = Field(
+        default=30,
+        ge=1,
+        le=365,
+        description="日志文件保留天数（每日轮转）。",
     )
     LOG_TRACE_ENABLED: bool = Field(
         default=True,

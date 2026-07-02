@@ -28,6 +28,9 @@ import type {
 /** localStorage 键名 */
 const STORAGE_KEY = 'db-pilot:connections'
 
+/** sessionStorage 键名（密码缓存，关闭标签页自动清除） */
+const PASSWORD_STORAGE_KEY = 'db-pilot:passwords'
+
 /** 运行时连接状态（扩展了中间态 'connecting'） */
 export type RuntimeStatus = ConnectionStatusValue | 'connecting'
 
@@ -57,6 +60,38 @@ export const useConnectionStore = defineStore('connection', () => {
 
   /** 连接测试失败信息 */
   const testError = ref<string | null>(null)
+
+  /**
+   * 连接密码缓存（持久化到 sessionStorage，关闭标签页自动清除）。
+   * 创建/更新连接时存入，页面刷新后自动恢复。
+   * 测试连接时从中取密码发送给后端。
+   */
+  const passwords = new Map<string, string>()
+
+  /** 从 sessionStorage 恢复密码缓存 */
+  function loadPasswords() {
+    try {
+      const saved = sessionStorage.getItem(PASSWORD_STORAGE_KEY)
+      if (saved) {
+        const parsed = JSON.parse(saved) as [string, string][]
+        parsed.forEach(([id, pwd]) => passwords.set(id, pwd))
+      }
+    } catch {
+      sessionStorage.removeItem(PASSWORD_STORAGE_KEY)
+    }
+  }
+
+  /** 持久化密码缓存到 sessionStorage */
+  function persistPasswords() {
+    try {
+      sessionStorage.setItem(
+        PASSWORD_STORAGE_KEY,
+        JSON.stringify(Array.from(passwords.entries())),
+      )
+    } catch {
+      // sessionStorage 满等异常静默忽略
+    }
+  }
 
   // ─── Getters ───
 
@@ -126,6 +161,11 @@ export const useConnectionStore = defineStore('connection', () => {
     // 后端返回不含 password，添加占位符
     const entry: ConnectionConfig = { ...created, password: '***' }
     connections.value.push(entry)
+    // 缓存密码到 sessionStorage（用于后续连接测试）
+    if (data.password) {
+      passwords.set(created.id, data.password)
+      persistPasswords()
+    }
     persistToStorage()
     return entry
   }
@@ -138,6 +178,11 @@ export const useConnectionStore = defineStore('connection', () => {
     if (idx !== -1) {
       connections.value[idx] = entry
     }
+    // 更新密码缓存（如果提供了新密码）
+    if (data.password) {
+      passwords.set(id, data.password)
+      persistPasswords()
+    }
     persistToStorage()
     return entry
   }
@@ -146,6 +191,9 @@ export const useConnectionStore = defineStore('connection', () => {
   async function removeConnection(id: string): Promise<void> {
     await apiDelete(id)
     connections.value = connections.value.filter((c) => c.id !== id)
+    // 清理密码缓存
+    passwords.delete(id)
+    persistPasswords()
     if (activeId.value === id) {
       activeId.value = null
       status.value = 'unknown'
@@ -166,12 +214,20 @@ export const useConnectionStore = defineStore('connection', () => {
     const targetId = id || activeId.value
     if (!targetId) return
 
+    // 从内存缓存获取密码；无密码则跳过自动测试（保留 API 已有状态）
+    const password = passwords.get(targetId)
+    if (!password) {
+      status.value = 'unknown'
+      testError.value = '密码未缓存，请打开编辑表单输入密码后重试'
+      return
+    }
+
     isTesting.value = true
     status.value = 'connecting'
     testError.value = null
 
     try {
-      const result = await apiTest(targetId)
+      const result = await apiTest(targetId, password)
       testResult.value = result
       testLatencyMs.value = result.latency_ms
       lastTestedAt.value = new Date().toISOString()
@@ -191,7 +247,9 @@ export const useConnectionStore = defineStore('connection', () => {
           persistToStorage()
         }
       } else {
-        status.value = 'degraded'
+        // 后端连接失败（认证错误、网络不可达等）→ 标记为 unreachable
+        status.value = 'unreachable'
+        testError.value = '连接测试失败，请检查网络、用户名和密码'
       }
     } catch (err: unknown) {
       status.value = 'unreachable'
@@ -199,6 +257,17 @@ export const useConnectionStore = defineStore('connection', () => {
       testError.value = msg
     } finally {
       isTesting.value = false
+    }
+  }
+
+  /**
+   * 缓存连接密码到 sessionStorage（用于后续测试）。
+   * 由 ConnectionForm 在创建/更新后及测试前调用。
+   */
+  function setPassword(id: string, password: string) {
+    if (password) {
+      passwords.set(id, password)
+      persistPasswords()
     }
   }
 
@@ -219,9 +288,10 @@ export const useConnectionStore = defineStore('connection', () => {
   // connections 变更时自动持久化
   watch(connections, persistToStorage, { deep: true })
 
-  // ─── 初始化：从 localStorage 恢复 ───
+  // ─── 初始化：从 localStorage 恢复连接列表 + sessionStorage 恢复密码缓存 ───
 
   loadFromStorage()
+  loadPasswords()
 
   return {
     // state
@@ -243,5 +313,6 @@ export const useConnectionStore = defineStore('connection', () => {
     removeConnection,
     setActiveConnection,
     testConnection,
+    setPassword,
   }
 })

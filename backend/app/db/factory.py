@@ -80,8 +80,13 @@ class AdapterFactory:
                 f"无法加载适配器模块 '{module_path}'：{exc}。{hint}"
             ) from exc
 
-        # 获取适配器类（约定类名为 <Type>Adapter，如 MySQLAdapter）
-        adapter_class_name = f"{db_type.capitalize()}Adapter"
+        # 获取适配器类（使用显式映射而非 capitalize()，因为 MySQL ≠ Mysql）
+        _ADAPTER_CLASS_NAMES: dict[str, str] = {
+            "mysql": "MySQLAdapter",
+            "postgresql": "PostgresAdapter",
+            "oracle": "OracleAdapter",
+        }
+        adapter_class_name = _ADAPTER_CLASS_NAMES.get(db_type, f"{db_type.capitalize()}Adapter")
         adapter_class = getattr(module, adapter_class_name, None)
 
         if adapter_class is None:
