@@ -57,6 +57,18 @@ function formatElapsed(ms: number): string {
   return min > 0 ? `${min}m${s}.${ds}s` : `${s}.${ds}s`
 }
 
+/** 推理类型中文标签（Agent 架构升级后新增） */
+function reasoningTypeLabel(type: string): string {
+  const labels: Record<string, string> = {
+    classifying: '意图分析',
+    planning: '规划中',
+    observing: '观察中',
+    concluding: '总结中',
+    error_recovery: '纠错中',
+  }
+  return labels[type] || type
+}
+
 /** 耗时时间颜色 */
 const elapsedColor = computed(() => {
   if (thinkingElapsed.value < 10000) return 'var(--text-tertiary)'
@@ -125,6 +137,9 @@ const resultRows = computed(() => {
             <button class="thinking-header" @click="thinkingExpanded = !thinkingExpanded">
               <span class="thinking-icon">🧠</span>
               <span class="thinking-title">AI 推理过程</span>
+              <span v-if="message.reasoningType" class="thinking-badge" :class="`badge-${message.reasoningType}`">
+                {{ reasoningTypeLabel(message.reasoningType) }}
+              </span>
               <span class="thinking-timer" :style="{ color: elapsedColor }">
                 {{ formatElapsed(thinkingElapsed) }}
               </span>
@@ -344,6 +359,41 @@ const resultRows = computed(() => {
   font-size: 11px;
   color: var(--text-tertiary);
   margin-left: 8px;
+}
+
+/* reasoning_type 标签（Agent 架构升级后新增） */
+.thinking-badge {
+  font-size: 10px;
+  font-weight: 500;
+  padding: 1px 6px;
+  border-radius: 8px;
+  line-height: 1.4;
+  margin-left: 4px;
+}
+
+.badge-classifying {
+  background: rgba(96, 165, 250, 0.15);
+  color: var(--accent-blue, #60a5fa);
+}
+
+.badge-planning {
+  background: rgba(251, 191, 36, 0.15);
+  color: var(--color-warning, #fbbf24);
+}
+
+.badge-observing {
+  background: rgba(52, 211, 153, 0.15);
+  color: var(--accent-teal, #34d399);
+}
+
+.badge-concluding {
+  background: rgba(167, 139, 250, 0.15);
+  color: var(--accent-purple, #a78bfa);
+}
+
+.badge-error_recovery {
+  background: rgba(248, 113, 113, 0.15);
+  color: var(--color-error, #f87171);
 }
 
 .thinking-body {

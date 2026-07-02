@@ -96,6 +96,12 @@ export interface ExplainResponse {
 export interface ThinkingEvent {
   type: 'thinking'
   content: string
+  /** Agent 运行唯一 ID（Agent 架构升级后新增） */
+  agent_run_id?: string
+  /** 当前是 Agent 第几轮 ReAct 迭代（Agent 架构升级后新增） */
+  iteration?: number
+  /** 推理类型：planning | observing | concluding | classifying | error_recovery（Agent 架构升级后新增） */
+  reasoning_type?: string
 }
 
 /** SSE 事件：Agent 调用工具 */
@@ -104,6 +110,10 @@ export interface ToolCallEvent {
   tool: string
   args: Record<string, unknown>
   display: string
+  /** Agent 运行唯一 ID（Agent 架构升级后新增） */
+  agent_run_id?: string
+  /** 当前是 Agent 第几轮 ReAct 迭代（Agent 架构升级后新增） */
+  iteration?: number
 }
 
 /** SSE 事件：工具返回 */
@@ -112,6 +122,12 @@ export interface ToolResultEvent {
   tool: string
   summary: string
   duration_ms: number
+  /** Agent 运行唯一 ID（Agent 架构升级后新增） */
+  agent_run_id?: string
+  /** 当前是 Agent 第几轮 ReAct 迭代（Agent 架构升级后新增） */
+  iteration?: number
+  /** 安全护栏检查结果（Agent 架构升级后新增） */
+  safety_checks_passed?: boolean
 }
 
 /** SSE 事件：SQL 生成 */
@@ -120,6 +136,10 @@ export interface SqlEvent {
   content: string
   audit_status: string
   is_readonly: boolean
+  /** Agent 运行唯一 ID（Agent 架构升级后新增） */
+  agent_run_id?: string
+  /** 当前是 Agent 第几轮 ReAct 迭代（Agent 架构升级后新增） */
+  iteration?: number
 }
 
 /** SSE 事件：查询结果 */
@@ -153,6 +173,15 @@ export interface DoneEvent {
   type: 'done'
   session_id: string
   tokens_used: number
+  /** Agent 运行唯一 ID（Agent 架构升级后新增） */
+  agent_run_id?: string
+  /** Agent 总共推理了几轮（Agent 架构升级后新增） */
+  total_iterations?: number
+  /** 决策链路摘要（Agent 架构升级后新增，用于调试面板） */
+  trace_summary?: {
+    tools_called: string[]
+    total_duration_ms: number
+  }
 }
 
 /** SSE 事件联合类型 */

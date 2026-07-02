@@ -120,12 +120,12 @@
 
 ## 五、前端兼容性检查清单
 
-- [ ] `thinking` 事件按动态内容渲染（非固定文本匹配）
-- [ ] 支持同一轮对话中多次 `thinking` → `tool_call` → `tool_result` 循环
-- [ ] `done` 事件中 `trace_summary` 为新增可选字段，缺失时不 crash
-- [ ] `agent_run_id` 为新增可选字段，缺失时不影响渲染
-- [ ] 取消按钮在 Agent 执行过程中始终可用
-- [ ] SSE 连接中断重连后，能从 `agent_run_id` 判断是否需要重新发起请求
+- [x] `thinking` 事件按动态内容渲染（非固定文本匹配）——自动展示，且新增 `reasoning_type` 标签（意图分析/规划中/观察中/总结中/纠错中）
+- [x] 支持同一轮对话中多次 `thinking` → `tool_call` → `tool_result` 循环——每个事件独立入消息队列，自适应展示
+- [x] `done` 事件中 `trace_summary` 为新增可选字段，缺失时不 crash——Store 中通过 `last.traceSummary = event.trace_summary` 可选赋值
+- [x] `agent_run_id` 为新增可选字段，缺失时不影响渲染——所有字段均通过 `?.` 可选链访问
+- [x] 取消按钮在 Agent 执行过程中始终可用——已有 `cancelStreaming()` 实现
+- [ ] SSE 连接中断重连后，能从 `agent_run_id` 判断是否需要重新发起请求——建议后续迭代实现自动重连逻辑
 
 ---
 

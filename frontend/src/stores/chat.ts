@@ -47,7 +47,13 @@ export interface StoreMessage {
 
   // ─── 按类型扩展字段 ───
 
-  // thinking: 无额外字段
+  // thinking
+  /** Agent 运行唯一 ID（Agent 架构升级） */
+  agentRunId?: string
+  /** 当前是 Agent 第几轮 ReAct 迭代 */
+  iteration?: number
+  /** 推理类型：planning | observing | concluding | classifying | error_recovery */
+  reasoningType?: string
 
   // tool_call / tool_result
   tool?: string
@@ -55,6 +61,8 @@ export interface StoreMessage {
   displayText?: string
   durationMs?: number
   stepStatus?: 'running' | 'done' | 'error'
+  /** 安全护栏检查结果（Agent 架构升级后新增） */
+  safetyChecksPassed?: boolean
 
   // sql
   sqlContent?: string
@@ -78,6 +86,11 @@ export interface StoreMessage {
 
   // done
   tokensUsed?: number
+  /** 决策链路摘要（Agent 架构升级后新增） */
+  traceSummary?: {
+    tools_called: string[]
+    total_duration_ms: number
+  }
 
   // diagnosis
   findings?: Array<{
@@ -237,6 +250,9 @@ export const useChatStore = defineStore('chat', () => {
             role: 'assistant',
             type: 'thinking',
             content: event.content,
+            agentRunId: event.agent_run_id,
+            iteration: event.iteration,
+            reasoningType: event.reasoning_type,
             createdAt: new Date().toISOString(),
           })
         },
@@ -253,6 +269,8 @@ export const useChatStore = defineStore('chat', () => {
             toolArgs: event.args,
             displayText: event.display,
             stepStatus: 'running',
+            agentRunId: event.agent_run_id,
+            iteration: event.iteration,
             createdAt: new Date().toISOString(),
           })
         },
@@ -265,6 +283,9 @@ export const useChatStore = defineStore('chat', () => {
             toolCall.durationMs = event.duration_ms
             toolCall.content = event.summary
             toolCall.type = 'tool_result'
+            toolCall.safetyChecksPassed = event.safety_checks_passed
+            toolCall.agentRunId = event.agent_run_id
+            toolCall.iteration = event.iteration
           }
         },
 
@@ -279,6 +300,8 @@ export const useChatStore = defineStore('chat', () => {
             sqlContent: event.content,
             auditStatus: event.audit_status,
             isReadonly: event.is_readonly,
+            agentRunId: event.agent_run_id,
+            iteration: event.iteration,
             createdAt: new Date().toISOString(),
           })
         },
@@ -330,10 +353,12 @@ export const useChatStore = defineStore('chat', () => {
         onDone: (event: DoneEvent) => {
           isStreaming.value = false
           currentSessionId.value = event.session_id
-          // 更新最后一条助手消息的 token 计数
+          // 更新最后一条助手消息的 token 计数及 Agent 汇总信息
           const last = lastAssistantMessage.value
           if (last) {
             last.tokensUsed = event.tokens_used
+            last.agentRunId = last.agentRunId || event.agent_run_id
+            last.traceSummary = event.trace_summary
           }
         },
 
