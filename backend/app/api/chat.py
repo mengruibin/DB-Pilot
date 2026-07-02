@@ -2,9 +2,10 @@
 SSE 对话流 API 路由。
 
 核心端点 POST /api/chat/stream：
-  1. 接收用户消息
-  2. 意图分类 → 工具编排 → LLM 分析
-  3. 通过 SSE 流式推送 thinking/tool_call/tool_result/sql/result/done 事件
+  1. 接收用户消息 + 会话管理 + 连接解析
+  2. 构建 AgentState → 执行 LangGraph ReAct Agent 图
+  3. LLM 自主决定工具调用 → 图自动路由 classify → agent ↔ tools
+  4. 通过 SSE 流式推送 thinking/tool_call/tool_result/sql/result/done 事件
 
 依据 api-contract §1.2 POST /api/chat/stream（7 种 type 契约表）。
 依据 AGENTS.md §SSE 流式格式、§安全与合规红线（密码不落盘）。
@@ -14,10 +15,10 @@ from __future__ import annotations
 
 import asyncio
 import json
-import time
 from collections.abc import AsyncGenerator
 from datetime import UTC, datetime
 from typing import Any
+from uuid import uuid4
 
 import structlog
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
@@ -25,11 +26,10 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.agent.router import IntentRouter
-from app.agent.state import Intent
+from app.agent.sse_utils import format_sse
+from app.agent.state import AgentState, Intent
 from app.correlation import set_connection_id
 from app.database import async_session_factory, get_session
-from app.engine.llm_client import LLMClient
 from app.models.connection import ConnectionConfigModel
 from app.models.schemas import (
     ChatRequest,
@@ -59,20 +59,6 @@ _session_adapter_info: dict[str, dict[str, Any]] = {}
 # =============================================================================
 # 通用工具函数
 # =============================================================================
-
-def _format_sse(data: dict[str, Any]) -> str:
-    """将 dict 格式化为 SSE 消息。
-
-    SSE 格式（AGENTS.md §SSE 流式格式）：
-      event: message\ndata: {json}\n\n
-    """
-    return f"event: message\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
-
-
-def _truncate_preview(rows: list, max_rows: int = 100) -> list:
-    """截断结果预览行数（AC-9：data_preview 仅返回前 100 行）。"""
-    return rows[:max_rows]
-
 
 async def _build_conversation_history(
     db: AsyncSession,
@@ -181,6 +167,7 @@ async def _save_message(
     result_preview: dict | None = None,
     error_info: dict | None = None,
     tokens_used: int = 0,
+    agent_trace: str | None = None,
 ) -> MessageModel:
     """保存消息到数据库。
 
@@ -209,6 +196,7 @@ async def _save_message(
         result_preview=result_preview,
         error_info=error_info,
         tokens_used=tokens_used,
+        agent_trace=agent_trace,
     )
     db.add(msg)
 
@@ -218,9 +206,10 @@ async def _save_message(
     )
     session = result.scalar_one_or_none()
     if session:
-        session.message_count = SessionModel.message_count + 1
+        # FIXED: 使用实例属性自增，而非类属性（类属性永远是默认值0）
+        session.message_count = (session.message_count or 0) + 1
         session.last_active_at = datetime.now(UTC)
-        session.tokens_used_total = SessionModel.tokens_used_total + tokens_used
+        session.tokens_used_total = (session.tokens_used_total or 0) + tokens_used
 
     await db.commit()
     await db.refresh(msg)
@@ -271,478 +260,12 @@ async def _resolve_connection_config(
 
 
 # =============================================================================
-# 工具编排——按意图执行对应工具链
+# 工具编排——已迁移至 LangGraph Agent 图
+#
+# 旧 _execute_tool_chain() 函数 (~460行) 已于 2026-07-02 删除。
+# 所有工具编排逻辑现在由 app/agent/graph.py 中的 LangGraph StateGraph 处理：
+#   classify_node → route → agent_node ↔ tools_node → format_response
 # =============================================================================
-
-async def _execute_tool_chain(
-    intent: Intent,
-    conn_config: dict[str, Any],
-    user_message: str,
-    conversation_history: str | None = None,
-) -> AsyncGenerator[dict[str, Any], None]:
-    """按意图执行工具链，逐条 yield SSE 事件数据。
-
-    Args:
-        intent: 用户意图。
-        conn_config: 连接配置参数字典。
-        user_message: 用户原始消息。
-        conversation_history: 可选的会话历史文本，传递到 NL2SQL
-            用于理解上下文。
-
-    Yields:
-        每个事件的 dict，外层负责格式化为 SSE 并发送。
-    """
-    from app.agent.tools.diagnosis import explain_query, get_slow_queries
-    from app.agent.tools.health import run_health_check
-    from app.agent.tools.troubleshoot import (
-        check_connections,
-        check_locks,
-        check_replication,
-    )
-
-    # 构建工具参数字典。@tool 装饰器将函数包装为 BaseTool 实例，
-    # Pyright 无法识别关键字参数，因此通过 .ainvoke(dict) 调用
-    _base: dict[str, Any] = {
-        "db_type": conn_config["db_type"],
-        "host": conn_config["host"],
-        "port": conn_config["port"],
-        "database": conn_config["database"],
-        "user": conn_config["user"],
-        "password": conn_config["password"],
-        "ssl_enabled": conn_config.get("ssl_enabled", False),
-        "ssl_ca_cert": conn_config.get("ssl_ca_cert"),
-    }
-
-    def _invoke(tool: Any, **extra: Any) -> Any:
-        """调用 @tool 函数。tool 是 BaseTool 实例，通过 ainvoke(dict) 执行。"""
-        return tool.ainvoke({**_base, **extra})
-
-    if intent == Intent.QUERY:
-        # NL2SQL → 执行查询（B-17 集成 generate_sql + schema_context B-10）
-        # Step 1: 获取 Schema 上下文（表+列信息）
-        yield {
-            "type": "thinking",
-            "content": "正在获取数据库结构信息...",
-        }
-
-        try:
-            from app.agent.tools.query import list_tables, describe_table, run_query
-            from app.engine.nl2sql import generate_sql
-
-            # 1a. 获取表列表
-            tables_result = await _invoke(
-                list_tables,
-                connection_id=conn_config["connection_id"],
-            )
-
-            if "error" in tables_result:
-                yield {
-                    "type": "error",
-                    "error_code": "SCHEMA_ERROR",
-                    "user_message": tables_result.get("detail", "获取表结构失败"),
-                    "severity": "error",
-                }
-                return
-
-            tables_info = tables_result.get("tables", [])
-
-            # 1b. 获取每张表的列信息（限制前 10 张表，避免过多 LLM 上下文浪费）
-            schema_tables: list[dict[str, Any]] = []
-            for table in tables_info[:10]:
-                table_name = table.get("table_name", "")
-                if not table_name:
-                    continue
-                desc_result = await _invoke(
-                    describe_table,
-                    connection_id=conn_config["connection_id"],
-                    table_name=table_name,
-                )
-                if "error" not in desc_result:
-                    schema_tables.append({
-                        "table_name": table_name,
-                        "columns": desc_result.get("columns", []),
-                        "comment": table.get("comment", ""),
-                    })
-                else:
-                    # 列获取失败时仍保留表名，仅列信息为空
-                    schema_tables.append({
-                        "table_name": table_name,
-                        "columns": [],
-                        "comment": table.get("comment", ""),
-                    })
-
-            schema_context: dict[str, Any] = {
-                "tables": schema_tables,
-                "database": conn_config["database"],
-            }
-
-            # Step 2: NL2SQL 生成 SQL
-            yield {
-                "type": "thinking",
-                "content": "正在理解查询意图并生成 SQL...",
-            }
-
-            sql_result = await generate_sql(
-                natural_language=user_message,
-                schema_context=schema_context,
-                connection_id=conn_config["connection_id"],
-                db_type=conn_config["db_type"],
-                conversation_history=conversation_history,
-            )
-
-            if "error" in sql_result:
-                yield {
-                    "type": "error",
-                    "error_code": "NL2SQL_ERROR",
-                    "user_message": sql_result.get("detail", "SQL 生成失败，请重试或简化查询"),
-                    "severity": "error",
-                }
-                return
-
-            if sql_result.get("audit_status") == "blocked":
-                violations = sql_result.get("violations", [])
-                yield {
-                    "type": "error",
-                    "error_code": "SQL_BLOCKED",
-                    "user_message": f"生成的 SQL 被安全审计拦截（{len(violations)} 项违规）",
-                    "severity": "error",
-                }
-                return
-
-            generated_sql = sql_result["sql"]
-            explanation = sql_result.get("explanation", "")
-
-            # Step 3: 执行生成的 SQL（自动重试一次，应对 LLM 生成错误）
-            yield {
-                "type": "tool_call",
-                "tool": "run_query",
-                "args": {"sql": generated_sql},
-                "display": explanation or "正在执行查询...",
-            }
-
-            sql_to_execute = generated_sql
-            retry_count = 0
-            max_retries = 1
-
-            while retry_count <= max_retries:
-                start = time.monotonic()
-                result = await _invoke(
-                    run_query,
-                    connection_id=conn_config["connection_id"],
-                    sql=sql_to_execute,
-                    user_role="standard",
-                )
-                elapsed = int((time.monotonic() - start) * 1000)
-
-                if "error" not in result:
-                    # 执行成功
-                    break
-
-                # 执行失败，尝试重试
-                retry_count += 1
-                if retry_count > max_retries:
-                    # 已达最大重试次数，报告错误
-                    yield {
-                        "type": "error",
-                        "error_code": "QUERY_ERROR",
-                        "user_message": result["error"],
-                        "severity": "error",
-                    }
-                    return
-
-                # 用错误信息让 LLM 修正 SQL
-                logger.warning("SQL 执行失败，正在尝试自动修正",
-                               retry=retry_count, error=str(result["error"])[:200],
-                               sql=sql_to_execute[:200])
-
-                yield {
-                    "type": "thinking",
-                    "content": f"SQL 执行出错，正在尝试修正...（{result['error'][:100]}）",
-                }
-
-                fix_result = await generate_sql(
-                    natural_language=user_message,
-                    schema_context=schema_context,
-                    connection_id=conn_config["connection_id"],
-                    db_type=conn_config["db_type"],
-                    conversation_history=conversation_history,
-                    previous_error=result["error"],
-                    previous_sql=sql_to_execute,
-                )
-
-                if "error" in fix_result:
-                    # 修正也失败了，报告原始错误
-                    yield {
-                        "type": "error",
-                        "error_code": "QUERY_ERROR",
-                        "user_message": result["error"],
-                        "severity": "error",
-                    }
-                    return
-
-                if fix_result.get("audit_status") == "blocked":
-                    yield {
-                        "type": "error",
-                        "error_code": "SQL_BLOCKED",
-                        "user_message": "修正后的 SQL 仍被安全审计拦截",
-                        "severity": "error",
-                    }
-                    return
-
-                sql_to_execute = fix_result["sql"]
-                explanation = fix_result.get("explanation", explanation)
-
-                yield {
-                    "type": "tool_call",
-                    "tool": "run_query",
-                    "args": {"sql": sql_to_execute},
-                    "display": f"修正后重试：{explanation}",
-                }
-            else:
-                yield {
-                    "type": "tool_result",
-                    "tool": "run_query",
-                    "summary": f"查询完成：返回 {result.get('total_rows', 0)} 行",
-                    "duration_ms": elapsed,
-                }
-                yield {
-                    "type": "sql",
-                    "content": generated_sql,
-                    "audit_status": result.get("audit_status", "passed"),
-                    "is_readonly": True,
-                    "explanation": explanation,
-                }
-                yield {
-                    "type": "result",
-                    "summary": f"查询完成：返回 {result.get('total_rows', 0)} 行，"
-                               f"耗时 {result.get('execution_time_ms', elapsed)}ms",
-                    "data_preview": {
-                        "columns": result.get("columns", []),
-                        "rows": _truncate_preview(result.get("rows", [])),
-                        "total_rows": result.get("total_rows", 0),
-                    },
-                    "duration_ms": result.get("execution_time_ms", elapsed),
-                }
-        except Exception as exc:
-            logger.error("QUERY 工具链异常", error=str(exc)[:200])
-            yield {
-                "type": "error",
-                "error_code": "AGENT_ERROR",
-                "user_message": "查询执行失败，请稍后重试",
-                "severity": "error",
-            }
-
-    elif intent == Intent.DIAGNOSIS:
-        # 诊断：获取慢查询 + 执行计划分析
-        yield {
-            "type": "thinking",
-            "content": "正在获取慢查询日志...",
-        }
-
-        # Step 1: 获取慢查询
-        yield {
-            "type": "tool_call",
-            "tool": "get_slow_queries",
-            "args": {"time_range": "1h", "limit": 20},
-            "display": "正在查询最近1小时慢查询日志...",
-        }
-
-        try:
-            start = time.monotonic()
-            slow_result = await _invoke(
-                get_slow_queries,
-                connection_id=conn_config["connection_id"],
-                time_range="1h",
-                limit=20,
-            )
-            elapsed = int((time.monotonic() - start) * 1000)
-
-            yield {
-                "type": "tool_result",
-                "tool": "get_slow_queries",
-                "summary": f"返回 {slow_result.get('total', 0)} 条慢查询记录",
-                "duration_ms": elapsed,
-            }
-
-            items = slow_result.get("items", [])
-            if items:
-                # 对最慢的查询执行 EXPLAIN
-                slowest_sql = items[0].get("sql_text", "")
-                yield {
-                    "type": "tool_call",
-                    "tool": "explain_query",
-                    "args": {"sql": slowest_sql[:200]},
-                    "display": "正在分析最慢查询的执行计划...",
-                }
-
-                start = time.monotonic()
-                explain_result = await _invoke(
-                    explain_query,
-                    connection_id=conn_config["connection_id"],
-                    sql=slowest_sql,
-                    format="tree",
-                )
-                elapsed = int((time.monotonic() - start) * 1000)
-
-                if "error" not in explain_result:
-                    yield {
-                        "type": "tool_result",
-                        "tool": "explain_query",
-                        "summary": "执行计划分析完成",
-                        "duration_ms": elapsed,
-                    }
-
-            yield {
-                "type": "result",
-                "summary": (
-                    f"诊断完成：发现 {slow_result.get('total', 0)} 条慢查询"
-                ),
-                "data_preview": {
-                    "slow_queries": items[:5],
-                },
-                "duration_ms": elapsed,
-            }
-        except Exception as exc:
-            logger.error("DIAGNOSIS 工具链异常", error=str(exc)[:200])
-            yield {
-                "type": "error",
-                "error_code": "AGENT_ERROR",
-                "user_message": "诊断执行失败，请稍后重试",
-                "severity": "error",
-            }
-
-    elif intent == Intent.TROUBLESHOOT:
-        # 故障排查：连接检查 → 锁检查 → 复制检查
-        yield {
-            "type": "thinking",
-            "content": "开始故障排查：优先检查连接数和锁等待...",
-        }
-
-        check_sequence = [
-            ("check_connections", "检查连接池状态...",
-             lambda: _invoke(check_connections,
-                             connection_id=conn_config["connection_id"])),
-            ("check_locks", "检查锁等待...",
-             lambda: _invoke(check_locks,
-                             connection_id=conn_config["connection_id"])),
-            ("check_replication", "检查主从复制状态...",
-             lambda: _invoke(check_replication,
-                             connection_id=conn_config["connection_id"])),
-        ]
-
-        results = []
-        for tool_name, display, tool_fn in check_sequence:
-            yield {
-                "type": "tool_call",
-                "tool": tool_name,
-                "args": {},
-                "display": display,
-            }
-
-            try:
-                start = time.monotonic()
-                tr = await tool_fn()
-                elapsed = int((time.monotonic() - start) * 1000)
-                status = tr.get("status", "error")
-
-                yield {
-                    "type": "tool_result",
-                    "tool": tool_name,
-                    "summary": f"状态：{status}",
-                    "duration_ms": elapsed,
-                }
-                results.append({"tool": tool_name, "status": status, **tr})
-            except Exception as exc:
-                logger.error(f"{tool_name} 异常", error=str(exc)[:200])
-                yield {
-                    "type": "tool_result",
-                    "tool": tool_name,
-                    "summary": "检查异常，已跳过",
-                    "duration_ms": 0,
-                }
-
-        yield {
-            "type": "result",
-            "summary": "故障排查完成",
-            "data_preview": {"steps": results},
-            "duration_ms": 0,
-        }
-
-    elif intent == Intent.HEALTH_CHECK:
-        # 健康巡检
-        yield {
-            "type": "thinking",
-            "content": "正在执行数据库健康巡检（共 20 项检查）...",
-        }
-        yield {
-            "type": "tool_call",
-            "tool": "run_health_check",
-            "args": {"check_items": ["all"]},
-            "display": "正在执行 20 项健康检查...",
-        }
-
-        try:
-            start = time.monotonic()
-            health_result = await _invoke(
-                run_health_check,
-                connection_id=conn_config["connection_id"],
-                check_items=["all"],
-            )
-            elapsed = int((time.monotonic() - start) * 1000)
-
-            if "error" not in health_result:
-                yield {
-                    "type": "tool_result",
-                    "tool": "run_health_check",
-                    "summary": (
-                        f"评分 {health_result.get('score', 0)}/100 — "
-                        f"{health_result.get('severity_counts', {}).get('error', 0)} 项异常"
-                    ),
-                    "duration_ms": elapsed,
-                }
-                yield {
-                    "type": "result",
-                    "summary": (
-                        f"健康巡检完成，评分：{health_result.get('score', 0)}/100"
-                    ),
-                    "data_preview": health_result.get("categories", []),
-                    "duration_ms": elapsed,
-                }
-            else:
-                yield {
-                    "type": "error",
-                    "error_code": "HEALTH_CHECK_ERROR",
-                    "user_message": health_result["error"],
-                    "severity": "error",
-                }
-        except Exception as exc:
-            logger.error("HEALTH_CHECK 工具链异常", error=str(exc)[:200])
-            yield {
-                "type": "error",
-                "error_code": "AGENT_ERROR",
-                "user_message": "健康巡检执行失败",
-                "severity": "error",
-            }
-
-    else:
-        # GENERAL：通用对话
-        yield {
-            "type": "text",
-            "content": (
-                "我是 DB-Pilot 数据库运维助手。我可以帮助您：\n"
-                "1. 自然语言查询数据（NL2SQL）\n"
-                "2. SQL 性能诊断与优化\n"
-                "3. 数据库故障排查\n"
-                "4. 数据库健康巡检\n"
-                "请描述您的问题或选择一个数据库连接开始。"
-            ),
-        }
-
-
-# =============================================================================
-# KILL QUERY 辅助
-# =============================================================================
-
 
 async def _kill_db_query(conn_info: dict[str, Any]) -> None:
     """取消目标数据库上的活跃查询（KILL QUERY）。
@@ -918,21 +441,7 @@ async def _stream_events(
                 db, session.id, max_messages=10,
             )
 
-            # ========== Step 2: 意图分类 ==========
-            router = IntentRouter(llm_client=LLMClient())
-            intent = await router.classify(
-                body.message,
-                conversation_history=conversation_history,
-            )
-            assistant_content_parts.append(f"分析用户意图：{intent.value}")
-
-            yield _format_sse({
-                "type": "thinking",
-                "content": f"分析用户意图：{intent.value}",
-            })
-
-            # ========== Step 3-4: 解析连接 + 工具编排 ==========
-            # 解析连接信息
+            # ========== Step 2: 解析连接配置 ==========
             conn_config = await _resolve_connection_config(
                 db, body.connection_id, body.password,
             )
@@ -950,65 +459,108 @@ async def _stream_events(
                     "ssl_ca_cert": conn_config.get("ssl_ca_cert"),
                 }
 
-            async for event_data in _execute_tool_chain(
-                intent, conn_config, body.message,
-                conversation_history=conversation_history,
-            ):
-                # 检查取消信号（AC-6：取消后前端 SSE 流收到 done 事件）
+            # ========== Step 3: 构建 AgentState + 执行 LangGraph 图 ==========
+            # 引入图构建
+            from app.agent.graph import build_agent_graph
+
+            run_id = f"run_{uuid4().hex[:12]}"
+            initial_state: AgentState = {
+                "user_message": body.message,
+                "connection_id": body.connection_id,
+                "session_id": session.id,
+                "password": body.password,
+                "user_role": "standard",
+                "conversation_history": conversation_history,
+                "conn_config": conn_config,
+                "run_id": run_id,
+                "messages": [],
+                "pending_tool_calls": [],
+                "pending_tool_results": [],
+                "trace_iterations": [],
+            }
+
+            graph = build_agent_graph()
+            emitted_count = 0
+
+            # 使用 stream_mode="values" 获取每次节点执行后的完整状态
+            async for state in graph.astream(initial_state, stream_mode="values"):
+                # 检查取消信号
                 if cancel_event.is_set():
                     logger.info("SSE 流被取消（cancel_event 触发）",
                                 session_id=session.id)
-                    yield _format_sse({
+                    yield format_sse({
                         "type": "done",
                         "session_id": session.id,
                         "tokens_used": total_tokens,
+                        "agent_run_id": run_id,
                     })
                     return
 
-                # 收集助手回复片段
-                if event_data.get("type") == "result":
-                    summary = event_data.get("summary", "")
-                    assistant_content_parts.append(summary)
+                # 发射新增的 SSE 事件
+                messages: list[dict[str, Any]] = state.get("messages", [])  # type: ignore[assignment]
+                for msg in messages[emitted_count:]:
+                    if msg:
+                        yield format_sse(msg)
+                        # 收集助手回复片段
+                        if msg.get("type") == "result":
+                            assistant_content_parts.append(
+                                msg.get("summary", "")
+                            )
+                emitted_count = len(messages)
 
-                yield _format_sse(event_data)
+                # 检查图是否执行完毕
+                if state.get("is_complete"):
+                    break
 
-            # ========== Step 5: 保存助手消息 ==========
-            assistant_content = "\n".join(assistant_content_parts)
+            # ========== Step 4: 保存助手消息 ==========
+            assistant_content = "\n".join(filter(None, assistant_content_parts))
+            if not assistant_content:
+                assistant_content = state.get("final_answer") or "已完成"
+            # 构建 Agent Trace（B-31 可观测性）
+            trace_iterations = state.get("trace_iterations", [])
+            agent_trace = json.dumps({
+                "run_id": run_id,
+                "total_iterations": len(trace_iterations),
+                "iterations": trace_iterations,
+            }, ensure_ascii=False) if trace_iterations else None
+
             await _save_message(
                 db, session.id, "assistant", assistant_content,
-                message_type=intent.value.lower(),
+                message_type=state.get("intent", Intent.GENERAL).value.lower(),
+                agent_trace=agent_trace,
             )
 
-            # ========== Step 6: done ==========
-            yield _format_sse({
+            # ========== Step 5: done 事件 ==========
+            yield format_sse({
                 "type": "done",
                 "session_id": session.id,
                 "tokens_used": total_tokens,
+                "agent_run_id": run_id,
+                "total_iterations": len(state.get("trace_iterations", [])),
             })
 
     except asyncio.CancelledError:
         # B-20 AC-2：asyncio.Task.cancel() 触发 → 捕获 CancelledError
-        # 发送 done 事件而非 error 事件（AC-6），让前端正常关闭 SSE 连接
         logger.info("SSE 流任务被取消（CancelledError）",
                     session_id=session.id if session else None)
-        yield _format_sse({
+        yield format_sse({
             "type": "done",
             "session_id": session.id if session else "",
             "tokens_used": total_tokens,
+            "agent_run_id": run_id if 'run_id' in dir() else "",
         })
-        # 不重新抛出——调用方已完成取消，生成器优雅终止
         return
 
     except Exception as exc:
         logger.error("SSE 流异常", error=str(exc)[:200])
-        yield _format_sse({
+        yield format_sse({
             "type": "error",
             "error_code": "AGENT_ERROR",
             "user_message": "AI 服务暂时不可用，请稍后重试",
             "severity": "error",
         })
         if session:
-            yield _format_sse({
+            yield format_sse({
                 "type": "done",
                 "session_id": session.id,
                 "tokens_used": total_tokens,

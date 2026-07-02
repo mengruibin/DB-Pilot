@@ -188,12 +188,12 @@
 | 字段 | 内容 |
 |------|------|
 | **ID** | B-12 |
-| **标题** | Agent 状态图定义 + Intent Router + 状态管理 |
+| **标题** | ~~LangGraph Agent 状态图~~ → Agent ReAct 决策引擎 + Intent Router + 状态管理 |
 | **关联契约** | api-contract §1.2 SSE 事件类型；PRD §4.2 Agent 工作流 6 步；backend AGENTS.md §技术栈约束（LangGraph>=0.3.0） |
 | **输入** | PRD §6.3 Agent 设计（工具注册表、意图路由流程） |
-| **输出物** | `backend/app/agent/__init__.py`、`backend/app/agent/state.py`、`backend/app/agent/router.py`、`backend/app/agent/graph.py` |
-| **验收标准** | 1. `AgentState` TypedDict 含：`messages`（LangChain Message 列表）、`connection_id`、`session_id`、`intent`、`user_role`<br>2. `IntentRouter.classify(user_message: str) -> Intent` 返回枚举 `QUERY`/`DIAGNOSIS`/`TROUBLESHOOT`/`HEALTH_CHECK`/`GENERAL`<br>3. 快速规则匹配：关键词"慢查询/卡/死锁/锁/连接数"命中 DIAGNOSIS/TROUBLESHOOT 的置信度 >0.8 时跳过 LLM 分类<br>4. 低置信度时调用 Haiku 轻量模型（从 `config.py` 读取 `LLM_CLASSIFIER_MODEL`）分类<br>5. StateGraph 节点：`classify` → `route_to_engine`（条件边）→ `nl2sql_node`/`diagnosis_node`/`troubleshoot_node`/`healthcheck_node`/`general_node` → `format_response`<br>6. 每个 node 可调用多个 tool，tool 返回后追加到 `messages` |
-| **前置依赖** | B-01 |
+| **输出物** | `backend/app/agent/state.py`（增强）、`backend/app/agent/router.py`、`backend/app/agent/graph.py`（重写）、`backend/app/agent/safety.py`（新增）、`backend/app/agent/tools/registry.py`（新增）、`backend/app/agent/sse_utils.py`（新增） |
+| **验收标准** | 1. `AgentState` TypedDict 含：`user_message`/`connection_id`/`session_id`/`conn_config`/`pending_tool_calls`/`pending_tool_results`/`final_answer`/`run_id`/`trace_iterations` 等字段<br>2. `IntentRouter.classify()` 保留两层分类（关键词+LLM回退），作为 classify_node 核心逻辑<br>3. LangGraph 图节点真正执行工具（非骨架）：`classify` → route → `agent` ↔ `tools` → `format_response` / `general`<br>4. `agent_node` 调用 LLM（带工具定义），自主决定工具调用或给出最终回答<br>5. `tools_node` 执行工具前运行安全护栏链（SQL审计+只读检查）<br>6. **2026-07-02 重写**：图节点从骨架代码改为真正执行工具，LLM 自主决策工具调用顺序 |
+| **前置依赖** | B-01、B-26（LLMClient Tool Calling 增强） |
 | **继承 TODO** | 无 |
 | **状态** | 已完成 |
 
@@ -468,6 +468,38 @@
 | **验收标准** | 1. `RequestIDMiddleware` 将 X-Request-ID 写入 contextvars（trace_id_var），全链路 structlog 自动绑定<br>2. `AccessLogMiddleware` 记录每个 HTTP 请求的 method/path/status_code/duration_ms<br>3. 所有适配器 connect/execute/disconnect 方法带有结构化日志，password 不出现在日志中<br>4. 所有引擎函数（audit/nl2sql/diagnosis/health_check）入口和出口带有日志<br>5. 所有 @tool 函数调用带有日志，异常时记录 traceback<br>6. 所有 API 端点入口和出口带有日志<br>7. 日志敏感字段掩盖（password/token/secret 自动替换为 "***"）<br>8. SQL 日志截断至 200 字符，不记录实际数据行<br>9. `.env` 支持 `LOG_LEVEL`/`LOG_FORMAT`/`LOG_FILE` 配置<br>10. `ruff check --select E,F,I,N,UP,B,SIM` 零错误 |
 | **前置依赖** | B-01（main.py 中间件）、B-05/B-06/B-07（适配器层插桩） |
 | **状态** | 已完成 |
+
+---
+
+## B-30：Agent ReAct 决策引擎（LLM 自主工具调用）
+
+| 字段 | 内容 |
+|------|------|
+| **ID** | B-30 |
+| **标题** | LangGraph ReAct 图重写 + LLMClient Tool Calling + 安全护栏 + 工具注册中心 |
+| **关联契约** | api-contract §1.2 SSE 7 种事件类型；PRD §4.2 Agent 工作流 |
+| **输入** | B-12（旧骨架图）、B-26（LLMClient） |
+| **输出物** | `backend/app/agent/graph.py`（重写）、`backend/app/agent/safety.py`（新增）、`backend/app/agent/tools/registry.py`（新增）、`backend/app/engine/llm_client.py`（增强 ToolCall） |
+| **验收标准** | 1. LangGraph StateGraph 含 6 个节点：classify / agent / tools / general / format_response，2 个条件边<br>2. agent_node 调用 LLM（带工具定义），返回 tool_calls 或 final_answer<br>3. tools_node 执行前运行安全护栏链（SQLAuditCheck + ReadOnlyCheck）<br>4. LLMClient.chat() 支持 tools 参数，Anthropic/OpenAI 原生 tool calling 解析<br>5. TOOL_REGISTRY 注册全部 9 个 Agent 工具<br>6. 所有图节点记录结构化日志（run_id + node_name + iteration + duration_ms）<br>7. graph.astream(stream_mode="values") 正确流式推送 SSE |
+| **前置依赖** | B-12、B-26 |
+| **状态** | 已完成 |
+| **日期** | 2026-07-02 |
+
+---
+
+## B-31：Agent 可观测性——决策轨迹持久化
+
+| 字段 | 内容 |
+|------|------|
+| **ID** | B-31 |
+| **标题** | Agent run_id 全链路追踪 + Agent Trace JSON 持久化 |
+| **关联契约** | backend AGENTS.md §可观测性（结构化日志） |
+| **输入** | B-30 Agent ReAct 引擎、B-03 Session/Message ORM |
+| **输出物** | `backend/app/agent/graph.py`（trace_iterations 写入）、`backend/app/api/chat.py`（run_id 贯穿 SSE） |
+| **验收标准** | 1. 每次 Agent 运行生成唯一 run_id（UUID），贯穿所有 graph 节点日志和 SSE 事件<br>2. trace_iterations 记录每轮 ReAct 决策：iteration / tool_calls / reasoning / duration_ms<br>3. SSE 事件新增 agent_run_id 可选字段（向后兼容）<br>4. done 事件含 total_iterations 和 trace_summary<br>5. MessageModel 预留 agent_trace JSON 字段（后续 migration 实现持久化） |
+| **前置依赖** | B-30 |
+| **状态** | 已完成 |
+| **日期** | 2026-07-02 |
 
 ---
 

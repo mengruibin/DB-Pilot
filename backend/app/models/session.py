@@ -13,7 +13,7 @@ from contextlib import suppress
 from datetime import UTC, datetime
 
 import structlog
-from sqlalchemy import JSON, DateTime, ForeignKey, Integer, String, Text, func, select
+from sqlalchemy import DateTime, ForeignKey, Integer, JSON, String, Text, func, select
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base, async_session_factory
@@ -129,6 +129,13 @@ class MessageModel(Base):
     # 本条消息的 token 消耗
     tokens_used: Mapped[int] = mapped_column(
         Integer, nullable=False, default=0,
+    )
+    # Agent 决策轨迹（JSON 字符串，仅 assistant 消息）
+    # 记录每轮 ReAct 迭代的 reasoning/tool_calls/results/safety_checks
+    # 格式：{"run_id":"run_xxx","total_iterations":3,"iterations":[...]}
+    # 存储为 Text 类型（数据库不支持原生 JSON），应用层负责序列化/反序列化
+    agent_trace: Mapped[str | None] = mapped_column(
+        Text, nullable=True, default=None,
     )
 
     # ORM 关系

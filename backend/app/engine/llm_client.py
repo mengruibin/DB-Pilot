@@ -44,15 +44,31 @@ class LLMUsage:
 
 
 @dataclass
+class ToolCall:
+    """LLM 返回的工具调用请求（B-30 Agent 工具调用）。
+
+    Attributes:
+        id: 工具调用唯一标识（Anthropic: tool_use.id, OpenAI: tool_call.id）。
+        name: 工具名称。
+        arguments: 工具参数 dict。
+    """
+    id: str
+    name: str
+    arguments: dict[str, Any]
+
+
+@dataclass
 class LLMResponse:
     """LLM 非流式响应。
 
     Attributes:
-        text: 响应文本。
+        text: 响应文本（tool_calls 非空时可能为空字符串）。
+        tool_calls: LLM 请求的工具调用列表（None 表示纯文本响应）。
         usage: Token 用量（API 返回时非 None）。
     """
     text: str
-    usage: LLMUsage | None
+    tool_calls: list[ToolCall] | None = None
+    usage: LLMUsage | None = None
 
 
 # =============================================================================
@@ -146,6 +162,7 @@ class LLMClient:
         model: str | None = None,
         max_tokens: int = 1024,
         timeout: int | None = None,
+        tools: list[dict[str, Any]] | None = None,
     ) -> LLMResponse:
         """非流式 LLM 调用（AC-1）。
 
@@ -155,9 +172,11 @@ class LLMClient:
             model: 模型名。None 表示用 settings.LLM_MODEL。
             max_tokens: 最大输出 token 数。
             timeout: 超时秒数。None 表示使用默认值 30s。
+            tools: 可选，工具定义的 JSON Schema 列表（B-30 Agent 工具调用）。
+                格式：[{"name": "...", "description": "...", "input_schema": {...}}]
 
         Returns:
-            LLMResponse 包含响应文本和用量统计。
+            LLMResponse 包含响应文本、可能的工具调用、和用量统计。
 
         Raises:
             TimeoutError: 调用超时。
@@ -168,17 +187,19 @@ class LLMClient:
 
         # AC-8：入口日志
         prompt_len = sum(len(m.get("content", "")) for m in messages)
+        tools_count = len(tools) if tools else 0
         logger.info("LLM 调用开始", provider=self._provider,
-                     model=actual_model, prompt_chars=prompt_len)
+                     model=actual_model, prompt_chars=prompt_len,
+                     tools_count=tools_count)
 
         try:
             if self._provider == "anthropic":
-                text, usage = await self._call_anthropic(
-                    messages, system, actual_model, max_tokens, timeout,
+                text, tool_calls, usage = await self._call_anthropic(
+                    messages, system, actual_model, max_tokens, timeout, tools,
                 )
             else:
-                text, usage = await self._call_openai(
-                    messages, system, actual_model, max_tokens, timeout,
+                text, tool_calls, usage = await self._call_openai(
+                    messages, system, actual_model, max_tokens, timeout, tools,
                 )
 
             elapsed_ms = int((time.monotonic() - start) * 1000)
@@ -187,11 +208,12 @@ class LLMClient:
             logger.info("LLM 调用完成", provider=self._provider,
                         model=actual_model, prompt_chars=prompt_len,
                         response_chars=len(text),
+                        tool_calls_count=len(tool_calls) if tool_calls else 0,
                         input_tokens=usage.input_tokens if usage else None,
                         output_tokens=usage.output_tokens if usage else None,
                         elapsed_ms=elapsed_ms)
 
-            return LLMResponse(text=text, usage=usage)
+            return LLMResponse(text=text, tool_calls=tool_calls, usage=usage)
 
         except TimeoutError:
             elapsed_ms = int((time.monotonic() - start) * 1000)
@@ -294,8 +316,9 @@ class LLMClient:
         model: str,
         max_tokens: int,
         timeout: int | None = None,
-    ) -> tuple[str, LLMUsage | None]:
-        """Anthropic Messages API 非流式调用。"""
+        tools: list[dict[str, Any]] | None = None,
+    ) -> tuple[str, list[ToolCall] | None, LLMUsage | None]:
+        """Anthropic Messages API 非流式调用（B-30：支持工具调用）。"""
         actual_timeout = timeout or _LLM_TIMEOUT_SEC
         api_url = settings.LLM_API_URL or _ANTHROPIC_API_URL
         headers = {
@@ -310,6 +333,9 @@ class LLMClient:
         }
         if system:
             payload["system"] = system
+        if tools:
+            # Anthropic 工具格式：{"name": ..., "description": ..., "input_schema": ...}
+            payload["tools"] = tools
 
         # B-26：请求报文 DEBUG 日志
         logger.debug("LLM 请求报文",
@@ -317,6 +343,7 @@ class LLMClient:
                      messages_count=len(payload["messages"]),
                      messages=_format_messages_for_log(payload["messages"]),
                      system_preview=system[:500] if system else None,
+                     tools_count=len(tools) if tools else 0,
                      api_url=api_url)
 
         async with httpx.AsyncClient(
@@ -339,16 +366,18 @@ class LLMClient:
 
         data = response.json()
         text = _extract_anthropic_text(data)
+        tool_calls = _extract_anthropic_tool_calls(data)
         usage = _parse_anthropic_usage(data)
 
         # B-26：响应报文 DEBUG 日志
         logger.debug("LLM 响应报文",
                      provider=self._provider, model=model,
-                     response_preview=text[:1000],
+                     response_preview=text[:1000] if text else None,
+                     tool_calls_count=len(tool_calls) if tool_calls else 0,
                      input_tokens=usage.input_tokens if usage else None,
                      output_tokens=usage.output_tokens if usage else None)
 
-        return text, usage
+        return text, tool_calls, usage
 
     async def _stream_anthropic(
         self,
@@ -446,8 +475,9 @@ class LLMClient:
         model: str,
         max_tokens: int,
         timeout: int | None = None,
-    ) -> tuple[str, LLMUsage | None]:
-        """OpenAI Chat Completions API 非流式调用。"""
+        tools: list[dict[str, Any]] | None = None,
+    ) -> tuple[str, list[ToolCall] | None, LLMUsage | None]:
+        """OpenAI Chat Completions API 非流式调用（B-30：支持工具调用）。"""
         actual_timeout = timeout or _LLM_TIMEOUT_SEC
         api_url = _ensure_chat_path(settings.LLM_API_URL or _OPENAI_API_URL)
         headers = {
@@ -461,12 +491,18 @@ class LLMClient:
         }
         if system:
             payload["messages"].insert(0, {"role": "system", "content": system})
+        if tools:
+            # OpenAI 工具格式需要从 Anthropic 格式转换：
+            #   {"name":...,"description":...,"input_schema":{...}}
+            # → {"type":"function","function":{"name":...,"description":...,"parameters":{...}}}
+            payload["tools"] = _convert_tools_to_openai(tools)
 
         # B-26：请求报文 DEBUG 日志（LOG_LEVEL=DEBUG 时输出）
         logger.debug("LLM 请求报文",
                      provider=self._provider, model=model,
                      messages_count=len(payload["messages"]),
                      messages=_format_messages_for_log(payload["messages"]),
+                     tools_count=len(tools) if tools else 0,
                      api_url=api_url)
 
         async with httpx.AsyncClient(
@@ -489,18 +525,19 @@ class LLMClient:
 
         data = response.json()
         text = _extract_openai_text(data)
+        tool_calls = _extract_openai_tool_calls(data)
         usage = _parse_openai_usage(data)
 
         # B-26：响应报文 DEBUG 日志
         logger.debug("LLM 响应报文",
                      provider=self._provider, model=model,
-                     response_preview=text[:1000],
+                     response_preview=text[:1000] if text else None,
+                     tool_calls_count=len(tool_calls) if tool_calls else 0,
                      input_tokens=usage.input_tokens if usage else None,
                      output_tokens=usage.output_tokens if usage else None)
 
-        # 诊断：HTTP 200 但无内容时，记录原始响应体（阿里云百炼等可能在 200 中返回业务错误）
-        if not text:
-            # 检查是否包含业务错误码
+        # 诊断：HTTP 200 但无内容时，记录原始响应体
+        if not text and not tool_calls:
             err_code = data.get("code") or data.get("error", {}).get("code", "")
             err_msg = data.get("message") or data.get("error", {}).get("message", "")
             if err_code or err_msg:
@@ -514,7 +551,7 @@ class LLMClient:
                                raw_response=json.dumps(data, ensure_ascii=False)[:500],
                                response_keys=list(data.keys()))
 
-        return text, usage
+        return text, tool_calls, usage
 
     async def _stream_openai(
         self,
@@ -655,3 +692,77 @@ def _parse_openai_usage(data: dict[str, Any]) -> LLMUsage | None:
             output_tokens=usage.get("completion_tokens", 0) or usage.get("output_tokens", 0),
         )
     return None
+
+
+# =============================================================================
+# Tool Calling 解析（B-30：Agent 工具调用）
+# =============================================================================
+
+
+def _extract_anthropic_tool_calls(data: dict[str, Any]) -> list[ToolCall] | None:
+    """从 Anthropic Messages API 响应中提取工具调用（tool_use content blocks）。
+
+    Anthropic 在 content 数组中返回 type="tool_use" 的 block，
+    每个包含 id / name / input 字段。
+    """
+    content_blocks = data.get("content", [])
+    tool_calls: list[ToolCall] = []
+    for block in content_blocks:
+        if block.get("type") == "tool_use":
+            tool_calls.append(ToolCall(
+                id=block.get("id", ""),
+                name=block.get("name", ""),
+                arguments=block.get("input", {}),
+            ))
+    return tool_calls if tool_calls else None
+
+
+def _extract_openai_tool_calls(data: dict[str, Any]) -> list[ToolCall] | None:
+    """从 OpenAI Chat Completions API 响应中提取工具调用。
+
+    OpenAI 在 choices[0].message.tool_calls 中返回工具调用列表，
+    每个含 id / function.name / function.arguments（JSON 字符串）。
+    """
+    choices = data.get("choices", [])
+    if not choices:
+        return None
+    message = choices[0].get("message", {})
+    raw_tool_calls = message.get("tool_calls", [])
+    if not raw_tool_calls:
+        return None
+    tool_calls: list[ToolCall] = []
+    for tc in raw_tool_calls:
+        func = tc.get("function", {})
+        arguments_str = func.get("arguments", "{}")
+        try:
+            arguments = json.loads(arguments_str)
+        except (json.JSONDecodeError, TypeError):
+            arguments = {}
+        tool_calls.append(ToolCall(
+            id=tc.get("id", ""),
+            name=func.get("name", ""),
+            arguments=arguments,
+        ))
+    return tool_calls if tool_calls else None
+
+
+def _convert_tools_to_openai(
+    tools: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """将 Anthropic 格式的工具定义转换为 OpenAI 格式。
+
+    Anthropic: {"name": "...", "description": "...", "input_schema": {...}}
+    OpenAI: {"type": "function", "function": {"name": "...", "description": "...",
+              "parameters": {...}}}
+    """
+    openai_tools: list[dict[str, Any]] = []
+    for tool in tools:
+        openai_tools.append({
+            "type": "function",
+            "function": {
+                "name": tool["name"],
+                "description": tool.get("description", ""),
+                "parameters": tool.get("input_schema", {}),
+            },
+        })
+    return openai_tools

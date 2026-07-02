@@ -1,49 +1,41 @@
 """
-故障排查 SSE 流 API 路由。
+故障排查 SSE 流 API 路由（Phase 4 统一——复用 LangGraph Agent 图）。
 
 端点（api-contract §1.5）：
   - POST /api/connections/{id}/troubleshoot  SSE 流式故障排查
 
-依据 api-contract §1.5 POST /api/connections/{id}/troubleshoot、§2.6 TroubleshootResult。
-依据 AGENTS.md §安全与合规红线（密码不落盘）。
+2026-07-02 重构：不再使用独立的 TroubleshootWorkflow，改为复用
+app/agent/graph.py 的 LangGraph Agent 图。Agent 自主决定调用
+check_connections / check_locks / check_replication 等工具。
+
+依据 api-contract §1.5、AGENTS.md §安全与合规红线（密码不落盘）。
 """
 
 from __future__ import annotations
 
 import asyncio
-import json
 from collections.abc import AsyncGenerator
-from datetime import UTC, datetime
 from typing import Any
+from uuid import uuid4
 
 import structlog
 from fastapi import APIRouter, Body, HTTPException, status
 from fastapi.responses import StreamingResponse
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.agent.tools.troubleshoot import TroubleshootWorkflow
+from app.agent.sse_utils import format_sse
+from app.agent.state import AgentState
 
 # 复用 B-20 的 SSE 取消机制
 from app.api.chat import _active_streams, _running_tasks  # type: ignore[attr-defined]  # noqa: F811
 from app.database import async_session_factory
 from app.models.connection import ConnectionConfigModel
 from app.models.schemas import TroubleshootRequest
-from app.models.session import MessageModel, SessionModel
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = structlog.get_logger(__name__)
 
 router = APIRouter(tags=["Troubleshoot"])
-
-
-# =============================================================================
-# SSE 格式化
-# =============================================================================
-
-
-def _format_sse(data: dict[str, Any]) -> str:
-    """将 dict 格式化为 SSE 消息（与 chat.py 格式一致）。"""
-    return f"event: message\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
 # =============================================================================
@@ -56,19 +48,7 @@ async def _resolve_conn_config(
     password: str | None,
     session: AsyncSession,
 ) -> dict[str, Any]:
-    """从 ORM 加载连接配置，组装为工具调用参数字典。
-
-    Args:
-        connection_id: 连接 ID。
-        password: 前端传入的连接密码。
-        session: 内部数据库会话。
-
-    Returns:
-        包含 db_type, host, port, database, user, password 等字段的 dict。
-
-    Raises:
-        HTTPException: 连接不存在时返回 404。
-    """
+    """从 ORM 加载连接配置，组装为工具调用参数字典。"""
     result = await session.execute(
         select(ConnectionConfigModel).where(
             ConnectionConfigModel.id == connection_id
@@ -98,7 +78,7 @@ async def _resolve_conn_config(
 
 
 # =============================================================================
-# SSE 流引擎：故障排查
+# SSE 流引擎：故障排查（Agent 图驱动）
 # =============================================================================
 
 
@@ -106,146 +86,116 @@ async def _troubleshoot_stream(
     connection_id: str,
     body: TroubleshootRequest,
 ) -> AsyncGenerator[str, None]:
-    """故障排查 SSE 流主引擎。
+    """故障排查 SSE 流——由 LangGraph Agent 图自主决策工具调用。
 
-    1. 加载连接配置
-    2. TroubleshootWorkflow 逐项排查
-    3. 发送 thinking/tool_call/tool_result/skip/diagnosis 事件
-    4. 若提供了 session_id，将结论写入消息历史
-
-    Args:
-        connection_id: 目标数据库连接 ID。
-        body: TroubleshootRequest 请求体。
-
-    Yields:
-        SSE 格式化的事件字符串。
+    不再硬编码 check_connections → check_locks → check_replication，
+    而是将排查任务交给 Agent，LLM 根据上下文灵活选择排查策略。
     """
     stream_id = f"troubleshoot_{connection_id}"
     cancel_event = asyncio.Event()
-
-    # 注册取消标记，复用 B-20 取消机制
     _active_streams[stream_id] = cancel_event
     current_task = asyncio.current_task()
     if current_task is not None:
         _running_tasks[stream_id] = current_task
 
-    logger.info("故障排查 SSE 开始", connection_id=connection_id,
-                issue_type=body.issue_type, stream_id=stream_id)
+    # 根据 issue_type 构建排查指令
+    issue_prompts: dict[str, str] = {
+        "connection": "帮我检查数据库连接状态",
+        "lock": "帮我检查数据库锁等待情况",
+        "replication": "帮我检查数据库主从复制状态",
+        "auto": "帮我排查数据库故障，依次检查连接状态、锁等待、主从复制情况",
+    }
+    user_message = issue_prompts.get(
+        body.issue_type or "auto",
+        f"帮我排查数据库问题：{body.issue_type}",
+    )
+
+    logger.info("故障排查 SSE 开始（Agent 图驱动）",
+                connection_id=connection_id,
+                issue_type=body.issue_type,
+                stream_id=stream_id)
 
     try:
-        # Step 1: 加载连接配置
         async with async_session_factory() as db:
             conn_config = await _resolve_conn_config(
                 connection_id, body.password, db,
             )
 
-            # Step 2: 创建排查工作流
-            workflow = TroubleshootWorkflow(conn_config)
+            # ── 构建 AgentState + 执行 LangGraph 图 ──
+            from app.agent.graph import build_agent_graph
 
-            # Step 3: 迭代工作流事件
-            async for event in workflow.run(issue_type=body.issue_type):
-                # 检查取消信号
+            run_id = f"run_{uuid4().hex[:12]}"
+            initial_state: AgentState = {
+                "user_message": user_message,
+                "connection_id": connection_id,
+                "session_id": body.session_id,
+                "password": body.password,
+                "user_role": "standard",
+                "conversation_history": None,
+                "conn_config": conn_config,
+                "run_id": run_id,
+                "messages": [],
+                "pending_tool_calls": [],
+                "pending_tool_results": [],
+                "trace_iterations": [],
+            }
+
+            graph = build_agent_graph()
+            emitted_count = 0
+
+            async for state in graph.astream(initial_state, stream_mode="values"):
                 if cancel_event.is_set():
-                    logger.info("故障排查被取消",
-                                connection_id=connection_id,
-                                stream_id=stream_id)
-                    yield _format_sse({
-                        "type": "diagnosis",
-                        "conclusion": "故障排查已被取消",
-                        "severity": "skipped",
-                        "suggestion": None,
-                        "suggestion_is_destructive": False,
+                    yield format_sse({
+                        "type": "result",
+                        "summary": "故障排查已被取消",
+                        "agent_run_id": run_id,
+                    })
+                    yield format_sse({
+                        "type": "done",
+                        "session_id": body.session_id or "",
+                        "agent_run_id": run_id,
                     })
                     return
 
-                # 收集 diagnosis 事件用于持久化
-                is_diagnosis = event.get("type") == "diagnosis"
+                messages: list[dict[str, Any]] = state.get("messages", [])  # type: ignore[assignment]
+                for msg in messages[emitted_count:]:
+                    if msg:
+                        yield format_sse(msg)
+                emitted_count = len(messages)
 
-                yield _format_sse(event)
+                if state.get("is_complete"):
+                    break
 
-                # AC-6：若提供了 session_id，将诊断结论写入消息历史
-                if is_diagnosis and body.session_id:
-                    await _save_troubleshoot_result(
-                        db, body.session_id, event, connection_id,
-                    )
+            # done 事件
+            trace_iterations = state.get("trace_iterations", [])
+            yield format_sse({
+                "type": "done",
+                "session_id": body.session_id or "",
+                "tokens_used": 0,
+                "agent_run_id": run_id,
+                "total_iterations": len(trace_iterations),
+            })
 
-            logger.info("故障排查 SSE 完成", connection_id=connection_id,
-                        stream_id=stream_id)
+            logger.info("故障排查 SSE 完成（Agent 图驱动）",
+                        connection_id=connection_id, stream_id=stream_id,
+                        iterations=len(trace_iterations))
 
     except Exception as exc:
         logger.error("故障排查 SSE 异常", connection_id=connection_id,
                       error=str(exc)[:200])
-        yield _format_sse({
-            "type": "diagnosis",
-            "conclusion": f"故障排查异常中断：{exc}",
+        yield format_sse({
+            "type": "error",
+            "error_code": "AGENT_ERROR",
+            "user_message": "故障排查异常中断，请稍后重试",
             "severity": "error",
-            "suggestion": "请稍后重试或检查数据库连接状态",
-            "suggestion_is_destructive": False,
+        })
+        yield format_sse({
+            "type": "done",
+            "session_id": body.session_id or "",
         })
     finally:
         _active_streams.pop(stream_id, None)
         _running_tasks.pop(stream_id, None)
-
-
-# =============================================================================
-# 持久化辅助
-# =============================================================================
-
-
-async def _save_troubleshoot_result(
-    db: AsyncSession,
-    session_id: str,
-    diagnosis: dict[str, Any],
-    connection_id: str,
-) -> None:
-    """将诊断结论保存到指定会话的消息历史。
-
-    Args:
-        db: 数据库会话。
-        session_id: 目标会话 ID。
-        diagnosis: 诊断事件字典。
-        connection_id: 连接 ID（用于日志）。
-    """
-    try:
-        # 验证会话存在
-        result = await db.execute(
-            select(SessionModel).where(SessionModel.id == session_id)
-        )
-        session = result.scalar_one_or_none()
-        if session is None:
-            logger.warning("会话不存在，跳过持久化",
-                           session_id=session_id)
-            return
-
-        conclusion = diagnosis.get("conclusion", "")
-        severity = diagnosis.get("severity", "info")
-        content = f"[故障排查] {conclusion}（严重程度：{severity}）"
-
-        msg = MessageModel(
-            session_id=session_id,
-            role="assistant",
-            content=content,
-            message_type="troubleshoot",
-            result_preview={
-                "conclusion": conclusion,
-                "severity": severity,
-                "suggestion": diagnosis.get("suggestion"),
-                "suggestion_is_destructive": diagnosis.get(
-                    "suggestion_is_destructive", False,
-                ),
-            },
-        )
-        db.add(msg)
-
-        session.message_count = SessionModel.message_count + 1
-        session.last_active_at = datetime.now(UTC)
-        await db.commit()
-
-        logger.info("诊断结论已写入会话", session_id=session_id,
-                    severity=severity)
-    except Exception as exc:
-        logger.error("诊断结论持久化失败",
-                     session_id=session_id, error=str(exc)[:200])
 
 
 # =============================================================================
@@ -258,10 +208,7 @@ async def troubleshoot_stream(
     connection_id: str,
     body: TroubleshootRequest = Body(...),  # noqa: B008
 ) -> StreamingResponse:
-    """触发故障排查工作流，返回 SSE 流。
-
-    按 check_connections → check_locks → check_replication 顺序排查，
-    逐条推送 thinking → tool_call → tool_result / skip → diagnosis 事件。
+    """触发故障排查，Agent 自主决策工具调用，SSE 流返回结果。
 
     Args:
         connection_id: 目标数据库连接 ID。

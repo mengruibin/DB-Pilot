@@ -12,7 +12,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import math
 import time
 import uuid
@@ -28,8 +27,9 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.agent.sse_utils import format_sse
+
 # 复用 B-20 的 SSE 取消机制（report_id → asyncio.Event）
-# 允许通过 POST /api/chat/cancel 取消健康巡检
 from app.api.chat import _active_streams, _running_tasks  # type: ignore[attr-defined]  # noqa: F811
 from app.database import async_session_factory, get_session
 from app.db.factory import AdapterFactory
@@ -47,18 +47,7 @@ logger = structlog.get_logger(__name__)
 router = APIRouter(tags=["Health Check"])
 
 
-# =============================================================================
-# SSE 格式化
-# =============================================================================
-
-
-def _format_sse(data: dict[str, Any]) -> str:
-    """将 dict 格式化为 SSE 消息（与 chat.py 格式一致）。
-
-    SSE 格式（AGENTS.md §SSE 流式格式）：
-      event: message\ndata: {json}\n\n
-    """
-    return f"event: message\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+# SSE 格式化函数统一使用 app.agent.sse_utils.format_sse
 
 
 # =============================================================================
@@ -186,7 +175,7 @@ async def _health_stream(
                     partial_counts = _count_status(all_results)
                     partial_score = _calc_score(partial_counts)
 
-                    yield _format_sse({
+                    yield format_sse({
                         "type": "health_result",
                         "report_id": report_id,
                         "score": partial_score,
@@ -216,7 +205,7 @@ async def _health_stream(
                 total = result.get("total", 1)
 
                 if status_val == "error":
-                    yield _format_sse({
+                    yield format_sse({
                         "type": "check_error",
                         "current": current,
                         "total": total,
@@ -227,7 +216,7 @@ async def _health_stream(
                         "suggestion": result.get("suggestion", ""),
                     })
                 elif status_val == "warning":
-                    yield _format_sse({
+                    yield format_sse({
                         "type": "check_warning",
                         "current": current,
                         "total": total,
@@ -239,7 +228,7 @@ async def _health_stream(
                     })
                 else:
                     # pass / skipped → check_progress
-                    yield _format_sse({
+                    yield format_sse({
                         "type": "check_progress",
                         "current": current,
                         "total": total,
@@ -268,7 +257,7 @@ async def _health_stream(
             )
 
             # AC-2：发送 health_result 事件
-            yield _format_sse({
+            yield format_sse({
                 "type": "health_result",
                 "report_id": report_id,
                 "score": score,
@@ -286,7 +275,7 @@ async def _health_stream(
     except Exception as exc:
         logger.error("健康巡检 SSE 异常", connection_id=connection_id,
                       report_id=report_id, error=str(exc)[:200])
-        yield _format_sse({
+        yield format_sse({
             "type": "health_result",
             "report_id": report_id,
             "score": 0,

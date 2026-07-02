@@ -1,6 +1,6 @@
 ## 项目概述
 
-DB-Pilot 是基于 LangGraph + FastAPI 构建的**数据库运维 AI Agent 后端服务**，通过 SSE 向前端提供自然语言数据库查询、SQL 诊断优化、故障排查、健康巡检能力。后端通过可插拔适配器层同时支持 MySQL、PostgreSQL、Oracle。依据 [PRD §1.1]。
+DB-Pilot 是基于 LangGraph StateGraph + FastAPI 构建的**数据库运维 AI Agent 后端服务**。Agent 采用 ReAct（Reasoning + Acting）模式，LLM 自主决定工具调用顺序，通过 LangGraph 条件边自动路由 classify ↔ agent ↔ tools 循环。后端通过 SSE 向前端提供自然语言数据库查询、SQL 诊断优化、故障排查、健康巡检能力，通过可插拔适配器层同时支持 MySQL、PostgreSQL、Oracle。依据 [PRD §1.1]。
 
 ---
 
@@ -54,7 +54,7 @@ backend/
 │   ├── main.py          # FastAPI 应用工厂 + 生命周期钩子，禁止在此写业务逻辑
 │   ├── config.py        # 全量 Settings，从 .env / 环境变量加载
 │   ├── api/             # 仅薄路由层：参数校验 → 调用 agent/ 或 engine/ → 返回 Response
-│   ├── agent/           # LangGraph 状态图、意图路由、工具定义——Agent 核心逻辑
+│   ├── agent/           # Agent ReAct 决策引擎：LangGraph 状态图、意图路由、工具注册、安全护栏
 │   ├── db/              # 数据库适配器（目标数据库连接，非内部数据库）
 │   ├── engine/          # 无状态引擎：NL2SQL、SQL 审计、诊断、巡检
 │   ├── models/          # Pydantic schemas + SQLAlchemy ORM 模型
@@ -97,7 +97,7 @@ backend/
 ### SSE 流式格式
 
 - [ ] MUST 每条 SSE 消息格式为 `data: {"type": "<TYPE>", "content": ...}\n\n`
-- [ ] MUST SSE 消息类型至少包含：`thinking`（Agent 推理过程）、`tool_call`（工具调用）、`tool_result`（工具返回）、`sql`（生成的 SQL 语句）、`result`（最终结果）、`error`（错误终止）、`done`（流结束）
+- [ ] MUST SSE 消息类型至少包含：`thinking`（Agent 推理过程——ReAct 模式下为 LLM 流式推理文本）、`tool_call`（工具调用）、`tool_result`（工具返回）、`sql`（生成的 SQL 语句）、`result`（最终结果）、`error`（错误终止）、`done`（流结束）
 - [ ] MUST SSE 以 `type: "done"` 消息结束，前端据此关闭连接
 - [ ] MUST SSE 连接超时 120s 无消息则服务端主动关闭
 

@@ -179,18 +179,24 @@ data: {"type":"done","session_id":"sess_xyz789","tokens_used":1240}
 
 | `type` | 触发场景 | payload 必含字段 | 前端响应动作 | 依据 |
 |---------|---------|-----------------|-------------|------|
-| `thinking` | Agent 每一步推理 | `content`（string） | 可折叠区域追加文本 | PRD §4.2 Step 5 |
-| `tool_call` | Agent 调用工具前 | `tool`、`args`、`display` | 进度步骤列表追加 | PRD §4.2 Step 4 |
-| `tool_result` | 工具返回后 | `tool`、`summary`、`duration_ms` | 步骤标记 ✅ + 耗时 | PRD §4.2 Step 4 |
-| `sql` | LLM 生成 SQL 后 | `content`、`audit_status`、`is_readonly` | SQL Block 组件渲染 | PRD §5.1 流程 Step 4-5 |
-| `result` | 最终结果 | `summary`、`data_preview`、`duration_ms` | 结果表格渲染 | PRD §5.1 流程 Step 7 |
-| `error` | 执行出错 | `error_code`、`user_message`、`severity` | 错误卡片展示 | PRD §10.2 |
-| `done` | 流正常结束 | `session_id`、`tokens_used` | 关闭 SSE 连接 | PRD §4.2 Step 6 |
+| `thinking` | Agent 每一步推理（ReAct 模式下为 LLM 流式推理文本） | `content`（string），可选 `agent_run_id`、`iteration`、`reasoning_type` | 可折叠区域追加文本 | PRD §4.2 Step 5 |
+| `tool_call` | Agent 调用工具前 | `tool`、`args`、`display`，可选 `agent_run_id`、`iteration` | 进度步骤列表追加 | PRD §4.2 Step 4 |
+| `tool_result` | 工具返回后 | `tool`、`summary`、`duration_ms`，可选 `agent_run_id`、`iteration`、`safety_checks_passed` | 步骤标记 ✅ + 耗时 | PRD §4.2 Step 4 |
+| `sql` | Agent 生成 SQL 后 | `content`、`audit_status`、`is_readonly`，可选 `agent_run_id`、`iteration` | SQL Block 组件渲染 | PRD §5.1 流程 Step 4-5 |
+| `result` | 最终结果 | `summary`、`data_preview`、`duration_ms`，可选 `agent_run_id`、`trace_summary` | 结果表格渲染 | PRD §5.1 流程 Step 7 |
+| `error` | 执行出错 | `error_code`、`user_message`、`severity`，可选 `agent_run_id`、`iteration` | 错误卡片展示 | PRD §10.2 |
+| `done` | 流正常结束 | `session_id`、`tokens_used`，可选 `agent_run_id`、`total_iterations`、`trace_summary` | 关闭 SSE 连接 | PRD §4.2 Step 6 |
 
 - [ ] MUST 后端确保先发 `sql` 后发 `result`——绝不可跳过 `sql` 直接发 `result`（前端依赖 `sql` 事件渲染代码块）
 - [ ] MUST `error` 事件后不再发送任何后续事件，以 `done` 结束（`session_id` 仍返回以持久化错误会话）
 - [ ] MUST `data_preview` 仅返回前 100 行预览，完整结果通过分页接口 `/api/chat/result/{session_id}` 获取
 - [ ] MUST SSE 单次连接最长 120s 无消息则服务端发送 `done` 并关闭（依据 backend AGENTS.md SSE 超时约束）
+
+**2026-07-02 Agent 架构升级说明**：
+- Agent 现在基于 LangGraph ReAct 模式，`thinking` → `tool_call` → `tool_result` 可在同一轮对话中**多轮循环**（最多 10 轮），前端需自适应展示动态数量的工具调用步骤
+- 所有事件新增可选字段 `agent_run_id`（UUID）、`iteration`（第几轮）——这些字段缺失时前端不做特殊处理
+- `done` 事件新增可选字段 `total_iterations`（总共几轮）、`trace_summary`（决策链路摘要）——用于调试面板展示
+- `thinking` 事件内容从静态中文文本变为 LLM 流式推理过程（逐 token 推送），建议前端以打字机效果或可折叠区域展示
 
 #### POST /api/chat/cancel
 

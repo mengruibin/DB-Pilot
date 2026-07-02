@@ -116,6 +116,10 @@ class Settings(BaseSettings):
         le=365,
         description="日志文件保留天数（每日轮转）。",
     )
+    AGENT_DEBUG: bool = Field(
+        default=False,
+        description="Agent 调试模式。开启后 SSE 事件额外携带完整 LLM prompt/响应和安全检查详情。",
+    )
     LOG_TRACE_ENABLED: bool = Field(
         default=True,
         description="是否启用链路追踪。关闭后 trace_id 仍生成但不强制透传。",
