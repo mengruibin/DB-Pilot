@@ -113,6 +113,9 @@ async def generate_sql(
     schema_context: dict,
     connection_id: str,
     db_type: str = "mysql",
+    conversation_history: str | None = None,
+    previous_error: str | None = None,
+    previous_sql: str | None = None,
 ) -> dict[str, Any]:
     """将自然语言转换为 SQL 查询。
 
@@ -131,6 +134,11 @@ async def generate_sql(
         schema_context: Schema 上下文（来自 B-10 元数据 API）。
         connection_id: 连接标识符（用于日志追踪）。
         db_type: 数据库类型（mysql / postgresql / oracle）。
+        conversation_history: 可选的会话历史文本，注入 Prompt
+            用于理解指代和省略上下文。
+        previous_error: 上一次 SQL 执行的错误信息，用于重试时让 LLM
+            根据错误修正 SQL。
+        previous_sql: 上一次生成的 SQL，与 previous_error 配合使用。
 
     Returns:
         成功：{"sql": "...", "explanation": "...",
@@ -150,6 +158,9 @@ async def generate_sql(
             dialect=dialect_label,
             schema_context=schema_context,
             user_query=natural_language,
+            conversation_history=conversation_history,
+            previous_error=previous_error,
+            previous_sql=previous_sql,
         )
 
         # Step 2: 调用 LLM（通过统一 LLMClient，支持自定义 API URL 和 provider 切换）

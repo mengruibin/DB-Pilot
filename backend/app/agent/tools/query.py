@@ -55,13 +55,27 @@ def _build_config(
     )
 
 
-def _safe_tool_call(fn_name: str, exc: Exception) -> dict[str, Any]:
+def _safe_tool_call(
+    fn_name: str, exc: Exception,
+    connection_id: str | None = None,
+    database: str | None = None,
+) -> dict[str, Any]:
     """将工具调用中的异常包装为标准错误响应。
 
     AGENTS.md §工具函数返回契约：
     工具函数内部捕获异常后返回 {"error": "...", "detail": "..."}
+
+    Args:
+        fn_name: 工具函数名。
+        exc: 捕获的异常。
+        connection_id: 数据库连接 ID（用于日志关联）。
+        database: 目标数据库名（用于日志关联）。
     """
-    logger.error("工具调用失败", tool=fn_name, error=str(exc)[:200])
+    logger.error("工具调用失败",
+                 tool=fn_name,
+                 connection_id=connection_id,
+                 database=database,
+                 error=str(exc)[:200])
     return {
         "error": f"{fn_name} 执行失败",
         "detail": f"{type(exc).__name__}: {exc}",
@@ -119,7 +133,11 @@ async def list_tables(
                      connection_id=connection_id, table_count=len(tables))
         return {"tables": tables}
     except Exception as exc:
-        return _safe_tool_call("list_tables", exc)
+        return _safe_tool_call(
+            "list_tables", exc,
+            connection_id=connection_id,
+            database=database,
+        )
 
 
 # =============================================================================
@@ -177,7 +195,11 @@ async def describe_table(
                      column_count=len(columns), index_count=len(indexes))
         return {"columns": columns, "indexes": indexes}
     except Exception as exc:
-        return _safe_tool_call("describe_table", exc)
+        return _safe_tool_call(
+            "describe_table", exc,
+            connection_id=connection_id,
+            database=database,
+        )
 
 
 # =============================================================================
@@ -287,4 +309,8 @@ async def run_query(
         }
 
     except Exception as exc:
-        return _safe_tool_call("run_query", exc)
+        return _safe_tool_call(
+            "run_query", exc,
+            connection_id=connection_id,
+            database=database,
+        )

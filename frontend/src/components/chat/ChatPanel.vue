@@ -8,7 +8,7 @@
  *
  * 依据 api-contract §三 ChatPanel 组件树
  */
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import { NButton, NPopconfirm } from 'naive-ui'
 import { useChatStore } from '@/stores/chat'
 import { useConnectionStore } from '@/stores/connection'
@@ -18,6 +18,9 @@ import ThinkingIndicator from './ThinkingIndicator.vue'
 
 const chatStore = useChatStore()
 const connectionStore = useConnectionStore()
+
+/** 输入框文本（双向绑定用） */
+const inputText = ref('')
 
 /** 当前连接标识文本 */
 const connectionLabel = computed(() => {
@@ -38,6 +41,7 @@ const showThinking = computed(() => {
 function handleSend(text: string): void {
   if (!connectionStore.activeId) return
   chatStore.sendMessage(connectionStore.activeId, text, chatStore.inputMode)
+  inputText.value = ''
 }
 
 /** 停止流式 */
@@ -77,7 +81,7 @@ function handleStop(): void {
 
     <!-- 输入区域（F-10 独立组件） -->
     <InputArea
-      :model-value="''"
+      v-model="inputText"
       :input-mode="chatStore.inputMode"
       :is-streaming="chatStore.isStreaming"
       :connection-label="connectionLabel"

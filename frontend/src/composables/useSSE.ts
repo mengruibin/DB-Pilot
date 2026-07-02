@@ -110,6 +110,9 @@ export function useSSE() {
       case 'sql':
         userCallbacks?.onSql?.(payload as any)
         break
+      case 'text':
+        userCallbacks?.onText?.(payload as any)
+        break
       case 'result':
         userCallbacks?.onResult?.(payload as any)
         break

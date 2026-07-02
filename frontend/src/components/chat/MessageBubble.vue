@@ -7,7 +7,7 @@
  *
  * 依据 api-contract §三 MessageBubble 组件
  */
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import type { StoreMessage } from '@/stores/chat'
 import SqlBlock from '@/components/sql/SqlBlock.vue'
 import ResultTable from '@/components/sql/ResultTable.vue'
@@ -33,6 +33,14 @@ onMounted(() => {
     timerInterval = setInterval(() => {
       thinkingElapsed.value += 100
     }, 100)
+  }
+})
+
+/** 流式结束时停止计时 */
+watch(() => props.isStreaming, (streaming) => {
+  if (!streaming && timerInterval) {
+    clearInterval(timerInterval)
+    timerInterval = null
   }
 })
 
@@ -73,7 +81,7 @@ const userInitial = computed(() => {
 // ─── ResultTable 数据转换 ───
 
 const resultColumns = computed(() => {
-  if (!props.message.dataPreview) return []
+  if (!props.message.dataPreview?.columns) return []
   return props.message.dataPreview.columns.map((name) => ({
     name,
     type: 'text',

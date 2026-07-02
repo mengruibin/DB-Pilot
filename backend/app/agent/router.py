@@ -31,6 +31,8 @@ _INTENT_KEYWORDS: dict[Intent, list[dict[str, Any]]] = {
         {"patterns": [r"查", r"查询", r"搜索", r"找", r"显示", r"列出", r"统计"], "weight": 0.6},
         {"patterns": [r"多少", r"哪些", r"谁", r"哪个", r"怎么"], "weight": 0.5},
         {"patterns": [r"select", r"sel"], "weight": 0.9},
+        {"patterns": [r"表结构", r"字段", r"注释信息", r"数据表"], "weight": 0.7},
+        {"patterns": [r"列", r"schema", r"表名", r"表信息"], "weight": 0.55},
     ],
     Intent.DIAGNOSIS: [
         {"patterns": [r"慢查询", r"执行计划", r"explain", r"性能", r"优化",
@@ -99,7 +101,11 @@ class IntentRouter:
         # 关键词匹配的置信度阈值（> 此值直接返回，不调用 LLM）
         self._keyword_threshold = 0.8
 
-    async def classify(self, user_message: str) -> Intent:
+    async def classify(
+        self,
+        user_message: str,
+        conversation_history: str | None = None,
+    ) -> Intent:
         """将用户消息分类为预定义意图。
 
         使用两层策略（PRD §6.3）：
@@ -108,6 +114,8 @@ class IntentRouter:
 
         Args:
             user_message: 用户输入的原始消息。
+            conversation_history: 可选的会话历史文本，用于 LLM 分类时
+                理解上下文（如指代消解、省略补全）。
 
         Returns:
             分类后的 Intent 枚举值。
@@ -127,7 +135,9 @@ class IntentRouter:
 
         # 低置信度时尝试 LLM 分类（AC-4）
         if self._llm_client is not None:
-            llm_intent = await self._classify_with_llm(user_message)
+            llm_intent = await self._classify_with_llm(
+                user_message, conversation_history=conversation_history,
+            )
             if llm_intent is not None:
                 logger.info("意图分类完成", intent=llm_intent.value,
                              confidence=round(best_score, 2),
@@ -153,7 +163,11 @@ class IntentRouter:
                      method="default")
         return Intent.GENERAL
 
-    async def _classify_with_llm(self, user_message: str) -> Intent | None:
+    async def _classify_with_llm(
+        self,
+        user_message: str,
+        conversation_history: str | None = None,
+    ) -> Intent | None:
         """使用 LLM 对低置信度消息进行分类。
 
         调用 LLMClient 并指定 LLM_CLASSIFIER_MODEL（默认 Haiku）进行快速分类。
@@ -175,7 +189,20 @@ class IntentRouter:
             f"消息：{user_message}"
         )
 
+        # 若有会话历史，添加上下文提示（AC-4：支持指代消解和省略补全）
+        if conversation_history:
+            prompt = (
+                "请将以下数据库运维相关的问题分类为以下意图之一：\n"
+                "QUERY, DIAGNOSIS, TROUBLESHOOT, HEALTH_CHECK, GENERAL\n"
+                "仅返回意图名称，不要包含其他内容。\n\n"
+                f"对话历史：\n{conversation_history}\n\n"
+                f"用户的最新消息：{user_message}"
+            )
+
         try:
+            logger.debug("LLM 意图分类请求",
+                         prompt_preview=prompt[:500],
+                         model=settings.LLM_CLASSIFIER_MODEL)
             resp = await self._llm_client.chat(
                 messages=[{"role": "user", "content": prompt}],
                 model=settings.LLM_CLASSIFIER_MODEL,
@@ -183,6 +210,9 @@ class IntentRouter:
                 timeout=10,
             )
             intent_name = resp.text.strip().upper()
+            logger.debug("LLM 意图分类结果",
+                         raw_response=resp.text[:200],
+                         intent=intent_name)
             return Intent(intent_name)
         except Exception:
             logger.warning("LLM 意图分类失败，降级到规则匹配", exc_info=True)

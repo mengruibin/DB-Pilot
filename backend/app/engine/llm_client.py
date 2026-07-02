@@ -69,6 +69,41 @@ _LLM_TIMEOUT_SEC = 30
 
 
 # =============================================================================
+# URL 路径补全工具
+# =============================================================================
+
+
+def _ensure_chat_path(url: str) -> str:
+    """确保 OpenAI 兼容 API URL 包含 /chat/completions 路径。
+
+    当使用自定义 LLM_API_URL（如阿里云百炼兼容模式）时，
+    用户可能只配置基础路径（.../v1），需要补全聊天补全端点。
+    若 URL 已包含完整路径（如默认 _OPENAI_API_URL），则不做修改。
+    """
+    url = url.rstrip("/")
+    if not url.endswith("/chat/completions"):
+        url = url + "/chat/completions"
+    return url
+
+
+def _format_messages_for_log(messages: list[dict[str, Any]]) -> list[dict[str, str]]:
+    """格式化消息列表用于 DEBUG 日志（截断内容，避免日志过大）。
+
+    返回每条消息的 role 和 content 前 500 字符预览。
+    _mask_sensitive_keys 处理器会自动掩盖 "token"/"secret" 等敏感字段。
+    """
+    result: list[dict[str, str]] = []
+    for msg in messages:
+        content = msg.get("content", "")
+        role = msg.get("role", "unknown")
+        if isinstance(content, str):
+            result.append({"role": role, "content_preview": content[:500]})
+        else:
+            result.append({"role": role, "content_type": type(content).__name__})
+    return result
+
+
+# =============================================================================
 # LLMClient
 # =============================================================================
 
@@ -276,6 +311,14 @@ class LLMClient:
         if system:
             payload["system"] = system
 
+        # B-26：请求报文 DEBUG 日志
+        logger.debug("LLM 请求报文",
+                     provider=self._provider, model=model,
+                     messages_count=len(payload["messages"]),
+                     messages=_format_messages_for_log(payload["messages"]),
+                     system_preview=system[:500] if system else None,
+                     api_url=api_url)
+
         async with httpx.AsyncClient(
             timeout=httpx.Timeout(actual_timeout),
         ) as client:
@@ -297,6 +340,14 @@ class LLMClient:
         data = response.json()
         text = _extract_anthropic_text(data)
         usage = _parse_anthropic_usage(data)
+
+        # B-26：响应报文 DEBUG 日志
+        logger.debug("LLM 响应报文",
+                     provider=self._provider, model=model,
+                     response_preview=text[:1000],
+                     input_tokens=usage.input_tokens if usage else None,
+                     output_tokens=usage.output_tokens if usage else None)
+
         return text, usage
 
     async def _stream_anthropic(
@@ -323,6 +374,14 @@ class LLMClient:
         }
         if system:
             payload["system"] = system
+
+        # B-26：流式请求报文 DEBUG 日志
+        logger.debug("LLM 流式请求报文",
+                     provider=self._provider, model=model,
+                     messages_count=len(payload["messages"]),
+                     messages=_format_messages_for_log(payload["messages"]),
+                     system_preview=system[:500] if system else None,
+                     api_url=api_url)
 
         async with httpx.AsyncClient(
             timeout=httpx.Timeout(actual_timeout),
@@ -390,7 +449,7 @@ class LLMClient:
     ) -> tuple[str, LLMUsage | None]:
         """OpenAI Chat Completions API 非流式调用。"""
         actual_timeout = timeout or _LLM_TIMEOUT_SEC
-        api_url = settings.LLM_API_URL or _OPENAI_API_URL
+        api_url = _ensure_chat_path(settings.LLM_API_URL or _OPENAI_API_URL)
         headers = {
             "authorization": f"Bearer {settings.LLM_API_KEY}",
             "content-type": "application/json",
@@ -402,6 +461,13 @@ class LLMClient:
         }
         if system:
             payload["messages"].insert(0, {"role": "system", "content": system})
+
+        # B-26：请求报文 DEBUG 日志（LOG_LEVEL=DEBUG 时输出）
+        logger.debug("LLM 请求报文",
+                     provider=self._provider, model=model,
+                     messages_count=len(payload["messages"]),
+                     messages=_format_messages_for_log(payload["messages"]),
+                     api_url=api_url)
 
         async with httpx.AsyncClient(
             timeout=httpx.Timeout(actual_timeout),
@@ -424,6 +490,30 @@ class LLMClient:
         data = response.json()
         text = _extract_openai_text(data)
         usage = _parse_openai_usage(data)
+
+        # B-26：响应报文 DEBUG 日志
+        logger.debug("LLM 响应报文",
+                     provider=self._provider, model=model,
+                     response_preview=text[:1000],
+                     input_tokens=usage.input_tokens if usage else None,
+                     output_tokens=usage.output_tokens if usage else None)
+
+        # 诊断：HTTP 200 但无内容时，记录原始响应体（阿里云百炼等可能在 200 中返回业务错误）
+        if not text:
+            # 检查是否包含业务错误码
+            err_code = data.get("code") or data.get("error", {}).get("code", "")
+            err_msg = data.get("message") or data.get("error", {}).get("message", "")
+            if err_code or err_msg:
+                logger.warning("OpenAI 返回业务错误",
+                               provider=self._provider, model=model,
+                               error_code=err_code, error_message=err_msg,
+                               raw_response=json.dumps(data, ensure_ascii=False)[:500])
+            else:
+                logger.warning("OpenAI 响应体无内容",
+                               provider=self._provider, model=model,
+                               raw_response=json.dumps(data, ensure_ascii=False)[:500],
+                               response_keys=list(data.keys()))
+
         return text, usage
 
     async def _stream_openai(
@@ -436,7 +526,7 @@ class LLMClient:
     ) -> AsyncIterator[dict[str, Any]]:
         """OpenAI Chat Completions API 流式调用。"""
         actual_timeout = timeout or _LLM_TIMEOUT_SEC
-        api_url = settings.LLM_API_URL or _OPENAI_API_URL
+        api_url = _ensure_chat_path(settings.LLM_API_URL or _OPENAI_API_URL)
         headers = {
             "authorization": f"Bearer {settings.LLM_API_KEY}",
             "content-type": "application/json",
@@ -449,6 +539,13 @@ class LLMClient:
         }
         if system:
             payload["messages"].insert(0, {"role": "system", "content": system})
+
+        # B-26：流式请求报文 DEBUG 日志
+        logger.debug("LLM 流式请求报文",
+                     provider=self._provider, model=model,
+                     messages_count=len(payload["messages"]),
+                     messages=_format_messages_for_log(payload["messages"]),
+                     api_url=api_url)
 
         async with httpx.AsyncClient(
             timeout=httpx.Timeout(actual_timeout),
@@ -527,19 +624,34 @@ def _parse_anthropic_usage(data: dict[str, Any]) -> LLMUsage | None:
 
 
 def _extract_openai_text(data: dict[str, Any]) -> str:
-    """从 OpenAI Chat Completions API 响应中提取文本。"""
+    """从 OpenAI Chat Completions API 响应中提取文本。
+
+    支持两种格式：
+      1. 标准 OpenAI：{"choices": [{"message": {"content": "..."}}]}
+      2. 阿里云百炼 DashScope 兼容模式：{"text": "...", "finish_reason": "..."}
+    """
+    # 格式 1：标准 OpenAI Chat Completions
     choices = data.get("choices", [])
     if choices:
         return choices[0].get("message", {}).get("content", "")
+    # 格式 2：阿里云百炼 DashScope 兼容模式
+    text = data.get("text", "")
+    if text:
+        return text
     return ""
 
 
 def _parse_openai_usage(data: dict[str, Any]) -> LLMUsage | None:
-    """从 OpenAI Chat Completions API 响应中解析 token 用量。"""
+    """从 OpenAI Chat Completions API 响应中解析 token 用量。
+
+    支持两种格式：
+      1. 标准 OpenAI：{"usage": {"prompt_tokens": N, "completion_tokens": N}}
+      2. 阿里云百炼 DashScope：{"usage": {"input_tokens": N, "output_tokens": N}}
+    """
     usage = data.get("usage")
     if usage:
         return LLMUsage(
-            input_tokens=usage.get("prompt_tokens", 0),
-            output_tokens=usage.get("completion_tokens", 0),
+            input_tokens=usage.get("prompt_tokens", 0) or usage.get("input_tokens", 0),
+            output_tokens=usage.get("completion_tokens", 0) or usage.get("output_tokens", 0),
         )
     return None

@@ -134,6 +134,12 @@ export interface ResultEvent {
   duration_ms: number
 }
 
+/** SSE 事件：纯文本回复（通用对话回显） */
+export interface TextEvent {
+  type: 'text'
+  content: string
+}
+
 /** SSE 事件：错误 */
 export interface ErrorEvent {
   type: 'error'
@@ -156,6 +162,7 @@ export type SSEEvent =
   | ToolResultEvent
   | SqlEvent
   | ResultEvent
+  | TextEvent
   | ErrorEvent
   | DoneEvent
 
@@ -166,6 +173,7 @@ export interface SSEEventCallbacks {
   onToolResult?: (event: ToolResultEvent) => void
   onSql?: (event: SqlEvent) => void
   onResult?: (event: ResultEvent) => void
+  onText?: (event: TextEvent) => void
   onError?: (event: ErrorEvent) => void
   onDone?: (event: DoneEvent) => void
   onDisconnect?: (reason: string) => void
@@ -178,6 +186,7 @@ export interface StreamChatRequest {
   message: string
   mode: 'natural_language' | 'sql_editor'
   session_id: string | null
+  password?: string  // 数据库密码，仅存于内存，不落盘（AGENTS.md §安全红线）
   context?: {
     selected_table?: string
     user_role?: string

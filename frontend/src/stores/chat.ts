@@ -12,17 +12,10 @@ import { defineStore } from 'pinia'
 import { ref, computed, watch } from 'vue'
 import { useSSE } from '@/composables/useSSE'
 import { cancelChat as apiCancelChat } from '@/api/chat'
+import { useConnectionStore } from '@/stores/connection'
 import type { Session } from '@/types/chat'
 import type { FindingSeverity } from '@/types/report'
-import type {
-  ThinkingEvent,
-  ToolCallEvent,
-  ToolResultEvent,
-  SqlEvent,
-  ResultEvent,
-  ErrorEvent,
-  DoneEvent,
-} from '@/types/chat'
+import type { ThinkingEvent, ToolCallEvent, ToolResultEvent, SqlEvent, ResultEvent, TextEvent, ErrorEvent, DoneEvent } from '@/types/chat'
 
 // ─── 内部消息类型（Store 展示用） ───
 
@@ -222,7 +215,10 @@ export const useChatStore = defineStore('chat', () => {
     isStreaming.value = true
     sseError.value = null
 
-    // 3. 启动 SSE 连接
+    // 3. 获取连接密码并启动 SSE 连接
+    const connectionStore = useConnectionStore()
+    const password = connectionStore.getPassword(connectionId)
+
     sse.connect(
       '/api/chat/stream',
       {
@@ -230,6 +226,7 @@ export const useChatStore = defineStore('chat', () => {
         message: text,
         mode,
         session_id: currentSessionId.value,
+        password,  // AGENTS.md §安全与合规红线：密码仅存于内存，每次请求传入
       },
       {
         // ── thinking ──
@@ -296,8 +293,20 @@ export const useChatStore = defineStore('chat', () => {
             content: event.summary,
             summary: event.summary,
             dataPreview: event.data_preview,
-            totalRows: event.data_preview.total_rows,
+            totalRows: event.data_preview?.total_rows ?? 0,
             executionTimeMs: event.duration_ms,
+            createdAt: new Date().toISOString(),
+          })
+        },
+
+        // ── text ──
+        onText: (event: TextEvent) => {
+          messages.value.push({
+            id: nextMsgId(),
+            sessionId: currentSessionId.value ?? '',
+            role: 'assistant',
+            type: 'text',
+            content: event.content,
             createdAt: new Date().toISOString(),
           })
         },

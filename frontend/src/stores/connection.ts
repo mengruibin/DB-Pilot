@@ -271,6 +271,14 @@ export const useConnectionStore = defineStore('connection', () => {
     }
   }
 
+  /**
+   * 获取指定连接的缓存密码。
+   * 由聊天 SSE 请求等场景调用，取不到时返回 undefined。
+   */
+  function getPassword(id: string): string | undefined {
+    return passwords.get(id)
+  }
+
   // ─── Watchers ───
 
   // activeId 变更时自动测试连接
@@ -314,5 +322,6 @@ export const useConnectionStore = defineStore('connection', () => {
     setActiveConnection,
     testConnection,
     setPassword,
+    getPassword,
   }
 })

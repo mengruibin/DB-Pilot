@@ -70,6 +70,7 @@ class RequestIDMiddleware:
 
         # 设置链路追踪上下文
         set_trace_id(request_id)
+        structlog.contextvars.bind_contextvars(trace_id=request_id)
 
         async def send_with_request_id(message: Message) -> None:
             if message["type"] == "http.response.start":

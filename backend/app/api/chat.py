@@ -74,6 +74,51 @@ def _truncate_preview(rows: list, max_rows: int = 100) -> list:
     return rows[:max_rows]
 
 
+async def _build_conversation_history(
+    db: AsyncSession,
+    session_id: str,
+    max_messages: int = 10,
+) -> str | None:
+    """构建会话历史文本，用于 LLM 上下文记忆。
+
+    从数据库中读取当前会话的前序消息，格式化为：
+      用户：xxx
+      助手：xxx
+
+    Args:
+        db: 数据库会话。
+        session_id: 当前会话 ID。
+        max_messages: 最多读取的消息条数。
+
+    Returns:
+        格式化后的对话历史字符串；无历史时返回 None。
+    """
+    result = await db.execute(
+        select(MessageModel)
+        .where(MessageModel.session_id == session_id)
+        .order_by(MessageModel.created_at.asc())
+    )
+    messages = result.scalars().all()
+
+    if len(messages) <= 1:
+        # 只有当前一条消息（刚建会话），无历史上下文
+        return None
+
+    # 取最近 max_messages 条（不含最新一条——当前用户消息已写入但还没处理）
+    recent = messages[-(max_messages + 1):-1]
+    if not recent:
+        return None
+
+    lines: list[str] = []
+    for msg in recent:
+        role_label = "用户" if msg.role == "user" else "助手"
+        # 截断过长的消息体，避免撑爆 LLM 上下文
+        content = msg.content[:200] + ("..." if len(msg.content) > 200 else "")
+        lines.append(f"{role_label}：{content}")
+
+    return "\n".join(lines)
+
+
 # =============================================================================
 # 会话管理
 # =============================================================================
@@ -233,6 +278,7 @@ async def _execute_tool_chain(
     intent: Intent,
     conn_config: dict[str, Any],
     user_message: str,
+    conversation_history: str | None = None,
 ) -> AsyncGenerator[dict[str, Any], None]:
     """按意图执行工具链，逐条 yield SSE 事件数据。
 
@@ -240,6 +286,8 @@ async def _execute_tool_chain(
         intent: 用户意图。
         conn_config: 连接配置参数字典。
         user_message: 用户原始消息。
+        conversation_history: 可选的会话历史文本，传递到 NL2SQL
+            用于理解上下文。
 
     Yields:
         每个事件的 dict，外层负责格式化为 SSE 并发送。
@@ -270,36 +318,185 @@ async def _execute_tool_chain(
         return tool.ainvoke({**_base, **extra})
 
     if intent == Intent.QUERY:
-        # NL2SQL → 执行查询
-        # TODO: B-17 集成 generate_sql + 获取 schema_context（B-10）
+        # NL2SQL → 执行查询（B-17 集成 generate_sql + schema_context B-10）
+        # Step 1: 获取 Schema 上下文（表+列信息）
         yield {
             "type": "thinking",
-            "content": "正在理解查询意图并生成 SQL...",
-        }
-        yield {
-            "type": "tool_call",
-            "tool": "run_query",
-            "args": {"sql": user_message},
-            "display": "正在执行查询...",
+            "content": "正在获取数据库结构信息...",
         }
 
         try:
-            start = time.monotonic()
-            from app.agent.tools.query import run_query
-            result = await _invoke(
-                run_query,
-                connection_id=conn_config["connection_id"],
-                sql=user_message,
-                user_role="standard",
-            )
-            elapsed = int((time.monotonic() - start) * 1000)
+            from app.agent.tools.query import list_tables, describe_table, run_query
+            from app.engine.nl2sql import generate_sql
 
-            if "error" in result:
+            # 1a. 获取表列表
+            tables_result = await _invoke(
+                list_tables,
+                connection_id=conn_config["connection_id"],
+            )
+
+            if "error" in tables_result:
                 yield {
                     "type": "error",
-                    "error_code": "QUERY_ERROR",
-                    "user_message": result["error"],
+                    "error_code": "SCHEMA_ERROR",
+                    "user_message": tables_result.get("detail", "获取表结构失败"),
                     "severity": "error",
+                }
+                return
+
+            tables_info = tables_result.get("tables", [])
+
+            # 1b. 获取每张表的列信息（限制前 10 张表，避免过多 LLM 上下文浪费）
+            schema_tables: list[dict[str, Any]] = []
+            for table in tables_info[:10]:
+                table_name = table.get("table_name", "")
+                if not table_name:
+                    continue
+                desc_result = await _invoke(
+                    describe_table,
+                    connection_id=conn_config["connection_id"],
+                    table_name=table_name,
+                )
+                if "error" not in desc_result:
+                    schema_tables.append({
+                        "table_name": table_name,
+                        "columns": desc_result.get("columns", []),
+                        "comment": table.get("comment", ""),
+                    })
+                else:
+                    # 列获取失败时仍保留表名，仅列信息为空
+                    schema_tables.append({
+                        "table_name": table_name,
+                        "columns": [],
+                        "comment": table.get("comment", ""),
+                    })
+
+            schema_context: dict[str, Any] = {
+                "tables": schema_tables,
+                "database": conn_config["database"],
+            }
+
+            # Step 2: NL2SQL 生成 SQL
+            yield {
+                "type": "thinking",
+                "content": "正在理解查询意图并生成 SQL...",
+            }
+
+            sql_result = await generate_sql(
+                natural_language=user_message,
+                schema_context=schema_context,
+                connection_id=conn_config["connection_id"],
+                db_type=conn_config["db_type"],
+                conversation_history=conversation_history,
+            )
+
+            if "error" in sql_result:
+                yield {
+                    "type": "error",
+                    "error_code": "NL2SQL_ERROR",
+                    "user_message": sql_result.get("detail", "SQL 生成失败，请重试或简化查询"),
+                    "severity": "error",
+                }
+                return
+
+            if sql_result.get("audit_status") == "blocked":
+                violations = sql_result.get("violations", [])
+                yield {
+                    "type": "error",
+                    "error_code": "SQL_BLOCKED",
+                    "user_message": f"生成的 SQL 被安全审计拦截（{len(violations)} 项违规）",
+                    "severity": "error",
+                }
+                return
+
+            generated_sql = sql_result["sql"]
+            explanation = sql_result.get("explanation", "")
+
+            # Step 3: 执行生成的 SQL（自动重试一次，应对 LLM 生成错误）
+            yield {
+                "type": "tool_call",
+                "tool": "run_query",
+                "args": {"sql": generated_sql},
+                "display": explanation or "正在执行查询...",
+            }
+
+            sql_to_execute = generated_sql
+            retry_count = 0
+            max_retries = 1
+
+            while retry_count <= max_retries:
+                start = time.monotonic()
+                result = await _invoke(
+                    run_query,
+                    connection_id=conn_config["connection_id"],
+                    sql=sql_to_execute,
+                    user_role="standard",
+                )
+                elapsed = int((time.monotonic() - start) * 1000)
+
+                if "error" not in result:
+                    # 执行成功
+                    break
+
+                # 执行失败，尝试重试
+                retry_count += 1
+                if retry_count > max_retries:
+                    # 已达最大重试次数，报告错误
+                    yield {
+                        "type": "error",
+                        "error_code": "QUERY_ERROR",
+                        "user_message": result["error"],
+                        "severity": "error",
+                    }
+                    return
+
+                # 用错误信息让 LLM 修正 SQL
+                logger.warning("SQL 执行失败，正在尝试自动修正",
+                               retry=retry_count, error=str(result["error"])[:200],
+                               sql=sql_to_execute[:200])
+
+                yield {
+                    "type": "thinking",
+                    "content": f"SQL 执行出错，正在尝试修正...（{result['error'][:100]}）",
+                }
+
+                fix_result = await generate_sql(
+                    natural_language=user_message,
+                    schema_context=schema_context,
+                    connection_id=conn_config["connection_id"],
+                    db_type=conn_config["db_type"],
+                    conversation_history=conversation_history,
+                    previous_error=result["error"],
+                    previous_sql=sql_to_execute,
+                )
+
+                if "error" in fix_result:
+                    # 修正也失败了，报告原始错误
+                    yield {
+                        "type": "error",
+                        "error_code": "QUERY_ERROR",
+                        "user_message": result["error"],
+                        "severity": "error",
+                    }
+                    return
+
+                if fix_result.get("audit_status") == "blocked":
+                    yield {
+                        "type": "error",
+                        "error_code": "SQL_BLOCKED",
+                        "user_message": "修正后的 SQL 仍被安全审计拦截",
+                        "severity": "error",
+                    }
+                    return
+
+                sql_to_execute = fix_result["sql"]
+                explanation = fix_result.get("explanation", explanation)
+
+                yield {
+                    "type": "tool_call",
+                    "tool": "run_query",
+                    "args": {"sql": sql_to_execute},
+                    "display": f"修正后重试：{explanation}",
                 }
             else:
                 yield {
@@ -310,9 +507,10 @@ async def _execute_tool_chain(
                 }
                 yield {
                     "type": "sql",
-                    "content": user_message,
+                    "content": generated_sql,
                     "audit_status": result.get("audit_status", "passed"),
                     "is_readonly": True,
+                    "explanation": explanation,
                 }
                 yield {
                     "type": "result",
@@ -529,19 +727,15 @@ async def _execute_tool_chain(
     else:
         # GENERAL：通用对话
         yield {
-            "type": "result",
-            "summary": "我是 DB-Pilot 数据库运维助手",
-            "data_preview": {
-                "message": (
-                    "我是 DB-Pilot 数据库运维助手。我可以帮助您：\n"
-                    "1. 自然语言查询数据（NL2SQL）\n"
-                    "2. SQL 性能诊断与优化\n"
-                    "3. 数据库故障排查\n"
-                    "4. 数据库健康巡检\n"
-                    "请描述您的问题或选择一个数据库连接开始。"
-                ),
-            },
-            "duration_ms": 0,
+            "type": "text",
+            "content": (
+                "我是 DB-Pilot 数据库运维助手。我可以帮助您：\n"
+                "1. 自然语言查询数据（NL2SQL）\n"
+                "2. SQL 性能诊断与优化\n"
+                "3. 数据库故障排查\n"
+                "4. 数据库健康巡检\n"
+                "请描述您的问题或选择一个数据库连接开始。"
+            ),
         }
 
 
@@ -719,9 +913,17 @@ async def _stream_events(
                 message_type=body.mode,
             )
 
+            # ── 获取会话历史（最近 10 条，用于记忆上下文） ──
+            conversation_history = await _build_conversation_history(
+                db, session.id, max_messages=10,
+            )
+
             # ========== Step 2: 意图分类 ==========
             router = IntentRouter(llm_client=LLMClient())
-            intent = await router.classify(body.message)
+            intent = await router.classify(
+                body.message,
+                conversation_history=conversation_history,
+            )
             assistant_content_parts.append(f"分析用户意图：{intent.value}")
 
             yield _format_sse({
@@ -730,6 +932,7 @@ async def _stream_events(
             })
 
             # ========== Step 3-4: 解析连接 + 工具编排 ==========
+            # 解析连接信息
             conn_config = await _resolve_connection_config(
                 db, body.connection_id, body.password,
             )
@@ -749,6 +952,7 @@ async def _stream_events(
 
             async for event_data in _execute_tool_chain(
                 intent, conn_config, body.message,
+                conversation_history=conversation_history,
             ):
                 # 检查取消信号（AC-6：取消后前端 SSE 流收到 done 事件）
                 if cancel_event.is_set():
