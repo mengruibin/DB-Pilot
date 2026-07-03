@@ -3,7 +3,7 @@
 
 核心流程（PRD §5.2）：
   1. 构建 EXPLAIN 分析 Prompt
-  2. 调用 LLM 分析执行计划
+  2. 调用 LLM（通过 build_chat_model 标准 Chat 模型）分析执行计划
   3. 解析 LLM 响应为结构化瓶颈信息
   4. LLM 不可用时降级到规则引擎
   5. 返回 {bottleneck, suggestion, estimated_improvement, is_destructive}
@@ -19,8 +19,9 @@ import time
 from typing import Any
 
 import structlog
+from langchain_core.messages import HumanMessage, SystemMessage
 
-from app.engine.llm_client import LLMClient
+from app.agent.models import build_chat_model
 from app.prompts.diagnosis import build_diagnosis_prompt, rule_based_analyze
 
 logger = structlog.get_logger(__name__)
@@ -140,14 +141,12 @@ async def analyze_explain(
             db_type=db_type,
         )
 
-        client = LLMClient()
-        resp = await client.chat(
-            messages=[{"role": "user", "content": user_prompt}],
-            system=system_prompt,
-            max_tokens=_DEFAULT_MAX_TOKENS,
-            timeout=_LLM_TIMEOUT_SEC,
-        )
-        llm_response = resp.text
+        model = build_chat_model(max_tokens=_DEFAULT_MAX_TOKENS, timeout=_LLM_TIMEOUT_SEC)
+        response = await model.ainvoke([
+            SystemMessage(content=system_prompt),
+            HumanMessage(content=user_prompt),
+        ])
+        llm_response = response.content if isinstance(response.content, str) else str(response.content)
         elapsed = time.monotonic() - start_time
 
         # Step 2: 解析 LLM 响应

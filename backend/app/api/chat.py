@@ -29,6 +29,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.agent.sse_utils import format_sse
 from app.agent.state import AgentState, Intent
 from app.correlation import set_connection_id
+from langchain_core.messages import HumanMessage
 from app.database import async_session_factory, get_session
 from app.models.connection import ConnectionConfigModel
 from app.models.schemas import (
@@ -465,6 +466,8 @@ async def _stream_events(
 
             run_id = f"run_{uuid4().hex[:12]}"
             initial_state: AgentState = {
+                "messages": [HumanMessage(content=body.message)],
+                "sse_events": [],
                 "user_message": body.message,
                 "connection_id": body.connection_id,
                 "session_id": session.id,
@@ -473,9 +476,6 @@ async def _stream_events(
                 "conversation_history": conversation_history,
                 "conn_config": conn_config,
                 "run_id": run_id,
-                "messages": [],
-                "pending_tool_calls": [],
-                "pending_tool_results": [],
                 "trace_iterations": [],
             }
 
@@ -497,8 +497,8 @@ async def _stream_events(
                     return
 
                 # 发射新增的 SSE 事件
-                messages: list[dict[str, Any]] = state.get("messages", [])  # type: ignore[assignment]
-                for msg in messages[emitted_count:]:
+                sse_events: list[dict[str, Any]] = state.get("sse_events", [])  # type: ignore[assignment]
+                for msg in sse_events[emitted_count:]:
                     if msg:
                         yield format_sse(msg)
                         # 收集助手回复片段
@@ -506,7 +506,7 @@ async def _stream_events(
                             assistant_content_parts.append(
                                 msg.get("summary", "")
                             )
-                emitted_count = len(messages)
+                emitted_count = len(sse_events)
 
                 # 检查图是否执行完毕
                 if state.get("is_complete"):

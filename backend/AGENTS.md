@@ -17,6 +17,9 @@ DB-Pilot 是基于 LangGraph StateGraph + FastAPI 构建的**数据库运维 AI 
 |---|---|---|---|
 | FastAPI | >=0.115.0 | REST API + SSE | PRD §6.1 |
 | LangGraph | >=0.3.0 | Agent 状态图编排 | PRD §6.1 |
+| LangChain | >=0.3.0 | Chat 模型标准封装（bind_tools / ToolMessage） | 任务 1-6 重构 |
+| langchain-anthropic | >=0.3.0 | Anthropic Claude Chat 模型 | 任务 1 重构 |
+| langchain-openai | >=0.3.0 | OpenAI / 百炼兼容 Chat 模型 | 任务 1 重构 |
 | SQLAlchemy | >=2.0.0 | 内部 ORM（会话/连接配置持久化） | PRD §6.1 |
 | Pydantic | >=2.0 | 请求/响应模型、配置管理 | PRD §6.1 |
 | sqlglot | >=25.0.0 | 多方言 SQL 解析与安全审计 | PRD §6.1, §8.1 |
@@ -31,9 +34,12 @@ DB-Pilot 是基于 LangGraph StateGraph + FastAPI 构建的**数据库运维 AI 
 
 ### LLM 集成
 
+- [ ] MUST 使用 LangChain 标准 Chat 模型（`ChatAnthropic` / `ChatOpenAI`）统一调用 LLM
+- [ ] MUST 通过 `app.agent.models.build_chat_model()` 工厂函数获取模型实例
+- [ ] MUST 工具绑定使用 `model.bind_tools()` 标准 API（任务 1-3 重构）
+- [ ] MUST NOT 直接使用 `httpx` 调用 LLM REST API（旧 `LLMClient` Agent 部分已废弃）
 - [ ] MUST 默认使用 Anthropic Claude API（依据 PRD §6.1）
 - [ ] SHOULD 架构兼容 OpenAI 格式的模型切换（依据 PRD §10.3）
-- [ ] MUST 将复杂推理任务路由到 Claude Opus 4.5；简单分类任务使用 Claude Haiku 4.5（依据 PRD §6.1）
 - [ ] MUST NOT 在代码中硬编码模型名称；模型名必须从 `config.py` 读取
 
 ### 禁止项
@@ -54,7 +60,7 @@ backend/
 │   ├── main.py          # FastAPI 应用工厂 + 生命周期钩子，禁止在此写业务逻辑
 │   ├── config.py        # 全量 Settings，从 .env / 环境变量加载
 │   ├── api/             # 仅薄路由层：参数校验 → 调用 agent/ 或 engine/ → 返回 Response
-│   ├── agent/           # Agent ReAct 决策引擎：LangGraph 状态图、意图路由、工具注册、安全护栏
+│   ├── agent/           # Agent ReAct 决策引擎：LangGraph 状态图（LangChain Chat 模型 + bind_tools + SafeToolNode）、意图路由、工具注册、安全护栏
 │   ├── db/              # 数据库适配器（目标数据库连接，非内部数据库）
 │   ├── engine/          # 无状态引擎：NL2SQL、SQL 审计、诊断、巡检
 │   ├── models/          # Pydantic schemas + SQLAlchemy ORM 模型
@@ -113,6 +119,8 @@ backend/
 
 - [ ] MUST 所有 `@tool` 装饰的函数返回 Python 原生类型（dict/list/str），禁止返回 SQLAlchemy ORM 实例
 - [ ] MUST 工具函数内部捕获异常后返回 `{"error": "<可读描述>", "detail": "<原始异常类型>"}` 字典，MUST NOT 向上抛出未处理异常
+- [ ] MUST 连接配置参数（`connection_id`/`db_type`/`host`/`port`/`database`/`user`/`password`/`ssl_enabled`/`ssl_ca_cert`）使用 `Annotated[str, InjectedToolArg]` 标注，由 `SafeToolNode` 在运行时自动注入，LLM 通过 `bind_tools()` 不可见这些参数
+- [ ] MUST `SafeToolNode`（`app/agent/tool_node.py`）在工具执行前依次执行：连接配置注入 → 安全护栏检查 → 工具调用 → 结果脱敏，返回标准 `ToolMessage` 对象
 
 ---
 

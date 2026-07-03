@@ -13,10 +13,10 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Annotated, Any
 
 import structlog
-from langchain_core.tools import tool
+from langchain_core.tools import InjectedToolArg, tool
 
 from app.db.factory import AdapterFactory
 from app.engine.health_check import HealthCheckEngine
@@ -75,16 +75,16 @@ def _safe_tool_call(fn_name: str, exc: Exception) -> dict[str, Any]:
 
 @tool
 async def run_health_check(
-    connection_id: str,
-    db_type: str,
-    host: str,
-    port: int,
-    database: str,
-    user: str,
-    password: str,
+    connection_id: Annotated[str, InjectedToolArg],
+    db_type: Annotated[str, InjectedToolArg],
+    host: Annotated[str, InjectedToolArg],
+    port: Annotated[int, InjectedToolArg],
+    database: Annotated[str, InjectedToolArg],
+    user: Annotated[str, InjectedToolArg],
+    password: Annotated[str, InjectedToolArg],
     check_items: list[str] | None = None,
-    ssl_enabled: bool = False,
-    ssl_ca_cert: str | None = None,
+    ssl_enabled: Annotated[bool, InjectedToolArg] = False,
+    ssl_ca_cert: Annotated[str | None, InjectedToolArg] = None,
 ) -> dict[str, Any]:
     """对目标数据库执行健康巡检（20 项检查）。
 

@@ -13,10 +13,10 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Annotated, Any
 
 import structlog
-from langchain_core.tools import tool
+from langchain_core.tools import InjectedToolArg, tool
 
 from app.db.factory import AdapterFactory
 from app.engine.sql_auditor import audit
@@ -88,15 +88,15 @@ def _safe_tool_call(
 
 @tool
 async def list_tables(
-    connection_id: str,
-    db_type: str,
-    host: str,
-    port: int,
-    database: str,
-    user: str,
-    password: str,
-    ssl_enabled: bool = False,
-    ssl_ca_cert: str | None = None,
+    connection_id: Annotated[str, InjectedToolArg],
+    db_type: Annotated[str, InjectedToolArg],
+    host: Annotated[str, InjectedToolArg],
+    port: Annotated[int, InjectedToolArg],
+    database: Annotated[str, InjectedToolArg],
+    user: Annotated[str, InjectedToolArg],
+    password: Annotated[str, InjectedToolArg],
+    ssl_enabled: Annotated[bool, InjectedToolArg] = False,
+    ssl_ca_cert: Annotated[str | None, InjectedToolArg] = None,
 ) -> dict[str, Any]:
     """列出目标数据库中的所有表。
 
@@ -146,16 +146,16 @@ async def list_tables(
 
 @tool
 async def describe_table(
-    connection_id: str,
-    db_type: str,
-    host: str,
-    port: int,
-    database: str,
-    user: str,
-    password: str,
+    connection_id: Annotated[str, InjectedToolArg],
+    db_type: Annotated[str, InjectedToolArg],
+    host: Annotated[str, InjectedToolArg],
+    port: Annotated[int, InjectedToolArg],
+    database: Annotated[str, InjectedToolArg],
+    user: Annotated[str, InjectedToolArg],
+    password: Annotated[str, InjectedToolArg],
     table_name: str,
-    ssl_enabled: bool = False,
-    ssl_ca_cert: str | None = None,
+    ssl_enabled: Annotated[bool, InjectedToolArg] = False,
+    ssl_ca_cert: Annotated[str | None, InjectedToolArg] = None,
 ) -> dict[str, Any]:
     """获取指定表的详细结构信息（列信息 + 索引信息）。
 
@@ -208,17 +208,17 @@ async def describe_table(
 
 @tool
 async def run_query(
-    connection_id: str,
-    db_type: str,
-    host: str,
-    port: int,
-    database: str,
-    user: str,
-    password: str,
+    connection_id: Annotated[str, InjectedToolArg],
+    db_type: Annotated[str, InjectedToolArg],
+    host: Annotated[str, InjectedToolArg],
+    port: Annotated[int, InjectedToolArg],
+    database: Annotated[str, InjectedToolArg],
+    user: Annotated[str, InjectedToolArg],
+    password: Annotated[str, InjectedToolArg],
     sql: str,
-    user_role: str = "standard",
-    ssl_enabled: bool = False,
-    ssl_ca_cert: str | None = None,
+    user_role: Annotated[str, InjectedToolArg] = "standard",
+    ssl_enabled: Annotated[bool, InjectedToolArg] = False,
+    ssl_ca_cert: Annotated[str | None, InjectedToolArg] = None,
 ) -> dict[str, Any]:
     """执行只读 SQL 查询并返回结果。
 

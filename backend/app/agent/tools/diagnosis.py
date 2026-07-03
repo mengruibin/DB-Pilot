@@ -13,10 +13,10 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Annotated, Any
 
 import structlog
-from langchain_core.tools import tool
+from langchain_core.tools import InjectedToolArg, tool
 
 from app.db.factory import AdapterFactory
 from app.engine.sql_auditor import audit
@@ -75,17 +75,17 @@ def _safe_tool_call(fn_name: str, exc: Exception) -> dict[str, Any]:
 
 @tool
 async def explain_query(
-    connection_id: str,
-    db_type: str,
-    host: str,
-    port: int,
-    database: str,
-    user: str,
-    password: str,
+    connection_id: Annotated[str, InjectedToolArg],
+    db_type: Annotated[str, InjectedToolArg],
+    host: Annotated[str, InjectedToolArg],
+    port: Annotated[int, InjectedToolArg],
+    database: Annotated[str, InjectedToolArg],
+    user: Annotated[str, InjectedToolArg],
+    password: Annotated[str, InjectedToolArg],
     sql: str,
     format: str = "tree",
-    ssl_enabled: bool = False,
-    ssl_ca_cert: str | None = None,
+    ssl_enabled: Annotated[bool, InjectedToolArg] = False,
+    ssl_ca_cert: Annotated[str | None, InjectedToolArg] = None,
 ) -> dict[str, Any]:
     """获取指定 SQL 的执行计划（EXPLAIN）。
 
@@ -169,17 +169,17 @@ async def explain_query(
 
 @tool
 async def get_slow_queries(
-    connection_id: str,
-    db_type: str,
-    host: str,
-    port: int,
-    database: str,
-    user: str,
-    password: str,
+    connection_id: Annotated[str, InjectedToolArg],
+    db_type: Annotated[str, InjectedToolArg],
+    host: Annotated[str, InjectedToolArg],
+    port: Annotated[int, InjectedToolArg],
+    database: Annotated[str, InjectedToolArg],
+    user: Annotated[str, InjectedToolArg],
+    password: Annotated[str, InjectedToolArg],
     time_range: str = "1h",
     limit: int = 20,
-    ssl_enabled: bool = False,
-    ssl_ca_cert: str | None = None,
+    ssl_enabled: Annotated[bool, InjectedToolArg] = False,
+    ssl_ca_cert: Annotated[str | None, InjectedToolArg] = None,
 ) -> dict[str, Any]:
     """获取目标数据库的慢查询列表。
 

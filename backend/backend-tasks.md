@@ -503,6 +503,23 @@
 
 ---
 
+## B-32：后端 Agent 架构 LangChain/LangGraph 标准化重构
+
+| 字段 | 内容 |
+|------|------|
+| **ID** | B-32 |
+| **标题** | LLM 调用标准化重构：LangChain Chat 模型 + bind_tools + InjectedToolArg + SafeToolNode |
+| **关联契约** | backend AGENTS.md §LLM 集成（LangChain Chat 模型标准）、§工具函数返回契约（InjectedToolArg） |
+| **输入** | B-30（旧自研架构）、B-26（旧 LLMClient） |
+| **输出物** | `backend/app/agent/models.py`（Chat 模型工厂）、`backend/app/agent/tool_node.py`（SafeToolNode）、`backend/app/agent/state.py`（MessagesState）、`backend/app/agent/tools/registry.py`（精简—移除手动 Schema）、`docs/refactoring-plan.md`（重构计划） |
+| **修改文件** | `graph.py`（重写 agent_node + 死代码清理 -500 行）、`router.py`（BaseChatModel）、`chat.py`/`troubleshoot.py`（HumanMessage + sse_events）、全部 4 个工具文件（InjectedToolArg 标注）、`AGENTS.md`（文档更新） |
+| **验收标准** | 1. `build_chat_model()` 替代自研 LLMClient，支持 anthropic/openai 双 provider<br>2. `model.bind_tools()` + `InjectedToolArg` 替代手动 Schema 过滤（LLM 不可见连接参数）<br>3. `SafeToolNode` 替代旧 tools_node：连接注入 + 安全护栏 + 脱敏 + ToolMessage<br>4. `MessagesState`（add_messages reducer）+ `sse_events` 分离<br>5. 意图分类改用 `BaseChatModel.ainvoke()` 替代 LLMClient<br>6. 全部 9 个工具无 Schema 过滤代码，签名精简至纯业务参数<br>7. graph.py 从 1043 行缩减至 543 行（-48%）<br>8. 全量 22 个测试通过（17 passed + 5 skipped） |
+| **前置依赖** | B-30（旧 Agent 图）、B-26（旧 LLM 调用基础设施） |
+| **状态** | 已完成 |
+| **日期** | 2026-07-03 |
+
+---
+
 ```
 B-01 ──────────────────────────────────────────────────┐
   ├── B-02 ──┐                                         │

@@ -17,7 +17,8 @@ import structlog
 
 from app.agent.state import Intent
 from app.config import settings
-from app.engine.llm_client import LLMClient
+from langchain_core.language_models import BaseChatModel
+from langchain_core.messages import HumanMessage
 
 logger = structlog.get_logger(__name__)
 
@@ -90,14 +91,14 @@ class IntentRouter:
         # -> Intent.DIAGNOSIS
     """
 
-    def __init__(self, llm_client: LLMClient | None = None) -> None:
+    def __init__(self, llm_model: BaseChatModel | None = None) -> None:
         """初始化意图路由器。
 
         Args:
-            llm_client: 可选的 LLM 客户端实例。若提供，在低置信度时
+            llm_model: 可选的 LangChain Chat 模型实例。若提供，在低置信度时
                 调用 LLM 分类（通过 LLM_CLASSIFIER_MODEL 轻量模型）。
         """
-        self._llm_client = llm_client
+        self._llm_model = llm_model
         # 关键词匹配的置信度阈值（> 此值直接返回，不调用 LLM）
         self._keyword_threshold = 0.8
 
@@ -128,17 +129,19 @@ class IntentRouter:
 
         # 置信度 > 阈值时直接返回（AC-3）
         if best_score >= self._keyword_threshold:
+            self._last_method = "keyword"
             logger.info("意图分类完成", intent=best_intent.value,
                          confidence=round(best_score, 2),
                          method="keyword")
             return best_intent
 
         # 低置信度时尝试 LLM 分类（AC-4）
-        if self._llm_client is not None:
+        if self._llm_model is not None:
             llm_intent = await self._classify_with_llm(
                 user_message, conversation_history=conversation_history,
             )
             if llm_intent is not None:
+                self._last_method = "llm"
                 logger.info("意图分类完成", intent=llm_intent.value,
                              confidence=round(best_score, 2),
                              method="llm")
@@ -146,6 +149,7 @@ class IntentRouter:
 
         # 若仍低于阈值但 QUERY 得分相对较高，倾向 QUERY
         if scores.get(Intent.QUERY, 0.0) >= 0.4 and best_score < 0.6:
+            self._last_method = "fallback_query"
             logger.info("意图分类完成", intent=Intent.QUERY.value,
                          confidence=round(scores[Intent.QUERY], 2),
                          method="fallback_query")
@@ -153,11 +157,13 @@ class IntentRouter:
 
         # 高于最低阈值返回最佳匹配，否则返回 GENERAL
         if best_score >= 0.3:
+            self._last_method = "keyword_low"
             logger.info("意图分类完成", intent=best_intent.value,
                          confidence=round(best_score, 2),
                          method="keyword_low")
             return best_intent
 
+        self._last_method = "default"
         logger.info("意图分类完成", intent=Intent.GENERAL.value,
                      confidence=round(best_score, 2),
                      method="default")
@@ -168,21 +174,22 @@ class IntentRouter:
         user_message: str,
         conversation_history: str | None = None,
     ) -> Intent | None:
-        """使用 LLM 对低置信度消息进行分类。
+        """使用 LangChain Chat 模型对低置信度消息进行分类（任务 8：标准化重构）。
 
-        调用 LLMClient 并指定 LLM_CLASSIFIER_MODEL（默认 Haiku）进行快速分类。
+        调用 LangChain BaseChatModel.ainvoke() 进行快速分类。
         超时 10s，异常时静默降级（返回 None，由 classify() 走 fallback 逻辑）。
 
         Args:
             user_message: 用户消息。
+            conversation_history: 可选的会话历史。
 
         Returns:
             Intent 枚举值，或 None（LLM 不可用或分类失败时）。
         """
-        if self._llm_client is None:
+        if self._llm_model is None:
             return None
 
-        prompt = (
+        content = (
             "请将以下数据库运维相关的问题分类为以下意图之一：\n"
             "QUERY, DIAGNOSIS, TROUBLESHOOT, HEALTH_CHECK, GENERAL\n"
             "仅返回意图名称，不要包含其他内容。\n"
@@ -191,7 +198,7 @@ class IntentRouter:
 
         # 若有会话历史，添加上下文提示（AC-4：支持指代消解和省略补全）
         if conversation_history:
-            prompt = (
+            content = (
                 "请将以下数据库运维相关的问题分类为以下意图之一：\n"
                 "QUERY, DIAGNOSIS, TROUBLESHOOT, HEALTH_CHECK, GENERAL\n"
                 "仅返回意图名称，不要包含其他内容。\n\n"
@@ -200,18 +207,15 @@ class IntentRouter:
             )
 
         try:
+            model_name = getattr(self._llm_model, 'model_name', None) or getattr(self._llm_model, 'model', 'unknown')
             logger.debug("LLM 意图分类请求",
-                         prompt_preview=prompt[:500],
-                         model=settings.LLM_CLASSIFIER_MODEL)
-            resp = await self._llm_client.chat(
-                messages=[{"role": "user", "content": prompt}],
-                model=settings.LLM_CLASSIFIER_MODEL,
-                max_tokens=50,
-                timeout=10,
-            )
-            intent_name = resp.text.strip().upper()
+                         content_preview=content[:500],
+                         model=model_name)
+            # LangChain 标准调用：ainvoke 返回 AIMessage
+            response = await self._llm_model.ainvoke([HumanMessage(content=content)])
+            intent_name = response.content.strip().upper() if isinstance(response.content, str) else ""
             logger.debug("LLM 意图分类结果",
-                         raw_response=resp.text[:200],
+                         raw_response=str(response.content)[:200],
                          intent=intent_name)
             return Intent(intent_name)
         except Exception:

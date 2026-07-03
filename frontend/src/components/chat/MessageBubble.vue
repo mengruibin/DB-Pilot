@@ -191,14 +191,18 @@ const resultRows = computed(() => {
           />
         </template>
 
-        <!-- === result（F-09 ResultTable 组件）=== -->
+        <!-- === result（F-09 ResultTable 组件 / 纯文本回退）=== -->
         <template v-if="message.type === 'result'">
+          <!-- 有结构化数据（dataPreview）→ ResultTable -->
           <ResultTable
+            v-if="resultColumns.length > 0 || resultRows.length > 0"
             :columns="resultColumns"
             :rows="resultRows"
             :total-rows="message.totalRows ?? resultRows.length"
             :execution-time-ms="message.executionTimeMs"
           />
+          <!-- 纯文本回答（无 dataPreview）→ 直接渲染文本 -->
+          <p v-else class="assistant-text">{{ message.summary || message.content }}</p>
         </template>
 
         <!-- === error（F-12 ErrorCard 组件）=== -->

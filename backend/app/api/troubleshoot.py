@@ -24,6 +24,7 @@ from fastapi.responses import StreamingResponse
 
 from app.agent.sse_utils import format_sse
 from app.agent.state import AgentState
+from langchain_core.messages import HumanMessage
 
 # 复用 B-20 的 SSE 取消机制
 from app.api.chat import _active_streams, _running_tasks  # type: ignore[attr-defined]  # noqa: F811
@@ -126,6 +127,8 @@ async def _troubleshoot_stream(
 
             run_id = f"run_{uuid4().hex[:12]}"
             initial_state: AgentState = {
+                "messages": [HumanMessage(content=user_message)],
+                "sse_events": [],
                 "user_message": user_message,
                 "connection_id": connection_id,
                 "session_id": body.session_id,
@@ -134,9 +137,6 @@ async def _troubleshoot_stream(
                 "conversation_history": None,
                 "conn_config": conn_config,
                 "run_id": run_id,
-                "messages": [],
-                "pending_tool_calls": [],
-                "pending_tool_results": [],
                 "trace_iterations": [],
             }
 
@@ -157,11 +157,11 @@ async def _troubleshoot_stream(
                     })
                     return
 
-                messages: list[dict[str, Any]] = state.get("messages", [])  # type: ignore[assignment]
-                for msg in messages[emitted_count:]:
+                sse_events: list[dict[str, Any]] = state.get("sse_events", [])  # type: ignore[assignment]
+                for msg in sse_events[emitted_count:]:
                     if msg:
                         yield format_sse(msg)
-                emitted_count = len(messages)
+                emitted_count = len(sse_events)
 
                 if state.get("is_complete"):
                     break

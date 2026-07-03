@@ -4,6 +4,9 @@ uvicorn[standard]>=0.30.0
 
 # Agent Framework
 langgraph>=0.3.0
+langchain>=0.3.0
+langchain-anthropic>=0.3.0
+langchain-openai>=0.3.0
 
 # ORM & Data
 sqlalchemy>=2.0.0

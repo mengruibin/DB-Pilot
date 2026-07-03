@@ -3,7 +3,7 @@ NL2SQL 引擎——自然语言转 SQL。
 
 核心流程（PRD §5.1）：
   1. 注入 Schema 上下文构建 Prompt
-  2. 调用 LLM 生成 SQL
+  2. 调用 LLM（通过 build_chat_model 标准 Chat 模型）生成 SQL
   3. 解析 LLM 响应提取 SQL
   4. 经 sql_auditor.audit() 安全校验
   5. 校验通过后返回 {sql, explanation}
@@ -18,8 +18,9 @@ import time
 from typing import Any
 
 import structlog
+from langchain_core.messages import HumanMessage, SystemMessage
 
-from app.engine.llm_client import LLMClient
+from app.agent.models import build_chat_model
 from app.engine.sql_auditor import audit
 from app.prompts.nl2sql import build_nl2sql_prompt
 
@@ -163,18 +164,16 @@ async def generate_sql(
             previous_sql=previous_sql,
         )
 
-        # Step 2: 调用 LLM（通过统一 LLMClient，支持自定义 API URL 和 provider 切换）
+        # Step 2: 调用 LLM（通过标准 LangChain Chat 模型）
         logger.info("NL2SQL 开始生成", query=natural_language[:100],
                      connection_id=connection_id, db_type=db_type)
         start_time = time.monotonic()
-        client = LLMClient()
-        resp = await client.chat(
-            messages=[{"role": "user", "content": user_prompt}],
-            system=system_prompt,
-            max_tokens=_DEFAULT_MAX_TOKENS,
-            timeout=_LLM_TIMEOUT_SEC,
-        )
-        llm_response = resp.text
+        model = build_chat_model(max_tokens=_DEFAULT_MAX_TOKENS, timeout=_LLM_TIMEOUT_SEC)
+        response = await model.ainvoke([
+            SystemMessage(content=system_prompt),
+            HumanMessage(content=user_prompt),
+        ])
+        llm_response = response.content if isinstance(response.content, str) else str(response.content)
         elapsed = time.monotonic() - start_time
 
         # Step 3: 提取 SQL

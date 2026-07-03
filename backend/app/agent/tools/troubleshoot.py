@@ -15,10 +15,10 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncGenerator
-from typing import Any
+from typing import Annotated, Any
 
 import structlog
-from langchain_core.tools import tool
+from langchain_core.tools import InjectedToolArg, tool
 
 from app.db.factory import AdapterFactory
 from app.models.schemas import ConnectionCreateRequest
@@ -92,15 +92,15 @@ def _classify_usage(usage_percent: float) -> str:
 
 @tool
 async def check_connections(
-    connection_id: str,
-    db_type: str,
-    host: str,
-    port: int,
-    database: str,
-    user: str,
-    password: str,
-    ssl_enabled: bool = False,
-    ssl_ca_cert: str | None = None,
+    connection_id: Annotated[str, InjectedToolArg],
+    db_type: Annotated[str, InjectedToolArg],
+    host: Annotated[str, InjectedToolArg],
+    port: Annotated[int, InjectedToolArg],
+    database: Annotated[str, InjectedToolArg],
+    user: Annotated[str, InjectedToolArg],
+    password: Annotated[str, InjectedToolArg],
+    ssl_enabled: Annotated[bool, InjectedToolArg] = False,
+    ssl_ca_cert: Annotated[str | None, InjectedToolArg] = None,
 ) -> dict[str, Any]:
     """检查目标数据库的连接池状态。
 
@@ -155,15 +155,15 @@ async def check_connections(
 
 @tool
 async def check_locks(
-    connection_id: str,
-    db_type: str,
-    host: str,
-    port: int,
-    database: str,
-    user: str,
-    password: str,
-    ssl_enabled: bool = False,
-    ssl_ca_cert: str | None = None,
+    connection_id: Annotated[str, InjectedToolArg],
+    db_type: Annotated[str, InjectedToolArg],
+    host: Annotated[str, InjectedToolArg],
+    port: Annotated[int, InjectedToolArg],
+    database: Annotated[str, InjectedToolArg],
+    user: Annotated[str, InjectedToolArg],
+    password: Annotated[str, InjectedToolArg],
+    ssl_enabled: Annotated[bool, InjectedToolArg] = False,
+    ssl_ca_cert: Annotated[str | None, InjectedToolArg] = None,
 ) -> dict[str, Any]:
     """检查目标数据库的锁等待情况。
 
@@ -241,15 +241,15 @@ async def check_locks(
 
 @tool
 async def check_replication(
-    connection_id: str,
-    db_type: str,
-    host: str,
-    port: int,
-    database: str,
-    user: str,
-    password: str,
-    ssl_enabled: bool = False,
-    ssl_ca_cert: str | None = None,
+    connection_id: Annotated[str, InjectedToolArg],
+    db_type: Annotated[str, InjectedToolArg],
+    host: Annotated[str, InjectedToolArg],
+    port: Annotated[int, InjectedToolArg],
+    database: Annotated[str, InjectedToolArg],
+    user: Annotated[str, InjectedToolArg],
+    password: Annotated[str, InjectedToolArg],
+    ssl_enabled: Annotated[bool, InjectedToolArg] = False,
+    ssl_ca_cert: Annotated[str | None, InjectedToolArg] = None,
 ) -> dict[str, Any]:
     """检查目标数据库的主从复制状态。
 
