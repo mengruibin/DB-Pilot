@@ -1,18 +1,19 @@
 """
-LangChain Chat 模型工厂（任务 1：替换自研 LLMClient）。
+LangChain Chat 模型工厂。
 
 根据 settings.LLM_PROVIDER 返回对应的 LangChain Chat 模型实例，
 支持 Anthropic 官方 API、OpenAI 官方 API、以及阿里云百炼 DashScope 兼容模式。
 
 用法：
-    from app.agent.models import build_chat_model, build_classifier_model
+    from app.agent.models import build_chat_model
 
     # 主力模型（复杂推理任务）
     model = build_chat_model()
     model_with_tools = model.bind_tools(tools)
 
-    # 分类模型（轻量快速）
-    classifier = build_classifier_model()
+变更（2026-07-04）：
+    移除了 build_classifier_model()——意图分类已从图中移除，
+    不再需要专用的分类模型。
 """
 
 from __future__ import annotations
@@ -71,17 +72,3 @@ def build_chat_model(
         )
 
 
-def build_classifier_model() -> BaseChatModel:
-    """构建意图分类用轻量 Chat 模型。
-
-    使用 settings.LLM_CLASSIFIER_MODEL（默认 Haiku 级别），
-    短超时、低 max_tokens，适合快速分类任务。
-
-    Returns:
-        BaseChatModel 实例。
-    """
-    return build_chat_model(
-        model=settings.LLM_CLASSIFIER_MODEL,
-        max_tokens=50,
-        timeout=10,
-    )

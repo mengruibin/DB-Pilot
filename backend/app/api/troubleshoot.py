@@ -21,18 +21,18 @@ from uuid import uuid4
 import structlog
 from fastapi import APIRouter, Body, HTTPException, status
 from fastapi.responses import StreamingResponse
+from langchain_core.messages import HumanMessage
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent.sse_utils import format_sse
 from app.agent.state import AgentState
-from langchain_core.messages import HumanMessage
 
 # 复用 B-20 的 SSE 取消机制
 from app.api.chat import _active_streams, _running_tasks  # type: ignore[attr-defined]  # noqa: F811
 from app.database import async_session_factory
 from app.models.connection import ConnectionConfigModel
 from app.models.schemas import TroubleshootRequest
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = structlog.get_logger(__name__)
 

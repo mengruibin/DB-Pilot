@@ -60,7 +60,6 @@ function formatElapsed(ms: number): string {
 /** 推理类型中文标签（Agent 架构升级后新增） */
 function reasoningTypeLabel(type: string): string {
   const labels: Record<string, string> = {
-    classifying: '意图分析',
     planning: '规划中',
     observing: '观察中',
     concluding: '总结中',
@@ -373,11 +372,6 @@ const resultRows = computed(() => {
   border-radius: 8px;
   line-height: 1.4;
   margin-left: 4px;
-}
-
-.badge-classifying {
-  background: rgba(96, 165, 250, 0.15);
-  color: var(--accent-blue, #60a5fa);
 }
 
 .badge-planning {

@@ -1,26 +1,26 @@
 """
-Agent StateGraph 定义（B-30 重写）。
+Agent StateGraph 定义（2026-07 重构：移除了意图分类节点）。
 
 基于 LangGraph 构建 ReAct (Reasoning + Acting) Agent 图。
 LLM 自主决定调用哪些工具、以什么顺序调用、何时停止并给出最终回答。
 
 图结构：
-  classify → route_by_intent（条件边）
-    ├── GENERAL / 高置信度快速路径 → general_node → END
-    └── 其他 → agent_node
-                │
-                └── agent_node ↔ safe_tools_node（ReAct 循环）
-                      │
-                      ▼
-                format_response → END
+  agent_node ↔ safe_tools_node（ReAct 循环）
+        │
+        ▼
+  format_response → END
+
+变更说明（2026-07-04）：
+  移除了 classify_node / general_node / route_after_classify，原因：
+  - 原 5 分类（QUERY/DIAGNOSIS/TROUBLESHOOT/HEALTH_CHECK/GENERAL）中，
+    非 GENERAL 分类全部走同一 agent_node，分类结果不影响 Agent 行为
+  - 分类步骤增加了额外的 LLM 调用成本，无业务价值
+  - Agent（LLM + bind_tools）自身能根据消息内容自主判断是否调用工具
 
 未来扩展（人机交互）：
   safe_tools_node 中检测危险操作 → interrupt() 暂停
     → 前端展示确认对话框 → 用户审批
     → Command(resume=approved) → 继续执行
-
-依据 PRD §4.2 Agent 工作流：
-  Step 1: classify → Step 2: route → Step 3-4: agent loop → Step 5-6: format + done
 """
 
 from __future__ import annotations
@@ -33,9 +33,8 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langgraph.graph import END, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
-from app.agent.models import build_chat_model, build_classifier_model
-from app.agent.router import IntentRouter
-from app.agent.state import AgentState, Intent
+from app.agent.models import build_chat_model
+from app.agent.state import AgentState
 from app.config import settings
 
 logger = structlog.get_logger(__name__)
@@ -50,27 +49,6 @@ _MAX_AGENT_ITERATIONS = 10
 # =============================================================================
 # 路由判断函数
 # =============================================================================
-
-
-def route_after_classify(
-    state: AgentState,
-) -> Literal["general", "agent"]:
-    """分类后路由：高置信度快速路径 vs Agent 自主决策。
-
-    GENERAL 意图 + keyword 高置信度 → 快速路径（省 LLM 调用）
-    其他所有情况 → agent_node（LLM 自主决策工具调用）
-    """
-    intent = state.get("intent")
-    method = state.get("classification_method", "")
-
-    # 快速路径：仅限 GENERAL 意图且关键词高置信度（≥0.8）
-    if intent == Intent.GENERAL and method == "keyword":
-        logger.info("路由: 快速路径（GENERAL + keyword）", intent=intent.value)
-        return "general"
-
-    logger.info("路由: Agent 自主决策", intent=intent.value if intent else "unknown")
-    return "agent"
-
 
 def route_after_agent(
     state: AgentState,
@@ -107,56 +85,6 @@ def route_after_agent(
 # =============================================================================
 # 图节点函数
 # =============================================================================
-
-
-async def classify_node(state: AgentState) -> dict[str, Any]:
-    """Step 1-2: 意图分类节点。
-
-    调用 IntentRouter 对用户消息进行分类：
-      - 第1层：关键词正则匹配（权重 0.5~0.9）
-      - 第2层：LLM（Haiku 轻量模型）回退分类
-    结果写入 state.intent 和 state.classification_method。
-
-    Args:
-        state: 当前 AgentState（需含 user_message, conversation_history）。
-
-    Returns:
-        包含 intent 和 classification_method 的更新 dict。
-    """
-    run_id = state.get("run_id", "")
-    router = IntentRouter(llm_model=build_classifier_model())
-    user_message = state.get("user_message", "")
-    conversation_history = state.get("conversation_history")
-
-    node_start = time.monotonic()
-    intent = await router.classify(
-        user_message,
-        conversation_history=conversation_history,
-    )
-    elapsed_ms = int((time.monotonic() - node_start) * 1000)
-
-    classification_method = getattr(router, "_last_method", "unknown")
-
-    # 可观测性：结构化日志（中文注释，便于国内运维排查）
-    logger.info(
-        "图节点执行: classify（意图分类）",
-        run_id=run_id,
-        intent=intent.value,
-        classification_method=classification_method,
-        duration_ms=elapsed_ms,
-    )
-
-    return {
-        "intent": intent,
-        "classification_method": classification_method,
-        "sse_events": list(state.get("sse_events", [])) + [{
-            "type": "thinking",
-            "content": f"分析用户意图：{intent.value}",
-            "agent_run_id": run_id,
-            "reasoning_type": "classifying",
-        }],
-    }
-
 
 async def agent_node(state: AgentState) -> dict[str, Any]:
     """Step 3: LLM 决策节点——Agent 图的核心（任务 4 重写：LangChain 标准 API）。
@@ -349,48 +277,6 @@ async def agent_node(state: AgentState) -> dict[str, Any]:
         }
 
 
-def general_node(state: AgentState) -> dict[str, Any]:
-    """快速路径节点：处理简单通用对话。
-
-    不走 Agent 循环，直接返回帮助文本。
-    仅在 IntentRouter 高置信度判为 GENERAL 时触发。
-
-    Args:
-        state: 当前 AgentState。
-
-    Returns:
-        包含 final_answer 和 is_complete 的更新 dict。
-    """
-    run_id = state.get("run_id", "")
-    logger.info("图节点执行: general（快速路径）", run_id=run_id)
-
-    help_text = (
-        "我是 DB-Pilot 数据库运维助手。我可以帮助您：\n"
-        "1. 自然语言查询数据（NL2SQL）\n"
-        "2. SQL 性能诊断与优化\n"
-        "3. 数据库故障排查\n"
-        "4. 数据库健康巡检\n"
-        "请描述您的问题或选择一个数据库连接开始。"
-    )
-
-    sse_events = list(state.get("sse_events", []))
-    sse_events.append({
-        "type": "text",
-        "content": help_text,
-    })
-
-    logger.info(
-        "图节点执行完成: general（快速路径）",
-        run_id=run_id,
-        answer_length=len(help_text),
-    )
-
-    return {
-        "final_answer": help_text,
-        "is_complete": True,
-        "sse_events": sse_events,
-    }
-
 
 def format_response_node(state: AgentState) -> dict[str, Any]:
     """Step 6: 最终响应格式化节点。
@@ -447,20 +333,21 @@ def format_response_node(state: AgentState) -> dict[str, Any]:
 
 
 def build_agent_graph() -> CompiledStateGraph:
-    """构建 Agent 状态图（任务 6 重构：LangChain 标准模式）。
+    """构建 Agent 状态图（2026-07 重构：移除了意图分类）。
 
     图结构：
-      classify → route_by_intent（条件边）
-        ├── "general" → general_node → END
-        └── "agent" → agent_node
-                        │
-                        └── agent_node ↔ safe_tools_node（ReAct 循环）
-                              │
-                              ▼
-                        format_response → END
+      agent → route_after_agent（条件边）
+        ├── "tools" → safe_tools_node → agent（ReAct 循环）
+        └── "format_response" → format_response_node → END
 
     外部通过 graph.astream(initial_state, stream_mode="values") 执行，
     从 state["sse_events"] 读取 SSE 事件并序列化为 SSE 流。
+
+    变更（2026-07-04）：
+      移除了 classify_node（原本在入口之前做 5 分类），
+      移除了 general_node（原本处理 GENERAL 快速路径），
+      移除了 IntentRouter（LLM 分类调用）。
+      Agent 入口直接为 agent_node，LLM 自主判断是否调用工具。
 
     Returns:
         编译后的 LangGraph 图，可直接执行。
@@ -470,27 +357,12 @@ def build_agent_graph() -> CompiledStateGraph:
     workflow = StateGraph(AgentState)
 
     # ── 注册节点 ──
-    workflow.add_node("classify", classify_node)
     workflow.add_node("agent", agent_node)
-    workflow.add_node("tools", safe_tools_node)  # 替换为 SafeToolNode
-    workflow.add_node("general", general_node)
+    workflow.add_node("tools", safe_tools_node)
     workflow.add_node("format_response", format_response_node)
 
-    # ── 入口：classify ──
-    workflow.set_entry_point("classify")
-
-    # ── classify → 条件路由 ──
-    workflow.add_conditional_edges(
-        "classify",
-        route_after_classify,
-        {
-            "general": "general",
-            "agent": "agent",
-        },
-    )
-
-    # ── general → END（快速路径） ──
-    workflow.add_edge("general", END)
+    # ── 入口：直接进入 Agent ──
+    workflow.set_entry_point("agent")
 
     # ── agent → 条件路由（ReAct 循环决策） ──
     workflow.add_conditional_edges(

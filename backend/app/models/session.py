@@ -13,7 +13,7 @@ from contextlib import suppress
 from datetime import UTC, datetime
 
 import structlog
-from sqlalchemy import DateTime, ForeignKey, Integer, JSON, String, Text, func, select
+from sqlalchemy import JSON, DateTime, ForeignKey, Integer, String, Text, func, select
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base, async_session_factory

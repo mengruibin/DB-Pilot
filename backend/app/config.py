@@ -50,7 +50,7 @@ class Settings(BaseSettings):
     )
     LLM_CLASSIFIER_MODEL: str = Field(
         default="claude-haiku-4-5-20251001",
-        description="意图分类的轻量模型（PRD §6.1 要求）。",
+        description="（已废弃 2026-07）意图分类已移除，不再调用 LLM。保留此项仅为向后兼容。",
     )
     LLM_PROVIDER: Literal["anthropic", "openai"] = Field(
         default="anthropic",

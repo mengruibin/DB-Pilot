@@ -1,15 +1,12 @@
 """
 Agent 状态定义。
 
-定义 AgentState TypedDict 和 Intent 枚举。
+定义 AgentState TypedDict 和已废弃的 Intent 枚举。
 AgentState 由 LangGraph StateGraph 自动维护，每个节点可以读取和更新部分字段。
 
-重构（任务 2）：
-  - messages 字段使用 add_messages reducer（LangGraph 标准消息追加语义）
-  - 新增 sse_events 字段（前端 SSE 事件，与 LLM 消息分离）
-  - 移除 pending_tool_calls / pending_tool_results（由 AIMessage.tool_calls / ToolMessage 替代）
-
-依据 PRD §6.3 Agent 设计、api-contract §1.2 SSE 事件类型。
+变更（2026-07-04）：
+  - 移除了 intent / classification_method 字段（意图分类已从图中移除）
+  - Intent 枚举保留仅用于数据库历史记录的 message_type 兼容
 """
 
 from __future__ import annotations
@@ -21,7 +18,11 @@ from langgraph.graph.message import add_messages
 
 
 class Intent(StrEnum):
-    """用户意图枚举（PRD §6.3 意图路由）。"""
+    """（已废弃 2026-07）Agent 图中已移除意图分类。
+
+    保留枚举定义仅用于数据库历史记录的 message_type 兼容。
+    新消息的 message_type 改为从 Agent 实际工具调用事后推断。
+    """
     QUERY = "QUERY"
     """自然语言数据查询（NL2SQL）"""
     DIAGNOSIS = "DIAGNOSIS"
@@ -58,8 +59,6 @@ class AgentState(TypedDict, total=False):
         conversation_history: 格式化的会话历史文本。
 
         # ── 中间结果（图节点执行过程中填充） ──
-        intent: IntentRouter 分类结果。
-        classification_method: 分类方法（keyword / llm / fallback / default）。
         conn_config: 解析后的目标数据库连接配置。
 
         # ── 输出字段（图执行结束时填充） ──
@@ -86,8 +85,6 @@ class AgentState(TypedDict, total=False):
     conversation_history: str | None
 
     # ── 中间结果 ──
-    intent: Intent | None
-    classification_method: str | None
     conn_config: dict[str, Any] | None
 
     # ── 输出字段 ──

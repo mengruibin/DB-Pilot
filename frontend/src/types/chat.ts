@@ -100,7 +100,7 @@ export interface ThinkingEvent {
   agent_run_id?: string
   /** 当前是 Agent 第几轮 ReAct 迭代（Agent 架构升级后新增） */
   iteration?: number
-  /** 推理类型：planning | observing | concluding | classifying | error_recovery（Agent 架构升级后新增） */
+  /** 推理类型：planning | observing | concluding | error_recovery */
   reasoning_type?: string
 }
 

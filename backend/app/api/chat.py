@@ -4,8 +4,12 @@ SSE 对话流 API 路由。
 核心端点 POST /api/chat/stream：
   1. 接收用户消息 + 会话管理 + 连接解析
   2. 构建 AgentState → 执行 LangGraph ReAct Agent 图
-  3. LLM 自主决定工具调用 → 图自动路由 classify → agent ↔ tools
+  3. LLM 自主决定工具调用 → 图自动路由 agent ↔ tools（ReAct 循环）
   4. 通过 SSE 流式推送 thinking/tool_call/tool_result/sql/result/done 事件
+
+变更（2026-07-04）：
+  移除了意图分类步骤（classify_node），Agent 入口直接为 agent_node。
+  message_type 改为从 Agent 实际工具调用事后推断。
 
 依据 api-contract §1.2 POST /api/chat/stream（7 种 type 契约表）。
 依据 AGENTS.md §SSE 流式格式、§安全与合规红线（密码不落盘）。
@@ -23,13 +27,13 @@ from uuid import uuid4
 import structlog
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
 from fastapi.responses import StreamingResponse
+from langchain_core.messages import HumanMessage
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent.sse_utils import format_sse
-from app.agent.state import AgentState, Intent
+from app.agent.state import AgentState
 from app.correlation import set_connection_id
-from langchain_core.messages import HumanMessage
 from app.database import async_session_factory, get_session
 from app.models.connection import ConnectionConfigModel
 from app.models.schemas import (
@@ -390,6 +394,40 @@ async def _kill_db_query(conn_info: dict[str, Any]) -> None:
 # SSE 流引擎
 # =============================================================================
 
+
+def _infer_message_type(state: dict[str, Any]) -> str:
+    """根据 Agent 实际调用的工具推断消息类型（事后标注，比预分类更准确）。
+
+    从 trace_iterations 中读取 Agent 实际调用的工具名，映射为 message_type。
+    仅用于数据库记录和统计，不影响功能逻辑。
+
+    映射规则：
+      - 未调用任何工具 → "general"
+      - 调用 run_health_check → "health_check"
+      - 调用锁/连接/复制相关工具 → "troubleshoot"
+      - 调用 explain/慢查询相关工具 → "diagnosis"
+      - 调用 query 相关工具 → "query"
+      - 其他 → "general"
+    """
+    trace_entries = state.get("trace_iterations", [])
+    tools_called: set[str] = set()
+    for entry in trace_entries:
+        for tc in entry.get("tool_calls", []):
+            tools_called.add(tc["name"])
+
+    if not tools_called:
+        return "general"
+    if "run_health_check" in tools_called:
+        return "health_check"
+    if tools_called & {"check_locks", "check_connections", "check_replication"}:
+        return "troubleshoot"
+    if tools_called & {"explain_query", "get_slow_queries"}:
+        return "diagnosis"
+    if tools_called & {"run_query", "list_tables", "describe_table"}:
+        return "query"
+    return "general"
+
+
 async def _stream_events(
     body: ChatRequest,
 ) -> AsyncGenerator[str, None]:
@@ -526,7 +564,7 @@ async def _stream_events(
 
             await _save_message(
                 db, session.id, "assistant", assistant_content,
-                message_type=state.get("intent", Intent.GENERAL).value.lower(),
+                message_type=_infer_message_type(state),
                 agent_trace=agent_trace,
             )
 

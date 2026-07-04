@@ -52,7 +52,7 @@ export interface StoreMessage {
   agentRunId?: string
   /** 当前是 Agent 第几轮 ReAct 迭代 */
   iteration?: number
-  /** 推理类型：planning | observing | concluding | classifying | error_recovery */
+  /** 推理类型：planning | observing | concluding | error_recovery */
   reasoningType?: string
 
   // tool_call / tool_result
