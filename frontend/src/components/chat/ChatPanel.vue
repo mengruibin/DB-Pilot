@@ -22,12 +22,10 @@ const connectionStore = useConnectionStore()
 /** 输入框文本（双向绑定用） */
 const inputText = ref('')
 
-/** 当前连接标识文本 */
-const connectionLabel = computed(() => {
-  const c = connectionStore.activeConnection
-  if (!c) return ''
-  return `${c.db_type}  ${c.host}:${c.port}/${c.database}`
-})
+/** 切换活跃连接 */
+function handleSelectConnection(id: string): void {
+  connectionStore.setActiveConnection(id)
+}
 
 /** 是否显示 Agent 思考指示器（streaming 中且尚未收到 sql/result） */
 const showThinking = computed(() => {
@@ -84,11 +82,13 @@ function handleStop(): void {
       v-model="inputText"
       :input-mode="chatStore.inputMode"
       :is-streaming="chatStore.isStreaming"
-      :connection-label="connectionLabel"
       :has-connection="!!connectionStore.activeId"
+      :connections="connectionStore.connections"
+      :active-connection-id="connectionStore.activeId"
       @update:input-mode="chatStore.setInputMode"
       @send="handleSend"
       @stop="handleStop"
+      @select-connection="handleSelectConnection"
     />
   </div>
 </template>

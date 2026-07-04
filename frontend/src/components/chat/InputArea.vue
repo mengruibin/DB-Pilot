@@ -9,6 +9,8 @@
  */
 import { ref, watch, nextTick } from 'vue'
 import type { InputMode } from '@/stores/chat'
+import type { ConnectionConfig } from '@/types/connection'
+import ConnectionSwitcher from './ConnectionSwitcher.vue'
 
 const props = defineProps<{
   /** 输入文本（v-model） */
@@ -17,10 +19,12 @@ const props = defineProps<{
   inputMode: InputMode
   /** 是否正在流式接收 */
   isStreaming: boolean
-  /** 当前连接标识文本 */
-  connectionLabel: string
   /** 是否有活跃连接 */
   hasConnection: boolean
+  /** 所有可用连接列表 */
+  connections: ConnectionConfig[]
+  /** 当前活跃连接 ID */
+  activeConnectionId: string | null
 }>()
 
 const emit = defineEmits<{
@@ -28,6 +32,7 @@ const emit = defineEmits<{
   'update:inputMode': [mode: InputMode]
   send: [text: string]
   stop: []
+  'select-connection': [id: string]
 }>()
 
 // ─── textarea 引用 ───
@@ -163,14 +168,11 @@ const placeholderText = !props.hasConnection
           <span class="tab-label">SQL</span>
         </button>
       </div>
-      <div class="connection-badge" :class="{ connected: hasConnection }">
-        <template v-if="hasConnection">
-          {{ connectionLabel }}
-        </template>
-        <template v-else>
-          请先连接数据库
-        </template>
-      </div>
+      <ConnectionSwitcher
+        :connections="connections"
+        :active-id="activeConnectionId"
+        @select-connection="(id: string) => emit('select-connection', id)"
+      />
     </div>
 
     <!-- 编辑区 -->
@@ -288,23 +290,6 @@ const placeholderText = !props.hasConnection
   font-weight: 450;
 }
 
-.connection-badge {
-  font-family: var(--font-mono);
-  font-size: 10px;
-  color: var(--text-tertiary);
-  padding: 2px 8px;
-  border: 1px solid var(--border-color);
-  border-radius: var(--radius-sm);
-  white-space: nowrap;
-  max-width: 200px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.connection-badge.connected {
-  color: var(--accent-teal);
-  border-color: rgba(45, 212, 191, 0.2);
-}
 
 /* ─── 编辑区 ─── */
 .area-editor {
