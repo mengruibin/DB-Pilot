@@ -266,6 +266,7 @@ async def agent_node(state: AgentState) -> dict[str, Any]:
             "content": final_text[:500] + ("..." if len(final_text) > 500 else ""),
             "agent_run_id": run_id,
             "iteration": iteration,
+            "duration_ms": elapsed_ms,
             "reasoning_type": "concluding",
         })
 

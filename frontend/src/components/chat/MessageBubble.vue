@@ -30,6 +30,11 @@ let timerInterval: ReturnType<typeof setInterval> | null = null
 
 onMounted(() => {
   if (props.message.type === 'thinking') {
+    // 优先使用后端返回的实际耗时（durationMs）作为初始值，
+    // 避免 thinking 事件到达流末尾时前端计时器从 0 开始
+    if (props.message.durationMs) {
+      thinkingElapsed.value = props.message.durationMs
+    }
     timerInterval = setInterval(() => {
       thinkingElapsed.value += 100
     }, 100)

@@ -253,6 +253,7 @@ export const useChatStore = defineStore('chat', () => {
             agentRunId: event.agent_run_id,
             iteration: event.iteration,
             reasoningType: event.reasoning_type,
+            durationMs: event.duration_ms,
             createdAt: new Date().toISOString(),
           })
         },

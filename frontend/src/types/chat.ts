@@ -102,6 +102,8 @@ export interface ThinkingEvent {
   iteration?: number
   /** 推理类型：planning | observing | concluding | error_recovery */
   reasoning_type?: string
+  /** 本次 LLM 推理耗时（ms），后端计算，解决前端计时器从 0 开始的问题 */
+  duration_ms?: number
 }
 
 /** SSE 事件：Agent 调用工具 */
