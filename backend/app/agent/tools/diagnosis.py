@@ -157,6 +157,7 @@ async def explain_query(
         return {
             "explain_output": result.get("explain_output", ""),
             "format": format,
+            "summary": f"已生成执行计划（{format} 格式）",
         }
     except Exception as exc:
         return _safe_tool_call("explain_query", exc)
@@ -225,6 +226,7 @@ async def get_slow_queries(
         response: dict[str, Any] = {
             "items": items,
             "total": len(items),
+            "summary": f"找到 {len(items)} 条慢查询",
         }
         if warning:
             response["warning"] = warning

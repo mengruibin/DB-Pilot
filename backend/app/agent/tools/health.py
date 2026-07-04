@@ -154,6 +154,14 @@ async def run_health_check(
             ],
         }
         score = report["score"]
+        severity = report.get("severity_counts", {})
+        error_count = severity.get("error", 0)
+        warning_count = severity.get("warning", 0)
+        pass_count = severity.get("pass", 0)
+        report["summary"] = (
+            f"健康评分: {score}/100"
+            f"（{error_count} 项异常, {warning_count} 项警告, {pass_count} 项通过）"
+        )
         logger.info("工具执行成功", tool="run_health_check",
                      connection_id=connection_id, score=score)
         return report

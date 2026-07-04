@@ -195,7 +195,7 @@ async def safe_tools_node(state: AgentState) -> dict[str, Any]:
                 "tool": tool_name,
                 "summary": (
                     result.get("summary", "")
-                    or f"返回 {result.get('total_rows', 0)} 行"
+                    or f"{tool_name} 执行完成"
                 ),
                 "duration_ms": result.get("execution_time_ms", elapsed),
                 "agent_run_id": run_id,

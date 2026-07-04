@@ -131,7 +131,10 @@ async def list_tables(
 
         logger.info("工具执行成功", tool="list_tables",
                      connection_id=connection_id, table_count=len(tables))
-        return {"tables": tables}
+        return {
+            "tables": tables,
+            "summary": f"找到 {len(tables)} 张表",
+        }
     except Exception as exc:
         return _safe_tool_call(
             "list_tables", exc,
@@ -193,7 +196,11 @@ async def describe_table(
         logger.info("工具执行成功", tool="describe_table",
                      connection_id=connection_id, table_name=table_name,
                      column_count=len(columns), index_count=len(indexes))
-        return {"columns": columns, "indexes": indexes}
+        return {
+            "columns": columns,
+            "indexes": indexes,
+            "summary": f"{table_name}：{len(columns)} 列, {len(indexes)} 个索引",
+        }
     except Exception as exc:
         return _safe_tool_call(
             "describe_table", exc,
@@ -306,6 +313,7 @@ async def run_query(
             "execution_time_ms": result["execution_time_ms"],
             "audit_status": "passed",
             "is_readonly": True,
+            "summary": f"返回 {result['total_rows']} 行",
         }
 
     except Exception as exc:

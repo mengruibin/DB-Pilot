@@ -143,6 +143,7 @@ async def check_connections(
         return {
             "status": status,
             "data": status_data,
+            "summary": f"连接使用率 {usage:.1f}%（{status}）",
         }
     except Exception as exc:
         return _safe_tool_call("check_connections", exc)
@@ -221,6 +222,7 @@ async def check_locks(
                 "waiting_transactions": waiting_count,
                 "blocking_trx_id": blocking_id,
                 "locks": locks,
+                "summary": f"等待事务: {waiting_count}（{lock_status}）",
             }
 
         logger.info("工具执行成功", tool="check_locks",
@@ -229,6 +231,7 @@ async def check_locks(
             "status": "pass",
             "waiting_transactions": 0,
             "blocking_trx_id": "",
+            "summary": "无锁等待（pass）",
         }
     except Exception as exc:
         return _safe_tool_call("check_locks", exc)
@@ -291,6 +294,7 @@ async def check_replication(
             return {
                 "status": "skipped",
                 "delay_seconds": None,
+                "summary": "不支持复制检测（skipped）",
             }
 
         repl_status = await adapter.get_replication_status()
@@ -303,6 +307,7 @@ async def check_replication(
             return {
                 "status": "skipped",
                 "delay_seconds": None,
+                "summary": "复制状态：skipped（非主库实例）",
             }
 
         delay = repl_status.get("delay_seconds")
@@ -324,6 +329,11 @@ async def check_replication(
         return {
             "status": status,
             "delay_seconds": delay_sec,
+            "summary": (
+                f"复制延迟: {delay_sec}s（{status}）"
+                if delay_sec is not None
+                else f"复制状态: {status}"
+            ),
         }
     except Exception as exc:
         return _safe_tool_call("check_replication", exc)
