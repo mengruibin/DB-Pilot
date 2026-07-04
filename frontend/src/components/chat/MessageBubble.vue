@@ -13,6 +13,7 @@ import SqlBlock from '@/components/sql/SqlBlock.vue'
 import ResultTable from '@/components/sql/ResultTable.vue'
 import ErrorCard from '@/components/common/ErrorCard.vue'
 import DiagnosisCard from '@/components/chat/DiagnosisCard.vue'
+import MarkdownRenderer from '@/components/chat/MarkdownRenderer.vue'
 
 const props = defineProps<{
   message: StoreMessage
@@ -130,9 +131,9 @@ const resultRows = computed(() => {
     <!-- ─── 助手回复 ─── -->
     <template v-else>
       <div class="bubble assistant-bubble">
-        <!-- === text === -->
+        <!-- === text（Markdown 渲染） === -->
         <template v-if="message.type === 'text'">
-          <p class="assistant-text">{{ message.content }}</p>
+          <MarkdownRenderer :content="message.content" />
         </template>
 
         <!-- === thinking === -->
@@ -178,7 +179,7 @@ const resultRows = computed(() => {
             </div>
             <div class="step-body">
               <span class="step-tool">{{ message.tool }}</span>
-              <span class="step-desc">{{ message.content }}</span>
+              <MarkdownRenderer class="tool-result-content" :content="message.content" />
               <span v-if="message.durationMs !== undefined" class="step-duration">
                 {{ formatDuration(message.durationMs) }}
               </span>
@@ -205,8 +206,8 @@ const resultRows = computed(() => {
             :total-rows="message.totalRows ?? resultRows.length"
             :execution-time-ms="message.executionTimeMs"
           />
-          <!-- 纯文本回答（无 dataPreview）→ 直接渲染文本 -->
-          <p v-else class="assistant-text">{{ message.summary || message.content }}</p>
+          <!-- 纯文本回答（无 dataPreview）→ Markdown 渲染 -->
+          <MarkdownRenderer v-else :content="message.summary || message.content" />
         </template>
 
         <!-- === error（F-12 ErrorCard 组件）=== -->
@@ -478,6 +479,34 @@ const resultRows = computed(() => {
 
 .tool-step.result .step-body {
   align-items: center;
+}
+
+/* tool_result 内的 Markdown 渲染（紧凑模式） */
+.tool-result-content {
+  font-size: 13px;
+  color: var(--text-secondary);
+  display: inline;
+}
+.tool-result-content :deep(p) {
+  display: inline;
+  margin: 0;
+}
+.tool-result-content :deep(p:not(:last-child)::after) {
+  content: ' ';
+}
+.tool-result-content :deep(code):not(.hljs) {
+  font-size: 0.85em;
+  padding: 1px 5px;
+}
+.tool-result-content :deep(pre.code-block) {
+  margin: 6px 0;
+}
+.tool-result-content :deep(pre.code-block code.hljs) {
+  padding: 8px 12px;
+  font-size: 11.5px;
+}
+.tool-result-content :deep(strong) {
+  color: var(--text-primary);
 }
 
 /* ─── sql stub ─── */
