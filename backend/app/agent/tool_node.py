@@ -114,6 +114,16 @@ async def safe_tools_node(state: AgentState) -> dict[str, Any]:
             })
             continue
 
+        # 记录安全护栏的非阻断警告（将在 ToolMessage 中传递给 Agent）
+        safety_warnings = list(safety_result.warnings)
+        if safety_warnings:
+            logger.info(
+                "安全护栏性能提示已记录（非阻断）",
+                run_id=run_id,
+                tool=tool_name,
+                warning_count=len(safety_warnings),
+            )
+
         # ── 3. 查找工具 ──
         tool_fn = TOOL_REGISTRY.get(tool_name)
         if tool_fn is None:
@@ -169,8 +179,13 @@ async def safe_tools_node(state: AgentState) -> dict[str, Any]:
             result_summary=str(result)[:200],
         )
 
-        # ── 6. 返回 ToolMessage ──
+        # ── 6. 返回 ToolMessage（含安全护栏的非阻断警告） ──
         tool_content = _json.dumps(result, ensure_ascii=False, default=str)
+        # 将安全护栏的性能警告前缀到 ToolMessage 中，Agent 可据此决定优化方案
+        if safety_warnings:
+            tool_content = (
+                "[性能提示] " + " | ".join(safety_warnings) + "\n\n" + tool_content
+            )
         tool_messages.append(ToolMessage(
             content=tool_content,
             tool_call_id=tc["id"],

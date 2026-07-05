@@ -71,29 +71,47 @@ class _BottleneckPattern(TypedDict):
 BOTTLENECK_PATTERNS: list[_BottleneckPattern] = cast(list[_BottleneckPattern], [
     {
         "pattern": "全表扫描",
-        "keywords": ["table scan", "full scan", "全表扫描",
-                     "seq scan", "sequential scan", "ALL"],
+        "keywords": [
+            "table scan", "full scan", "全表扫描",
+            "seq scan", "sequential scan", "ALL",
+            # MySQL JSON EXPLAIN 格式: access_type=ALL 表示全表扫描
+            '"access_type": "ALL"',
+            # PostgreSQL EXPLAIN JSON 格式
+            "Seq Scan", "Index Scan Backward",
+        ],
         "suggestion": "建议为查询涉及的过滤和关联列添加索引",
         "is_destructive": False,
     },
     {
         "pattern": "文件排序",
-        "keywords": ["filesort", "file sort", "using filesort",
-                     "sort", "external merge"],
+        "keywords": [
+            "filesort", "file sort", "using filesort",
+            "sort", "external merge",
+            # MySQL JSON EXPLAIN 格式: using_filesort=true
+            '"using_filesort": true',
+        ],
         "suggestion": "考虑为 ORDER BY 和 GROUP BY 列创建复合索引",
         "is_destructive": False,
     },
     {
         "pattern": "临时表",
-        "keywords": ["temporary", "using temporary", "temp",
-                     "临时表", "派生表"],
+        "keywords": [
+            "temporary", "using temporary", "temp",
+            "临时表", "派生表",
+            # MySQL JSON EXPLAIN 格式: using_temporary_table=true
+            '"using_temporary_table": true',
+        ],
         "suggestion": "优化 GROUP BY 和 DISTINCT 查询，添加合适索引避免临时表",
         "is_destructive": False,
     },
     {
         "pattern": "全表扫描/顺序扫描",
-        "keywords": ["seq scan", "sequential scan",
-                     "table scan", "full scan"],
+        "keywords": [
+            "seq scan", "sequential scan",
+            "table scan", "full scan",
+            # PostgreSQL EXPLAIN 格式
+            "Seq Scan",
+        ],
         "suggestion": "考虑为过滤条件列创建索引",
         "is_destructive": False,
     },
