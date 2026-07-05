@@ -282,6 +282,21 @@ async def _health_stream(
             "summary": f"巡检异常中断：{exc}",
             "severity_counts": {"error": 0, "warning": 0, "pass": 0, "skipped": 0},
         })
+        # 最佳努力：持久化异常报告（使用独立会话，避免 db_session 已被 async with 关闭）
+        # start_ts 可能因在 connect() 阶段异常而未定义（第 163 行），用 locals 安全读取
+        elapsed_err = time.monotonic() - (locals().get("start_ts") or time.monotonic())
+        try:
+            async with async_session_factory() as err_session:
+                await _persist_report(
+                    err_session, report_id, connection_id,
+                    status="cancelled", score=0,
+                    duration_sec=elapsed_err,
+                    severity_counts={"error": 0, "warning": 0, "pass": 0, "skipped": 0},
+                    categories=[],
+                )
+        except Exception as persist_err:
+            logger.warning("异常报告持久化失败", report_id=report_id,
+                           error=str(persist_err)[:200])
     finally:
         # 清理追踪标记
         _active_streams.pop(report_id, None)

@@ -145,6 +145,10 @@ export const useReportStore = defineStore('report', () => {
     abortController = new AbortController()
 
     try {
+      // 获取连接密码（安全：密码仅存于内存 sessionStorage，不落盘）
+      const connectionStore = (await import('@/stores/connection')).useConnectionStore()
+      const password = connectionStore.getPassword(connectionId)
+
       const response = await fetch(
         `/api/connections/${connectionId}/health-check`,
         {
@@ -157,6 +161,7 @@ export const useReportStore = defineStore('report', () => {
           body: JSON.stringify({
             check_items: checkItems,
             timeout_sec: timeoutSec,
+            password,
           }),
           signal: abortController.signal,
         }
