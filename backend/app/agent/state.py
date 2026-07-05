@@ -17,22 +17,22 @@ from typing import Annotated, Any, TypedDict
 from langgraph.graph.message import add_messages
 
 
-class Intent(StrEnum):
-    """（已废弃 2026-07）Agent 图中已移除意图分类。
+# class Intent(StrEnum):
+#     """（已废弃 2026-07）Agent 图中已移除意图分类。
 
-    保留枚举定义仅用于数据库历史记录的 message_type 兼容。
-    新消息的 message_type 改为从 Agent 实际工具调用事后推断。
-    """
-    QUERY = "QUERY"
-    """自然语言数据查询（NL2SQL）"""
-    DIAGNOSIS = "DIAGNOSIS"
-    """SQL 诊断与优化"""
-    TROUBLESHOOT = "TROUBLESHOOT"
-    """故障自动排查"""
-    HEALTH_CHECK = "HEALTH_CHECK"
-    """数据库健康巡检"""
-    GENERAL = "GENERAL"
-    """通用对话（非数据库操作）"""
+#     保留枚举定义仅用于数据库历史记录的 message_type 兼容。
+#     新消息的 message_type 改为从 Agent 实际工具调用事后推断。
+#     """
+#     QUERY = "QUERY"
+#     """自然语言数据查询（NL2SQL）"""
+#     DIAGNOSIS = "DIAGNOSIS"
+#     """SQL 诊断与优化"""
+#     TROUBLESHOOT = "TROUBLESHOOT"
+#     """故障自动排查"""
+#     HEALTH_CHECK = "HEALTH_CHECK"
+#     """数据库健康巡检"""
+#     GENERAL = "GENERAL"
+#     """通用对话（非数据库操作）"""
 
 
 class AgentState(TypedDict, total=False):
