@@ -1,7 +1,11 @@
 <script setup lang="ts">
+import { computed } from 'vue'
 import { useRoute } from 'vue-router'
+import { useConnectionStore } from '@/stores/connection'
+import SessionList from './SessionList.vue'
 
 const route = useRoute()
+const connectionStore = useConnectionStore()
 
 interface NavItem {
   path: string
@@ -21,6 +25,11 @@ const isActive = (path: string) => {
   if (path === '/') return route.path === '/'
   return route.path.startsWith(path)
 }
+
+/** 是否在对话路由且有活跃连接（显示会话列表的条件） */
+const showSessionList = computed(() => {
+  return route.path === '/' && connectionStore.activeId
+})
 
 /** SVG 图标映射 */
 const iconMap: Record<string, string> = {
@@ -58,6 +67,9 @@ const iconMap: Record<string, string> = {
         <span class="nav-label">{{ item.label }}</span>
       </router-link>
     </nav>
+
+    <!-- 对话历史列表（仅对话页且有活跃连接时显示） -->
+    <SessionList v-if="showSessionList" />
 
     <!-- 底部设置 -->
     <div class="sidebar-footer">
@@ -106,12 +118,11 @@ const iconMap: Record<string, string> = {
 
 /* 导航列表 */
 .nav-list {
-  flex: 1;
   display: flex;
   flex-direction: column;
   padding: 8px;
   gap: 2px;
-  overflow-y: auto;
+  flex-shrink: 0;
 }
 
 .nav-item {
@@ -170,6 +181,7 @@ const iconMap: Record<string, string> = {
 .sidebar-footer {
   padding: 8px;
   border-top: 1px solid var(--border-color);
+  flex-shrink: 0;
 }
 
 .settings-btn {

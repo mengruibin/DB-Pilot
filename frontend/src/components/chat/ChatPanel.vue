@@ -7,9 +7,10 @@
  * 底部：InputArea（双模式输入组件）
  *
  * 依据 api-contract §三 ChatPanel 组件树
+ * 扩展（F4）：支持历史会话标题显示和消息加载状态。
  */
 import { computed, ref } from 'vue'
-import { NButton, NPopconfirm } from 'naive-ui'
+import { NButton, NPopconfirm, NSpin } from 'naive-ui'
 import { useChatStore } from '@/stores/chat'
 import { useConnectionStore } from '@/stores/connection'
 import MessageList from './MessageList.vue'
@@ -35,6 +36,11 @@ const showThinking = computed(() => {
   )
 })
 
+/** 面板标题：当前会话标题或 "新会话" */
+const panelTitle = computed(() => {
+  return chatStore.currentSession?.title ?? '新会话'
+})
+
 /** 发送消息 */
 function handleSend(text: string): void {
   if (!connectionStore.activeId) return
@@ -46,6 +52,11 @@ function handleSend(text: string): void {
 function handleStop(): void {
   chatStore.cancelStreaming()
 }
+
+/** 开始新对话 */
+function handleNewSession(): void {
+  chatStore.startNewSession()
+}
 </script>
 
 <template>
@@ -53,23 +64,30 @@ function handleStop(): void {
     <!-- 面板头部 -->
     <div class="panel-header">
       <div class="header-left">
-        <span class="header-title">对话</span>
+        <span class="header-title">{{ panelTitle }}</span>
         <span v-if="chatStore.messages.length > 0" class="msg-count">
           {{ chatStore.messages.length }} 条消息
         </span>
       </div>
       <div class="header-actions">
-        <n-popconfirm @positive-click="chatStore.clearMessages()">
+        <n-popconfirm @positive-click="handleNewSession">
           <template #trigger>
-            <n-button text size="tiny" class="header-btn">清空</n-button>
+            <n-button text size="tiny" class="header-btn new-session-btn">新对话</n-button>
           </template>
-          确定清空当前对话？
+          当前对话将保留在侧边栏中，确定开始新会话？
         </n-popconfirm>
       </div>
     </div>
 
+    <!-- 历史消息加载中 -->
+    <div v-if="chatStore.messagesLoading" class="loading-state">
+      <n-spin size="small" />
+      <span class="loading-text">加载消息历史...</span>
+    </div>
+
     <!-- 消息列表 -->
     <MessageList
+      v-else
       :messages="chatStore.messages"
       :is-streaming="chatStore.isStreaming"
     />
@@ -135,7 +153,22 @@ function handleStop(): void {
   font-size: 12px !important;
 }
 
-.header-btn:hover {
-  color: var(--color-error) !important;
+.new-session-btn:hover {
+  color: var(--accent-teal) !important;
+}
+
+/* 历史消息加载状态 */
+.loading-state {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+}
+
+.loading-text {
+  font-size: 13px;
+  color: var(--text-tertiary);
 }
 </style>

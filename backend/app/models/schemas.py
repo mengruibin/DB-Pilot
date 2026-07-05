@@ -274,6 +274,15 @@ class MessageResponse(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class SessionRenameRequest(BaseModel):
+    """重命名会话请求体（B1）。"""
+    title: str = Field(
+        ..., min_length=1, max_length=128,
+        description="新的会话标题，1-128 字符",
+        examples=["分析 orders 表性能"],
+    )
+
+
 class SessionListResponse(BaseModel):
     """分页会话列表响应。"""
     items: list[SessionResponse] = Field(..., description="会话列表")

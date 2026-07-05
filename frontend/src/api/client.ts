@@ -162,6 +162,13 @@ export const http = {
       body: body !== undefined ? JSON.stringify(body) : undefined,
     })
   },
+  patch<T>(url: string, body?: unknown, options?: RequestOptions): Promise<T> {
+    return request<T>(url, {
+      ...options,
+      method: 'PATCH',
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+    })
+  },
   delete<T>(url: string, options?: RequestOptions): Promise<T> {
     return request<T>(url, { ...options, method: 'DELETE' })
   },

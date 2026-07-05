@@ -13,7 +13,8 @@ import { ref, computed, watch } from 'vue'
 import { useSSE } from '@/composables/useSSE'
 import { cancelChat as apiCancelChat } from '@/api/chat'
 import { useConnectionStore } from '@/stores/connection'
-import type { Session } from '@/types/chat'
+import { getSessions, getSessionMessages, renameSession as apiRenameSession, deleteSession as apiDeleteSession } from '@/api/session'
+import type { Session, Message } from '@/types/chat'
 import type { FindingSeverity } from '@/types/report'
 import type { ThinkingEvent, ToolCallEvent, ToolResultEvent, SqlEvent, ResultEvent, TextEvent, ErrorEvent, DoneEvent } from '@/types/chat'
 
@@ -141,6 +142,15 @@ export const useChatStore = defineStore('chat', () => {
 
   /** SSE 错误信息 */
   const sseError = ref<string | null>(null)
+
+  // ─── F2: 会话管理状态 ───
+
+  /** 会话列表加载状态 */
+  const sessionsLoading = ref(false)
+  /** 消息历史加载状态 */
+  const messagesLoading = ref(false)
+  /** 会话列表加载错误 */
+  const sessionFetchError = ref<string | null>(null)
 
   // 内部：消息计数器（生成 ID）
   let msgCounter = 0
@@ -361,6 +371,8 @@ export const useChatStore = defineStore('chat', () => {
             last.agentRunId = last.agentRunId || event.agent_run_id
             last.traceSummary = event.trace_summary
           }
+          // 消息发送完成后刷新会话列表（F2）
+          fetchSessions(connectionId)
         },
 
         // ── disconnect ──
@@ -410,6 +422,190 @@ export const useChatStore = defineStore('chat', () => {
   }
 
   // ═══════════════════════════════════════════════════
+  //  F2: 会话管理 Actions
+  // ═══════════════════════════════════════════════════
+
+  /**
+   * 将 API 返回的 MessageResponse 转换为 Store 内部 StoreMessage
+   *
+   * 历史消息不含 thinking/tool_call/tool_result 等 ReAct 过程细节，
+   * 仅展示最终结果（text/sql/result/error/diagnosis）。
+   */
+  function messageResponseToStoreMessage(msg: Message): StoreMessage {
+    const base = {
+      id: msg.id,
+      sessionId: msg.session_id,
+      role: msg.role as 'user' | 'assistant',
+      content: msg.content,
+      createdAt: msg.created_at,
+    }
+
+    // 用户消息始终为 text 类型
+    if (msg.role === 'user') {
+      return { ...base, type: 'text' as const }
+    }
+
+    // 根据消息类型映射
+    switch (msg.message_type) {
+      case 'sql':
+        return {
+          ...base,
+          type: 'sql' as const,
+          sqlContent: msg.sql_generated ?? undefined,
+        }
+      case 'diagnosis':
+        return { ...base, type: 'diagnosis' as const }
+      default:
+        break
+    }
+
+    // 根据内容特征推断
+    if (msg.error_info) {
+      return {
+        ...base,
+        type: 'error' as const,
+        errorCode: msg.error_info.error_code ?? undefined,
+        userMessage: msg.error_info.user_message ?? undefined,
+      }
+    }
+
+    if (msg.result_preview) {
+      const preview = msg.result_preview as {
+        columns?: string[]
+        rows?: string[][]
+        total_rows?: number
+      } | null
+      return {
+        ...base,
+        type: 'result' as const,
+        summary: msg.content,
+        dataPreview: preview
+          ? {
+              columns: preview.columns ?? [],
+              rows: preview.rows ?? [],
+              total_rows: preview.total_rows ?? 0,
+            }
+          : null,
+        totalRows: preview?.total_rows ?? 0,
+      }
+    }
+
+    // 默认视为纯文本
+    return { ...base, type: 'text' as const }
+  }
+
+  /**
+   * 从 API 加载会话列表
+   *
+   * @param connectionId 可选，按连接 ID 筛选
+   */
+  async function fetchSessions(connectionId?: string): Promise<void> {
+    sessionsLoading.value = true
+    sessionFetchError.value = null
+
+    try {
+      const response = await getSessions({
+        connection_id: connectionId,
+        pageSize: 50,
+      })
+      sessions.value = response.items
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : '加载会话列表失败'
+      sessionFetchError.value = msg
+      console.warn('[chatStore] fetchSessions 失败:', msg)
+    } finally {
+      sessionsLoading.value = false
+    }
+  }
+
+  /**
+   * 切换到指定会话并加载其消息历史
+   *
+   * @param sessionId 目标会话 ID
+   */
+  async function switchToSession(sessionId: string): Promise<void> {
+    if (isStreaming.value) {
+      await cancelStreaming()
+    }
+
+    messagesLoading.value = true
+
+    try {
+      const response = await getSessionMessages(sessionId, { pageSize: 200 })
+      // API 按 created_at DESC 排序，反转后为 ASC
+      const reversed = [...response.items].reverse()
+      currentSessionId.value = sessionId
+      messages.value = reversed.map(messageResponseToStoreMessage)
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : '加载消息历史失败'
+      console.warn('[chatStore] switchToSession 失败:', msg)
+      // 不清空当前消息，保持已有内容可见
+    } finally {
+      messagesLoading.value = false
+    }
+  }
+
+  /**
+   * 开始新对话
+   *
+   * 清空消息列表并重置当前会话 ID。
+   */
+  function startNewSession(): void {
+    messages.value = []
+    currentSessionId.value = null
+  }
+
+  /**
+   * 重命名会话标题
+   *
+   * @param sessionId 会话 ID
+   * @param title 新标题
+   */
+  async function renameSession(sessionId: string, title: string): Promise<void> {
+    // 保存旧的标题用于回滚
+    const oldSession = sessions.value.find((s) => s.id === sessionId)
+    const oldTitle = oldSession?.title
+
+    // 乐观更新
+    if (oldSession) {
+      oldSession.title = title
+    }
+
+    try {
+      await apiRenameSession(sessionId, title)
+    } catch {
+      // 失败时回滚
+      if (oldSession && oldTitle !== undefined) {
+        oldSession.title = oldTitle
+      }
+      console.warn('[chatStore] renameSession 失败')
+    }
+  }
+
+  /**
+   * 删除会话
+   *
+   * 如果删除的是当前会话，自动切换到新对话状态。
+   *
+   * @param sessionId 会话 ID
+   */
+  async function deleteSession(sessionId: string): Promise<void> {
+    try {
+      await apiDeleteSession(sessionId)
+      // 从本地列表中移除
+      sessions.value = sessions.value.filter((s) => s.id !== sessionId)
+
+      // 如果删除的是当前会话，切换到新对话
+      if (currentSessionId.value === sessionId) {
+        startNewSession()
+      }
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : '删除会话失败'
+      console.warn('[chatStore] deleteSession 失败:', msg)
+    }
+  }
+
+  // ═══════════════════════════════════════════════════
   //  Return
   // ═══════════════════════════════════════════════════
 
@@ -423,6 +619,11 @@ export const useChatStore = defineStore('chat', () => {
     sseConnected,
     sseError,
 
+    // F2: 会话管理状态
+    sessionsLoading,
+    messagesLoading,
+    sessionFetchError,
+
     // getters
     currentSession,
     lastAssistantMessage,
@@ -432,5 +633,12 @@ export const useChatStore = defineStore('chat', () => {
     cancelStreaming,
     clearMessages,
     setInputMode,
+
+    // F2: 会话管理 actions
+    fetchSessions,
+    switchToSession,
+    startNewSession,
+    renameSession,
+    deleteSession,
   }
 })

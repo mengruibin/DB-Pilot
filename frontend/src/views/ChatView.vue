@@ -5,11 +5,32 @@
  * 有活跃连接时显示 ChatPanel，否则显示欢迎引导页。
  *
  * 依据 api-contract §三 ChatView 组件树
+ * 扩展（F6）：进入页面时自动加载当前连接的会话历史。
  */
+import { onMounted, watch } from 'vue'
 import { useConnectionStore } from '@/stores/connection'
+import { useChatStore } from '@/stores/chat'
 import ChatPanel from '@/components/chat/ChatPanel.vue'
 
 const connectionStore = useConnectionStore()
+const chatStore = useChatStore()
+
+/** 按当前活跃连接加载会话列表 */
+function loadSessions(): void {
+  if (connectionStore.activeId) {
+    chatStore.fetchSessions(connectionStore.activeId)
+  }
+}
+
+// 页面挂载时加载会话列表
+onMounted(loadSessions)
+
+// 切换连接时重新加载会话列表
+watch(() => connectionStore.activeId, () => {
+  // 切换连接时先重置当前会话
+  chatStore.startNewSession()
+  loadSessions()
+})
 </script>
 
 <template>

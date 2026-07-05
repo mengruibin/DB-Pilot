@@ -42,6 +42,7 @@ from app.models.schemas import (
     MessageListResponse,
     MessageResponse,
     SessionListResponse,
+    SessionRenameRequest,
     SessionResponse,
 )
 from app.models.session import MessageModel, SessionModel
@@ -894,3 +895,107 @@ async def list_session_messages(
     return MessageListResponse(
         items=items, total=total, page=page, page_size=page_size,
     )
+
+
+@sessions_router.patch("/api/sessions/{session_id}")
+async def rename_session(
+    session_id: str,
+    body: SessionRenameRequest,
+    db_session: AsyncSession = Depends(get_session),  # noqa: B008
+) -> Any:
+    """重命名会话标题（B1）。
+
+    更新会话的 title 和 last_active_at 时间戳。
+
+    Args:
+        session_id: 会话 ID。
+        body: 请求体，包含新的 title。
+        db_session: 数据库会话。
+
+    Returns:
+        SessionResponse（更新后的完整会话对象）。
+
+    Raises:
+        HTTPException 404: 会话不存在。
+    """
+    # AC-6：入口日志
+    logger.info("API 请求开始", endpoint="rename_session",
+                session_id=session_id, title=body.title)
+
+    # 查找会话
+    result = await db_session.execute(
+        select(SessionModel).where(SessionModel.id == session_id)
+    )
+    session = result.scalar_one_or_none()
+    if session is None:
+        logger.warning("API 请求失败", endpoint="rename_session",
+                       session_id=session_id, reason="not_found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "error_code": "NOT_FOUND",
+                "user_message": f"会话 {session_id} 不存在或已删除",
+            },
+        )
+
+    # 更新标题和最后活跃时间
+    session.title = body.title
+    session.last_active_at = datetime.now(UTC)
+
+    await db_session.commit()
+    await db_session.refresh(session)
+
+    logger.info("API 请求完成", endpoint="rename_session",
+                session_id=session_id, title=body.title)
+    return SessionResponse.model_validate(session)
+
+
+@sessions_router.delete("/api/sessions/{session_id}",
+                        status_code=status.HTTP_204_NO_CONTENT)
+async def delete_session(
+    session_id: str,
+    db_session: AsyncSession = Depends(get_session),  # noqa: B008
+) -> None:
+    """删除指定会话及其所有关联消息（B2）。
+
+    消息通过外键 ON DELETE CASCADE 自动删除。
+    如果该会话正在活跃流式处理中，先取消流再删除。
+
+    Args:
+        session_id: 会话 ID。
+        db_session: 数据库会话。
+
+    Raises:
+        HTTPException 404: 会话不存在。
+    """
+    # AC-6：入口日志
+    logger.info("API 请求开始", endpoint="delete_session",
+                session_id=session_id)
+
+    # 如果在活跃流中，先取消
+    if session_id in _active_streams:
+        logger.info("删除活跃流会话，先取消流", session_id=session_id)
+        _active_streams[session_id].set()
+
+    # 查找会话
+    result = await db_session.execute(
+        select(SessionModel).where(SessionModel.id == session_id)
+    )
+    session = result.scalar_one_or_none()
+    if session is None:
+        logger.warning("API 请求失败", endpoint="delete_session",
+                       session_id=session_id, reason="not_found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "error_code": "NOT_FOUND",
+                "user_message": f"会话 {session_id} 不存在或已删除",
+            },
+        )
+
+    # 删除会话（消息通过 CASCADE 自动删除）
+    await db_session.delete(session)
+    await db_session.commit()
+
+    logger.info("API 请求完成", endpoint="delete_session",
+                session_id=session_id)

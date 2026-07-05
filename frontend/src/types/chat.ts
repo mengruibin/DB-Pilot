@@ -50,6 +50,22 @@ export interface Message {
   tokens_used: number
 }
 
+// ─── 分页列表响应（F1） ───
+
+export interface SessionListResponse {
+  items: Session[]
+  total: number
+  page: number
+  pageSize: number
+}
+
+export interface MessageListResponse {
+  items: Message[]
+  total: number
+  page: number
+  pageSize: number
+}
+
 // ─── 查询结果 ───
 
 export interface QueryColumn {
