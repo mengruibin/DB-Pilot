@@ -20,6 +20,7 @@ from langchain_core.tools import InjectedToolArg, tool
 
 from app.db.factory import AdapterFactory
 from app.engine.sql_auditor import audit
+from app.engine.sql_error_parser import parse_db_error
 from app.models.schemas import ConnectionCreateRequest
 
 logger = structlog.get_logger(__name__)
@@ -317,8 +318,21 @@ async def run_query(
         }
 
     except Exception as exc:
-        return _safe_tool_call(
-            "run_query", exc,
+        # 解析数据库原生错误，返回结构化信息帮助 LLM 自我纠正
+        parsed = parse_db_error(exc, db_type, sql)
+        logger.warning(
+            "SQL 执行失败",
+            tool="run_query",
             connection_id=connection_id,
             database=database,
+            error_type=parsed.error_type,
+            detail=parsed.detail,
         )
+        return {
+            "error": f"SQL 执行失败：{parsed.detail}",
+            "error_type": parsed.error_type,
+            "detail": parsed.detail,
+            "suggestion": parsed.suggestion,
+            "sql": sql,
+            "audit_status": "execution_error",
+        }
