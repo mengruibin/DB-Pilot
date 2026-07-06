@@ -289,7 +289,25 @@ async def test_connection(
     try:
         start = time.monotonic()
         adapter = AdapterFactory.create(test_config.db_type, test_config)
-        await adapter.connect(test_config)
+
+        # ── 检测用户角色（仅 MySQL）并传入适配器 ──
+        # 此时做检测可提前填充 _role_cache，后续 SSE 聊天直接命中
+        user_role = "standard"
+        if test_config.db_type == "mysql":
+            from app.engine.grant_detector import detect_mysql_role, set_cached_role
+
+            user_role = await detect_mysql_role(
+                host=test_config.host,
+                port=test_config.port or 3306,
+                user=test_config.user,
+                password=test_config.password or "",
+                database=test_config.database,
+                ssl_enabled=test_config.ssl_enabled or False,
+                ssl_ca_cert=test_config.ssl_ca_cert,
+            )
+            set_cached_role(connection_id, user_role)
+
+        await adapter.connect(test_config, user_role=user_role)
         await adapter.disconnect()
         latency_ms = int((time.monotonic() - start) * 1000)
 
@@ -301,11 +319,13 @@ async def test_connection(
         caps = adapter.get_capabilities()
         logger.info("API 请求完成", endpoint="test_connection",
                      connection_id=connection_id, success=True,
-                     latency_ms=latency_ms)
+                     latency_ms=latency_ms,
+                     user_role=user_role)
         return {
             "success": True,
             "latency_ms": latency_ms,
             "version": "connected",
+            "user_role": user_role,
             "capabilities": {
                 "supports_explain": caps.supports_explain,
                 "supports_slow_query_log": caps.supports_slow_query_log,

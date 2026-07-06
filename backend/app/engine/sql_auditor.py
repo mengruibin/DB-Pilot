@@ -63,6 +63,7 @@ _FORBIDDEN_STATEMENTS: dict[str, str] = {
 _ADMIN_ONLY_STATEMENTS: dict[str, str] = {
     "DELETE": "DELETE 操作需要 admin 权限",
     "UPDATE": "UPDATE 操作需要 admin 权限",
+    "INSERT": "INSERT 操作需要 admin 权限",
 }
 
 # 数据导出风险模式

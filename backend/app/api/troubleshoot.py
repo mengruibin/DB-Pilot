@@ -48,8 +48,16 @@ async def _resolve_conn_config(
     connection_id: str,
     password: str | None,
     session: AsyncSession,
+    trace_id: str = "",
 ) -> dict[str, Any]:
-    """从 ORM 加载连接配置，组装为工具调用参数字典。"""
+    """从 ORM 加载连接配置，组装为工具调用参数字典。
+
+    Args:
+        connection_id: 连接 ID。
+        password: 连接密码。
+        session: 数据库会话。
+        trace_id: 请求追踪 ID（用于角色检测日志链路）。
+    """
     result = await session.execute(
         select(ConnectionConfigModel).where(
             ConnectionConfigModel.id == connection_id
@@ -65,7 +73,7 @@ async def _resolve_conn_config(
             },
         )
 
-    return {
+    config: dict[str, Any] = {
         "connection_id": connection_id,
         "db_type": conn.db_type,
         "host": conn.host,
@@ -76,6 +84,42 @@ async def _resolve_conn_config(
         "ssl_enabled": conn.ssl_enabled or False,
         "ssl_ca_cert": conn.ssl_ca_cert,
     }
+
+    # ── 用户角色检测（仅 MySQL） ──
+    # 共享 chat.py 同一份 grant_detector 缓存
+    if conn.db_type == "mysql":
+        from app.engine.grant_detector import (
+            detect_mysql_role,
+            get_cached_role,
+            set_cached_role,
+        )
+
+        cached = get_cached_role(connection_id, trace_id=trace_id)
+        if cached is not None:
+            config["user_role"] = cached
+            logger.debug("角色取自缓存",
+                         connection_id=connection_id, role=cached,
+                         trace_id=trace_id)
+        else:
+            role = await detect_mysql_role(
+                host=conn.host,
+                port=conn.port,
+                user=conn.user,
+                password=password or "",
+                database=conn.database,
+                ssl_enabled=conn.ssl_enabled or False,
+                ssl_ca_cert=conn.ssl_ca_cert,
+                trace_id=trace_id,
+            )
+            set_cached_role(connection_id, role, trace_id=trace_id)
+            config["user_role"] = role
+            logger.info("角色来自实时检测",
+                        connection_id=connection_id, role=role,
+                        trace_id=trace_id)
+    else:
+        config["user_role"] = "standard"
+
+    return config
 
 
 # =============================================================================
@@ -118,9 +162,16 @@ async def _troubleshoot_stream(
 
     try:
         async with async_session_factory() as db:
+            precheck_trace_id = f"role_{uuid4().hex[:12]}"
             conn_config = await _resolve_conn_config(
                 connection_id, body.password, db,
+                trace_id=precheck_trace_id,
             )
+            logger.info("连接配置已解析",
+                        connection_id=connection_id,
+                        db_type=conn_config.get("db_type"),
+                        user_role=conn_config.get("user_role", "N/A"),
+                        trace_id=precheck_trace_id)
 
             # ── 构建 AgentState + 执行 LangGraph 图 ──
             from app.agent.graph import build_agent_graph
@@ -133,7 +184,6 @@ async def _troubleshoot_stream(
                 "connection_id": connection_id,
                 "session_id": body.session_id,
                 "password": body.password,
-                "user_role": "standard",
                 "conversation_history": None,
                 "conn_config": conn_config,
                 "run_id": run_id,

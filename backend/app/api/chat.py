@@ -230,6 +230,7 @@ async def _resolve_connection_config(
     db: AsyncSession,
     connection_id: str,
     password: str | None,
+    trace_id: str = "",
 ) -> dict[str, Any]:
     """从 ORM 读取连接配置，组装为工具调用参数。
 
@@ -237,6 +238,7 @@ async def _resolve_connection_config(
         db: 数据库会话。
         connection_id: 连接 ID。
         password: 前端传入的连接密码。
+        trace_id: 请求追踪 ID（用于角色检测日志链路）。
 
     Returns:
         包含 db_type, host, port, database, user, password 等字段的 dict。
@@ -251,7 +253,7 @@ async def _resolve_connection_config(
         raise ValueError(f"连接 {connection_id} 不存在")
 
     # SAFETY: 密码仅存于内存，不持久化（AGENTS.md §安全与合规红线）
-    return {
+    config: dict[str, Any] = {
         "connection_id": connection_id,
         "db_type": conn.db_type,
         "host": conn.host,
@@ -263,6 +265,42 @@ async def _resolve_connection_config(
         "ssl_ca_cert": conn.ssl_ca_cert,
         "extra_params": conn.extra_params,
     }
+
+    # ── 用户角色检测（仅 MySQL，其他数据库暂默认 standard） ──
+    # 通过 SHOW GRANTS 自动判定数据库用户实际拥有多少权限
+    if conn.db_type == "mysql":
+        from app.engine.grant_detector import (
+            detect_mysql_role,
+            get_cached_role,
+            set_cached_role,
+        )
+
+        cached = get_cached_role(connection_id, trace_id=trace_id)
+        if cached is not None:
+            config["user_role"] = cached
+            logger.debug("角色取自缓存",
+                         connection_id=connection_id, role=cached,
+                         trace_id=trace_id)
+        else:
+            role = await detect_mysql_role(
+                host=conn.host,
+                port=conn.port,
+                user=conn.user,
+                password=password or "",
+                database=conn.database,
+                ssl_enabled=conn.ssl_enabled or False,
+                ssl_ca_cert=conn.ssl_ca_cert,
+                trace_id=trace_id,
+            )
+            set_cached_role(connection_id, role, trace_id=trace_id)
+            config["user_role"] = role
+            logger.info("角色来自实时检测",
+                        connection_id=connection_id, role=role,
+                        trace_id=trace_id)
+    else:
+        config["user_role"] = "standard"
+
+    return config
 
 
 # =============================================================================
@@ -482,9 +520,16 @@ async def _stream_events(
             )
 
             # ========== Step 2: 解析连接配置 ==========
+            precheck_trace_id = f"role_{uuid4().hex[:12]}"
             conn_config = await _resolve_connection_config(
                 db, body.connection_id, body.password,
+                trace_id=precheck_trace_id,
             )
+            logger.info("连接配置已解析",
+                        connection_id=body.connection_id,
+                        db_type=conn_config.get("db_type"),
+                        user_role=conn_config.get("user_role", "N/A"),
+                        trace_id=precheck_trace_id)
 
             # 存储适配器连接信息，供取消时 KILL QUERY（AC-3）
             if body.session_id:
@@ -511,7 +556,6 @@ async def _stream_events(
                 "connection_id": body.connection_id,
                 "session_id": session.id,
                 "password": body.password,
-                "user_role": "standard",
                 "conversation_history": conversation_history,
                 "conn_config": conn_config,
                 "run_id": run_id,

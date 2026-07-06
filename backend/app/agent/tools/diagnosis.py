@@ -84,6 +84,7 @@ async def explain_query(
     password: Annotated[str, InjectedToolArg],
     sql: str,
     format: str = "tree",
+    user_role: Annotated[str, InjectedToolArg] = "standard",
     ssl_enabled: Annotated[bool, InjectedToolArg] = False,
     ssl_ca_cert: Annotated[str | None, InjectedToolArg] = None,
 ) -> dict[str, Any]:
@@ -104,6 +105,7 @@ async def explain_query(
         password: 连接密码。
         sql: 要分析的 SQL 语句。
         format: 执行计划格式（tree / json / traditional），各数据库方言自动映射。
+        user_role: 用户角色（readonly / standard / admin）。
         ssl_enabled: 是否启用 SSL。
         ssl_ca_cert: SSL CA 证书（可选）。
 
@@ -115,7 +117,7 @@ async def explain_query(
     """
     # Step 1: SQL 安全审计（AGENTS.md §安全与合规红线）
     # SAFETY: 不跳过 SQL 审计直接执行用户/LLM 生成的 SQL (AGENTS.md §安全与合规红线)
-    audit_result = audit(sql, db_type=db_type, user_role="standard")
+    audit_result = audit(sql, db_type=db_type, user_role=user_role)
     if not audit_result.passed:
         logger.warning("工具审计拦截", tool="explain_query", sql=sql[:200],
                         connection_id=connection_id)
@@ -134,7 +136,7 @@ async def explain_query(
             password, ssl_enabled, ssl_ca_cert,
         )
         adapter = AdapterFactory.create(db_type, config)
-        await adapter.connect(config)
+        await adapter.connect(config, user_role=user_role)
 
         # 检查适配器是否支持 EXPLAIN（AGENTS.md §安全与合规红线）
         capabilities = adapter.get_capabilities()
@@ -179,6 +181,7 @@ async def get_slow_queries(
     password: Annotated[str, InjectedToolArg],
     time_range: str = "1h",
     limit: int = 20,
+    user_role: Annotated[str, InjectedToolArg] = "standard",
     ssl_enabled: Annotated[bool, InjectedToolArg] = False,
     ssl_ca_cert: Annotated[str | None, InjectedToolArg] = None,
 ) -> dict[str, Any]:
@@ -200,6 +203,7 @@ async def get_slow_queries(
         password: 密码。
         time_range: 时间范围（1h / 6h / 24h / 7d）。
         limit: 最大返回条数（默认 20，上限 100）。
+        user_role: 用户角色（readonly / standard / admin）。
         ssl_enabled: 是否启用 SSL。
         ssl_ca_cert: SSL CA 证书（可选）。
 
@@ -214,7 +218,7 @@ async def get_slow_queries(
             password, ssl_enabled, ssl_ca_cert,
         )
         adapter = AdapterFactory.create(db_type, config)
-        await adapter.connect(config)
+        await adapter.connect(config, user_role=user_role)
 
         # SAFETY: 慢查询日志读取为只读操作，不修改数据库状态
         result = await adapter.get_slow_queries(limit=limit, time_range=time_range)

@@ -96,6 +96,7 @@ async def list_tables(
     database: Annotated[str, InjectedToolArg],
     user: Annotated[str, InjectedToolArg],
     password: Annotated[str, InjectedToolArg],
+    user_role: Annotated[str, InjectedToolArg] = "standard",
     ssl_enabled: Annotated[bool, InjectedToolArg] = False,
     ssl_ca_cert: Annotated[str | None, InjectedToolArg] = None,
 ) -> dict[str, Any]:
@@ -112,6 +113,7 @@ async def list_tables(
         database: 目标数据库名。
         user: 连接用户名。
         password: 连接密码。
+        user_role: 用户角色（readonly / standard / admin）。
         ssl_enabled: 是否启用 SSL。
         ssl_ca_cert: SSL CA 证书 PEM（可选）。
 
@@ -126,7 +128,7 @@ async def list_tables(
             password, ssl_enabled, ssl_ca_cert,
         )
         adapter = AdapterFactory.create(db_type, config)
-        await adapter.connect(config)
+        await adapter.connect(config, user_role=user_role)
         tables = await adapter.get_tables(database)
         await adapter.disconnect()
 
@@ -158,6 +160,7 @@ async def describe_table(
     user: Annotated[str, InjectedToolArg],
     password: Annotated[str, InjectedToolArg],
     table_name: str,
+    user_role: Annotated[str, InjectedToolArg] = "standard",
     ssl_enabled: Annotated[bool, InjectedToolArg] = False,
     ssl_ca_cert: Annotated[str | None, InjectedToolArg] = None,
 ) -> dict[str, Any]:
@@ -175,6 +178,7 @@ async def describe_table(
         user: 用户名。
         password: 密码。
         table_name: 目标表名。
+        user_role: 用户角色（readonly / standard / admin）。
         ssl_enabled: 是否启用 SSL。
         ssl_ca_cert: SSL CA 证书（可选）。
 
@@ -189,7 +193,7 @@ async def describe_table(
             password, ssl_enabled, ssl_ca_cert,
         )
         adapter = AdapterFactory.create(db_type, config)
-        await adapter.connect(config)
+        await adapter.connect(config, user_role=user_role)
         columns = await adapter.get_columns(database, table_name)
         indexes = await adapter.get_indexes(database, table_name)
         await adapter.disconnect()
@@ -278,7 +282,7 @@ async def run_query(
             password, ssl_enabled, ssl_ca_cert,
         )
         adapter = AdapterFactory.create(db_type, config)
-        await adapter.connect(config)
+        await adapter.connect(config, user_role=user_role)
         result = await adapter.execute(sql)
         await adapter.disconnect()
 

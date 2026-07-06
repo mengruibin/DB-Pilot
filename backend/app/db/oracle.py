@@ -45,11 +45,19 @@ class OracleAdapter(BaseAdapter):
 
     # ================== 连接管理 ==================
 
-    async def connect(self, config: ConnectionCreateRequest) -> bool:
+    async def connect(
+        self,
+        config: ConnectionCreateRequest,
+        user_role: str = "standard",
+    ) -> bool:
         """建立到 Oracle 的异步连接。
 
         使用 oracledb.connect_async()（oracledb>=2.0 异步模式）。
         连接失败时异常消息仅包含 host:port，不暴露密码。
+
+        Args:
+            config: 连接配置。
+            user_role: 用户角色（当前 Oracle 适配器忽略此参数，保持标准模式）。
         """
         if not _ORACLEDB_AVAILABLE:
             raise ImportError(

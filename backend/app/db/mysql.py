@@ -44,11 +44,22 @@ class MySQLAdapter(BaseAdapter):
 
     # ================== 连接管理 ==================
 
-    async def connect(self, config: ConnectionCreateRequest) -> bool:
+    async def connect(
+        self,
+        config: ConnectionCreateRequest,
+        user_role: str = "standard",
+    ) -> bool:
         """建立到 MySQL 的连接池。
 
-        使用 readonly=True + autocommit=True 模式（AGENTS.md §数据库操作原则）。
+        根据 user_role 控制只读事务：
+          - admin: 不设置 READ ONLY（可执行写操作，由上层 SQL 审计管控）
+          - 其他: 设置 SET SESSION TRANSACTION READ ONLY（双重防线）
+        使用 autocommit=True 模式（AGENTS.md §数据库操作原则）。
         连接失败时异常消息仅包含 host:port，不暴露密码。
+
+        Args:
+            config: 连接配置。
+            user_role: 用户角色（admin 跳过只读事务，其他角色设置只读）。
         """
         if not _AIOMYSQL_AVAILABLE:
             raise ImportError(
@@ -71,15 +82,21 @@ class MySQLAdapter(BaseAdapter):
                 maxsize=10,
                 minsize=1,
             )
-            # SAFETY: 设置会话为只读事务，阻止无意的写操作
-            # 使用标准 SQL 语法 SET TRANSACTION READ ONLY（兼容 MySQL 5.5+ / MariaDB）
+
+            # SAFETY: admin 角色可执行写操作（仍受上层 SQL 审计管控）
+            # 非 admin 角色设置会话只读事务，作为双重防线
+            is_readonly_session = user_role != "admin"
             async with self._pool.acquire() as conn, conn.cursor() as cur:
-                await cur.execute("SET SESSION TRANSACTION READ ONLY")
+                if is_readonly_session:
+                    await cur.execute("SET SESSION TRANSACTION READ ONLY")
                 await cur.execute("SELECT 1")
+
             self._connected = True
             logger.info("MySQL 连接成功",
                         host=config.host, port=config.port,
-                        database=config.database)
+                        database=config.database,
+                        user_role=user_role,
+                        readonly_session=is_readonly_session)
             return True
 
         except Exception as exc:
@@ -100,7 +117,8 @@ class MySQLAdapter(BaseAdapter):
                            error_type=err_type, error=err_str)
             # SAFETY: 连接失败异常消息仅包含 host:port（AGENTS.md §安全与合规红线）
             raise ConnectionError(
-                f"MySQL 连接失败 [{config.host}:{config.port}] — {err_type}，请检查网络、用户名和密码"
+                f"MySQL 连接失败 [{config.host}:{config.port}] — {err_type}，"
+                "请检查网络、用户名和密码"
             ) from exc
 
     async def disconnect(self) -> None:

@@ -43,11 +43,19 @@ class PostgresAdapter(BaseAdapter):
 
     # ================== 连接管理 ==================
 
-    async def connect(self, config: ConnectionCreateRequest) -> bool:
+    async def connect(
+        self,
+        config: ConnectionCreateRequest,
+        user_role: str = "standard",
+    ) -> bool:
         """建立到 PostgreSQL 的连接池。
 
         使用 statement_timeout=30000（PRD §8.1 Layer 4：执行保护默认 30s）。
         连接失败时异常消息仅包含 host:port，不暴露密码。
+
+        Args:
+            config: 连接配置。
+            user_role: 用户角色（当前 PostgreSQL 适配器忽略此参数，保持标准模式）。
         """
         if not _ASYNCPG_AVAILABLE:
             raise ImportError(

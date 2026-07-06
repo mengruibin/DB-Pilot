@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DB-Pilot 工具执行全链路 & INSERT 拦截分析</title>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #0d1117;
+    color: #c9d1d9;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+    padding: 20px;
+  }
+  h1 { text-align: center; margin-bottom: 6px; font-size: 22px; color: #e6edf3; }
+  .subtitle { text-align: center; color: #8b949e; margin-bottom: 24px; font-size: 13px; }
+  .mermaid {
+    display: flex;
+    justify-content: center;
+    background: #161b22;
+    border: 1px solid #30363d;
+    border-radius: 8px;
+    padding: 24px;
+    overflow-x: auto;
+  }
+  .legend {
+    display: flex;
+    gap: 24px;
+    justify-content: center;
+    margin-top: 16px;
+    flex-wrap: wrap;
+    font-size: 13px;
+  }
+  .legend-item { display: flex; align-items: center; gap: 6px; }
+  .dot { width: 12px; height: 12px; border-radius: 3px; display: inline-block; }
+  .panel {
+    margin-top: 24px;
+    background: #161b22;
+    border: 1px solid #30363d;
+    border-radius: 8px;
+    padding: 24px;
+    max-width: 960px;
+    margin-left: auto;
+    margin-right: auto;
+  }
+  .panel h3 { color: #e6edf3; margin-bottom: 14px; font-size: 16px; }
+  .panel table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  .panel th { text-align: left; padding: 10px 14px; border-bottom: 1px solid #30363d; color: #8b949e; font-weight: 600; }
+  .panel td { padding: 10px 14px; border-bottom: 1px solid #21262d; vertical-align: top; }
+  .panel tr:last-child td { border-bottom: none; }
+  .blocked { color: #ff7b72; font-weight: 600; }
+  .passed  { color: #7ee787; }
+  .warn    { color: #d29922; }
+  .muted   { color: #8b949e; font-size: 12px; }
+  .badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 10px;
+    font-size: 11px;
+    font-weight: 600;
+  }
+  .badge-red    { background: #da3633; color: #fff; }
+  .badge-green  { background: #238636; color: #fff; }
+  .badge-yellow { background: #9e6a03; color: #fff; }
+  .log-line {
+    font-family: 'Cascadia Code', 'Fira Code', monospace;
+    font-size: 12px;
+    line-height: 1.7;
+    padding: 12px 16px;
+    background: #0d1117;
+    border: 1px solid #30363d;
+    border-radius: 6px;
+    overflow-x: auto;
+    white-space: pre;
+    margin: 12px 0;
+  }
+  .log-line .time    { color: #8b949e; }
+  .log-line .level   { color: #7ee787; }
+  .log-line .msg     { color: #c9d1d9; }
+  .log-line .warn-l  { color: #d29922; }
+  .log-line .error-l { color: #ff7b72; }
+  .log-line .sql     { color: #79c0ff; }
+  .log-line .db      { color: #a5d6ff; }
+  .arrow-down { text-align: center; color: #484f58; font-size: 20px; margin: 4px 0; }
+  .conclusion {
+    background: linear-gradient(135deg, #1a1f2b 0%, #161b22 100%);
+    border: 1px solid #f85149;
+    border-radius: 8px;
+    padding: 20px;
+    margin-top: 24px;
+    max-width: 960px;
+    margin-left: auto;
+    margin-right: auto;
+  }
+  .conclusion h3 { color: #ff7b72; margin-bottom: 10px; }
+  .conclusion p  { font-size: 14px; line-height: 1.7; }
+  .conclusion code { background: #21262d; padding: 1px 6px; border-radius: 3px; font-size: 13px; }
+</style>
+</head>
+<body>
+<h1>DB-Pilot 工具执行全链路 & INSERT 拦截分析</h1>
+<p class="subtitle">基于线上日志真实还原：INSERT 在 4 层防线中穿越前 3 层，最终被 MySQL 会话级只读事务拦截</p>
+
+<!-- ============ MERMAID 流程图 ============ -->
+<div class="mermaid">
+flowchart TD
+    subgraph Layer0["📦 Layer 0 — 安全护栏 (safe_tools_node)"]
+        direction TB
+        SA1["SQLAuditCheck<br/>sqlglot AST 解析"]
+        SA2["ReadOnlyCheck<br/>角色权限（预留桩）"]
+        SA3["PerformanceCheck<br/>性能静态分析"]
+        SA1 --> SA2 --> SA3
+    end
+
+    subgraph Layer1["📦 Layer 1 — 工具内部二次审计 (run_query)"]
+        direction TB
+        L1A["audit(sql) 再次调用"]
+        L1B{"INSERT 在禁止列表?"}
+        L1C["❌ 不在，passed=True"]
+        L1A --> L1B --> L1C
+    end
+
+    subgraph Layer2["📦 Layer 2 — 适配器执行 (MySQLAdapter)"]
+        direction TB
+        L2A["adapter.execute(sql)"]
+        L2B["aiomysql cursor.execute()"]
+        L2A --> L2B
+    end
+
+    subgraph Layer3["📦 Layer 3 — MySQL 会话层"]
+        direction TB
+        L3A["connect() 时执行<br/>SET SESSION<br/>TRANSACTION READ ONLY"]
+        L3B["ERROR 1792<br/>Cannot execute statement<br/>in a READ ONLY transaction"]
+        L3A --> L3B
+    end
+
+    subgraph AuditLogic["SQLAuditCheck 判定逻辑（关键）"]
+        direction TB
+        AL1["_get_statement_type()"]
+        AL2{"语句类型?"}
+        AL3["DROP/ALTER/TRUNCATE<br/>CREATE/GRANT/REVOKE"]
+        AL4["🔴 绝对禁止 → 拦截"]
+        AL5["DELETE/UPDATE"]
+        AL6["🟡 admin? → 否 → 拦截"]
+        AL7["INSERT / MERGE / SELECT"]
+        AL8["🟢 无违规 → 放行 ← ⚠️ INSERT 落在这里"]
+        AL1 --> AL2
+        AL2 -->|"DDL 类"| AL3 --> AL4
+        AL2 -->|"写 DML"| AL5 --> AL6
+        AL2 -->|"其他"| AL7 --> AL8
+    end
+
+    Layer0 -->|"✅ 全部放行"| Layer1
+    Layer1 -->|"✅ 审计通过"| Layer2
+    Layer2 -->|"→ 发送 SQL"| Layer3
+    AuditLogic -.- Layer0
+
+    style Layer3 fill:#1a0a0a,stroke:#f85149,stroke-width:2px
+    style L3B fill:#da3633,stroke:#f85149,color:#fff
+    style AL8 fill:#d29922,stroke:#e3b341,color:#000
+    style AL4 fill:#da3633,stroke:#f85149,color:#fff
+    style AL6 fill:#da3633,stroke:#f85149,color:#fff
+    style Layer0 fill:#0d1117,stroke:#30363d
+    style Layer1 fill:#0d1117,stroke:#30363d
+    style Layer2 fill:#0d1117,stroke:#30363d
+</div>
+
+<div class="legend">
+  <div class="legend-item"><span class="dot" style="background:#da3633"></span> 拦截点（实际生效）</div>
+  <div class="legend-item"><span class="dot" style="background:#d29922"></span> 放行（存在审计缺口）</div>
+  <div class="legend-item"><span class="dot" style="background:#238636"></span> 安全放行（设计正确）</div>
+  <div class="legend-item"><span class="dot" style="background:#8b949e"></span> 预留桩（未实现）</div>
+</div>
+
+<!-- ============ 4 层防线详细分析 ============ -->
+<div class="panel">
+<h3>🛡️ 四层防线 & INSERT 穿越轨迹</h3>
+<table>
+  <thead>
+    <tr><th width="20">#</th><th>防线层</th><th>实现位置</th><th>INSERT 判定</th><th>结果</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>0</td>
+      <td><strong>安全护栏链</strong></td>
+      <td class="muted">
+        safety.py → SQLAuditCheck<br/>
+        safety.py → ReadOnlyCheck<br/>
+        safety.py → PerformanceCheck
+      </td>
+      <td>
+        SQLAuditCheck: INSERT 不在 _FORBIDDEN_STATEMENTS，不在 _ADMIN_ONLY_STATEMENTS<br/>
+        ReadOnlyCheck: 预留桩，注释写"由 SQLAuditCheck 确保只读"<br/>
+        PerformanceCheck: INSERT 非 SELECT，跳过
+      </td>
+      <td><span class="badge badge-yellow">放行</span></td>
+    </tr>
+    <tr>
+      <td>1</td>
+      <td><strong>run_query 内部审计</strong></td>
+      <td class="muted">query.py:261 → audit(sql)</td>
+      <td>同一 audit() 函数，INSERT 同样不在禁止列表</td>
+      <td><span class="badge badge-yellow">放行</span></td>
+    </tr>
+    <tr>
+      <td>2</td>
+      <td><strong>适配器层</strong></td>
+      <td class="muted">mysql.py:149 → cursor.execute(sql)</td>
+      <td>无 SQL 类型检查，直接发给 MySQL 服务端</td>
+      <td><span class="badge badge-yellow">放行</span></td>
+    </tr>
+    <tr style="background:#1a0a0a">
+      <td>3</td>
+      <td><strong>MySQL 会话层</strong></td>
+      <td class="muted">mysql.py:77 → SET SESSION TRANSACTION READ ONLY</td>
+      <td>MySQL 服务端拒绝在只读事务中执行 INSERT</td>
+      <td><span class="badge badge-red">拦截 ✅</span></td>
+    </tr>
+  </tbody>
+</table>
+</div>
+
+<!-- ============ 线上日志还原 ============ -->
+<div class="panel">
+<h3>📋 线上日志还原（按时间线）</h3>
+<div class="log-line"><span class="time">08:04:28.793</span>  <span class="level">[info     ]</span>  <span class="msg">SQL审计通过</span>                        <span class="db">db_type=mysql</span> <span class="sql">sql="INSERT INTO users (...) VALUES ('xiaomeng', ...)"</span> <span class="muted">trace_id=87324c0b...</span>
+<span class="arrow-down">▼ 第 1 次审计 — SQLAuditCheck（安全护栏链中），INSERT 未命中任何规则 → 放行</span></div>
+<div class="log-line"><span class="time">08:04:28.796</span>  <span class="level">[info     ]</span>  <span class="msg">SQL审计通过</span>                        <span class="db">db_type=mysql</span> <span class="sql">sql="INSERT INTO users (...) VALUES ('xiaomeng', ...)"</span> <span class="muted">trace_id=87324c0b...</span>
+<span class="arrow-down">▼ 第 2 次审计 — run_query() 内部 audit() 调用，同样放行</span></div>
+<div class="log-line"><span class="time">08:04:28.799</span>  <span class="level">[info     ]</span>  <span class="msg">MySQL 连接成功</span>                     <span class="db">database=write_helper host=127.0.0.1 port=3306</span>
+<span class="arrow-down">▼ 适配器 connect() 成功 → 已执行 SET SESSION TRANSACTION READ ONLY</span></div>
+<div class="log-line"><span class="time">08:04:28.804</span>  <span class="error-l">[error    ]</span>  <span class="msg">MySQL 查询异常</span>                     <span class="error-l">error="(1792, 'Cannot execute statement in a READ ONLY transaction')"</span> <span class="sql">sql="INSERT INTO users ..."</span>
+<span class="arrow-down">▼ Layer 3（MySQL 会话层）实际拦截！ERROR 1792</span></div>
+<div class="log-line"><span class="time">08:04:28.805</span>  <span class="warn-l">[warning  ]</span>  <span class="msg">SQL 执行失败</span>                       <span class="db">database=write_helper</span> <span class="error-l">error_type=UNKNOWN</span> <span class="muted">detail="数据库执行出错: SQL 执行错误：(1792, 'Cannot execute statement in a READ ONLY transaction')"</span>
+<span class="arrow-down">▼ SQL 错误解析器将错误包装返回给 Agent，Agent 据此告知用户操作失败</span></div>
+</div>
+
+<!-- ============ 结论 ============ -->
+<div class="conclusion">
+<h3>🚨 结论：INSERT 实际防线在 MySQL 层，应用层存在审计缺口</h3>
+<p>
+<strong>实际生效的拦截</strong>来自 <a href="file:///d:/WampServer/www/DB-Pilot/backend/app/db/mysql.py#L77">mysql.py:77</a> 中 <code>SET SESSION TRANSACTION READ ONLY</code>，
+这是会话级别的 MySQL 写保护，任何写操作都会触发 <code>ERROR 1792</code>。<br/><br/>
+<strong>但这属于"偶然防御"，不是设计意图：</strong>
+</p>
+<ul style="margin: 8px 0 0 20px; font-size: 14px; line-height: 2;">
+  <li><code>ReadOnlyCheck</code> 注释明确写 "由 SQLAuditCheck 确保只读"，但 <code>SQLAuditCheck</code> 的 <code>_check_statement_type()</code> 根本<strong>没有处理 INSERT</strong></li>
+  <li>INSERT 安全通过所有应用层检查，白白消耗了两次 LLM 推理 + 一次 MySQL 连接</li>
+  <li>如果未来支持开启读写事务的适配器（如 PostgreSQL 未设置 READ ONLY），INSERT 将<strong>直接被写入数据库</strong></li>
+  <li>应该在 <code>sql_auditor.py</code> 的 <code>_ADMIN_ONLY_STATEMENTS</code> 中加入 INSERT/MERGE，在应用层就拦截</li>
+</ul>
+</div>
+
+<script>mermaid.initialize({ startOnLoad: true, theme: 'dark', securityLevel: 'loose' });</script>
+</body>
+</html>
