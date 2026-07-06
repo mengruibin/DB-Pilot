@@ -24,7 +24,7 @@ export function cancelChat(data: CancelRequest) {
 
 const CONN_BASE = '/api/connections'
 
-/** 执行只读 SQL（直接模式） */
+/** 执行 SQL 查询（直接模式，由后端审计控制读写） */
 export function directQuery(connectionId: string, data: DirectQueryRequest) {
   return http.post<QueryResult>(`${CONN_BASE}/${connectionId}/query`, data)
 }

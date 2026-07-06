@@ -26,6 +26,7 @@ class SafetyResult:
         reason: 拦截原因（blocked=True 时必填）。
         warnings: 非阻断性警告信息。
     """
+
     blocked: bool
     reason: str | None = None
     warnings: list[str] = field(default_factory=list)
@@ -61,7 +62,7 @@ class SafetyCheck(ABC):
 class SQLAuditCheck(SafetyCheck):
     """SQL 审计护栏。
 
-    对 run_query / explain_query 工具中传入的 SQL 执行 sqlglot 审计。
+    对 execute_sql / explain_query 工具中传入的 SQL 执行 sqlglot 审计。
     依据 AGENTS.md §安全与合规红线：
       - 绝对禁止: DROP/ALTER/TRUNCATE/CREATE/GRANT/REVOKE
       - DELETE/UPDATE 仅 admin 角色可通过
@@ -75,7 +76,7 @@ class SQLAuditCheck(SafetyCheck):
         conn_config: dict[str, Any],
     ) -> SafetyResult:
         """对 SQL 类工具进行审计检查。"""
-        if tool_name not in ("run_query", "explain_query"):
+        if tool_name not in ("execute_sql", "explain_query"):
             return SafetyResult(blocked=False)
 
         sql = tool_args.get("sql", "")
@@ -84,15 +85,14 @@ class SQLAuditCheck(SafetyCheck):
 
         try:
             from app.engine.sql_auditor import audit
+
             db_type = conn_config.get("db_type", "mysql")
             user_role = conn_config.get("user_role", "standard")
 
             result = audit(sql, db_type, user_role=user_role)
 
             if not result.passed:
-                violations_desc = [
-                    f"{v.type}: {v.message}" for v in result.violations
-                ]
+                violations_desc = [f"{v.type}: {v.message}" for v in result.violations]
                 return SafetyResult(
                     blocked=True,
                     reason=f"SQL 审计未通过: {'; '.join(violations_desc)}",
@@ -119,8 +119,22 @@ class ReadOnlyCheck(SafetyCheck):
     非 admin 角色的 SQL 操作仅允许 SELECT 只读查询。
     admin 角色不受此限制。
     此护栏与 SQLAuditCheck 互补——SQLAuditCheck 检查语句结构，
-    ReadOnlyCheck 检查角色权限。
+    ReadOnlyCheck 检查角色权限。增强后：非 admin + 非 SELECT 直接拦截，
+    不依赖 SQLAuditCheck 兜底。
     """
+
+    _READONLY_KEYWORDS = frozenset(
+        {
+            "SELECT",
+            "SHOW",
+            "DESC",
+            "DESCRIBE",
+            "EXPLAIN",
+            "WITH",
+            "USE",
+            "SET",
+        }
+    )
 
     async def check(
         self,
@@ -136,11 +150,21 @@ class ReadOnlyCheck(SafetyCheck):
             return SafetyResult(blocked=False)
 
         # 非 SQL 类工具不检查读写权限
-        if tool_name not in ("run_query",):
+        if tool_name not in ("execute_sql",):
             return SafetyResult(blocked=False)
 
-        # standard/readonly 角色运行 run_query 时，由 SQLAuditCheck 确保只读
-        # 此护栏作为补充检查
+        # 对非 admin 角色：检测 SQL 首词，非只读关键字则拦截
+        sql = (tool_args.get("sql") or "").strip().upper()
+        first_word = sql.split(maxsplit=1)[0] if sql else ""
+        if first_word and first_word not in self._READONLY_KEYWORDS:
+            return SafetyResult(
+                blocked=True,
+                reason=(
+                    f"当前用户角色为「{user_role}」，仅允许只读操作。"
+                    f"语句以 {first_word} 开头，已被只读护栏拦截"
+                ),
+            )
+
         return SafetyResult(blocked=False)
 
 
@@ -168,7 +192,7 @@ class ConnectionLimitCheck(SafetyCheck):
         conn_config: dict[str, Any],
     ) -> SafetyResult:
         """检查是否超出查询次数限制。"""
-        if tool_name in ("run_query", "explain_query"):
+        if tool_name in ("execute_sql", "explain_query"):
             self._query_count += 1
             if self._query_count > self._max_queries:
                 return SafetyResult(
@@ -280,7 +304,7 @@ class PerformanceCheck(SafetyCheck):
         Returns:
             SafetyResult(blocked=False, warnings=[...])
         """
-        if tool_name not in ("run_query",):
+        if tool_name not in ("execute_sql",):
             return SafetyResult(blocked=False)
 
         sql = tool_args.get("sql", "")
@@ -305,8 +329,7 @@ class PerformanceCheck(SafetyCheck):
         func_col = _detect_function_on_column(sql)
         if func_col:
             warnings.append(
-                "性能提示: WHERE 子句中对列使用了函数，"
-                "这将阻止该列上的索引使用，建议改写查询条件"
+                "性能提示: WHERE 子句中对列使用了函数，这将阻止该列上的索引使用，建议改写查询条件"
             )
 
         if warnings:

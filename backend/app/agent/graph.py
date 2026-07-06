@@ -50,6 +50,7 @@ _MAX_AGENT_ITERATIONS = 10
 # 路由判断函数
 # =============================================================================
 
+
 def route_after_agent(
     state: AgentState,
 ) -> Literal["tools", "format_response"]:
@@ -86,6 +87,7 @@ def route_after_agent(
 # 图节点函数
 # =============================================================================
 
+
 async def agent_node(state: AgentState) -> dict[str, Any]:
     """Step 3: LLM 决策节点——Agent 图的核心（任务 4 重写：LangChain 标准 API）。
 
@@ -116,13 +118,15 @@ async def agent_node(state: AgentState) -> dict[str, Any]:
         )
         return {
             "final_answer": (
-                "抱歉，当前问题分析步骤较多，已超出我的处理上限。"
-                "请尝试简化问题或分步提问。"
+                "抱歉，当前问题分析步骤较多，已超出我的处理上限。请尝试简化问题或分步提问。"
             ),
-            "trace_iterations": state.get("trace_iterations", []) + [{
-                "iteration": iteration,
-                "status": "max_iterations_exceeded",
-            }],
+            "trace_iterations": state.get("trace_iterations", [])
+            + [
+                {
+                    "iteration": iteration,
+                    "status": "max_iterations_exceeded",
+                }
+            ],
         }
 
     logger.info(
@@ -158,12 +162,14 @@ async def agent_node(state: AgentState) -> dict[str, Any]:
                 model=settings.LLM_MODEL,
             )
             sse_events = list(state.get("sse_events", []))
-            sse_events.append({
-                "type": "error",
-                "error_code": "TOOL_BINDING_FAILED",
-                "user_message": "当前模型不支持工具调用，无法执行数据库操作",
-                "severity": "warning",
-            })
+            sse_events.append(
+                {
+                    "type": "error",
+                    "error_code": "TOOL_BINDING_FAILED",
+                    "user_message": "当前模型不支持工具调用，无法执行数据库操作",
+                    "severity": "warning",
+                }
+            )
             return {
                 "final_answer": (
                     f"当前模型（{settings.LLM_MODEL}）不支持工具调用能力，"
@@ -171,13 +177,16 @@ async def agent_node(state: AgentState) -> dict[str, Any]:
                     "请切换为支持 function calling 的模型（如 qwen-plus、claude-sonnet 等），"
                     "或联系管理员配置兼容的 LLM 提供商。"
                 ),
-                "trace_iterations": state.get("trace_iterations", []) + [{
-                    "iteration": iteration,
-                    "status": "tool_binding_failed",
-                    "error": str(exc)[:200],
-                    "model": settings.LLM_MODEL,
-                    "provider": settings.LLM_PROVIDER,
-                }],
+                "trace_iterations": state.get("trace_iterations", [])
+                + [
+                    {
+                        "iteration": iteration,
+                        "status": "tool_binding_failed",
+                        "error": str(exc)[:200],
+                        "model": settings.LLM_MODEL,
+                        "provider": settings.LLM_PROVIDER,
+                    }
+                ],
                 "sse_events": sse_events,
             }
         raise
@@ -197,11 +206,13 @@ async def agent_node(state: AgentState) -> dict[str, Any]:
             "tools_count": len(AGENT_TOOLS),
             "input_tokens": (
                 response.response_metadata.get("token_usage", {}).get("input_tokens", 0)
-                if hasattr(response, "response_metadata") else 0
+                if hasattr(response, "response_metadata")
+                else 0
             ),
             "output_tokens": (
                 response.response_metadata.get("token_usage", {}).get("output_tokens", 0)
-                if hasattr(response, "response_metadata") else 0
+                if hasattr(response, "response_metadata")
+                else 0
             ),
         }
     trace_iterations = list(state.get("trace_iterations", []))
@@ -226,14 +237,16 @@ async def agent_node(state: AgentState) -> dict[str, Any]:
 
         # 写入 SSE 事件到 sse_events（分离于 LLM 消息上下文）
         for tc in response.tool_calls:
-            sse_events.append({
-                "type": "tool_call",
-                "tool": tc["name"],
-                "args": tc["args"],
-                "display": f"正在执行 {tc['name']}...",
-                "agent_run_id": run_id,
-                "iteration": iteration,
-            })
+            sse_events.append(
+                {
+                    "type": "tool_call",
+                    "tool": tc["name"],
+                    "args": tc["args"],
+                    "display": f"正在执行 {tc['name']}...",
+                    "agent_run_id": run_id,
+                    "iteration": iteration,
+                }
+            )
 
         return {
             "messages": [response],  # add_messages reducer 自动追加 AIMessage
@@ -261,14 +274,16 @@ async def agent_node(state: AgentState) -> dict[str, Any]:
         trace_iterations.append(trace_entry)
 
         # 写入 SSE thinking 事件（LLM 最终思考结果）
-        sse_events.append({
-            "type": "thinking",
-            "content": final_text[:500] + ("..." if len(final_text) > 500 else ""),
-            "agent_run_id": run_id,
-            "iteration": iteration,
-            "duration_ms": elapsed_ms,
-            "reasoning_type": "concluding",
-        })
+        sse_events.append(
+            {
+                "type": "thinking",
+                "content": final_text[:500] + ("..." if len(final_text) > 500 else ""),
+                "agent_run_id": run_id,
+                "iteration": iteration,
+                "duration_ms": elapsed_ms,
+                "reasoning_type": "concluding",
+            }
+        )
 
         return {
             "messages": [response],  # AIMessage（无 tool_calls）
@@ -276,7 +291,6 @@ async def agent_node(state: AgentState) -> dict[str, Any]:
             "trace_iterations": trace_iterations,
             "sse_events": sse_events,
         }
-
 
 
 def format_response_node(state: AgentState) -> dict[str, Any]:
@@ -296,9 +310,7 @@ def format_response_node(state: AgentState) -> dict[str, Any]:
     final_answer = state.get("final_answer") or ""
     # 从 trace_iterations 中统计实际调用的工具数（替代已移除的 pending_tool_results）
     trace_entries = state.get("trace_iterations", [])
-    tools_called = sum(
-        1 for entry in trace_entries if entry.get("tool_calls")
-    )
+    tools_called = sum(1 for entry in trace_entries if entry.get("tool_calls"))
 
     logger.info(
         "图节点执行: format_response（格式化响应）",
@@ -309,11 +321,13 @@ def format_response_node(state: AgentState) -> dict[str, Any]:
     )
 
     sse_events = list(state.get("sse_events", []))
-    sse_events.append({
-        "type": "result",
-        "summary": final_answer,
-        "tool_calls_made": tools_called,
-    })
+    sse_events.append(
+        {
+            "type": "result",
+            "summary": final_answer,
+            "tool_calls_made": tools_called,
+        }
+    )
 
     logger.info(
         "图节点执行完成: format_response（格式化响应）",
@@ -422,7 +436,10 @@ def _build_system_prompt(state: AgentState) -> str:
         "应改写 SQL 或建议优化方案\n"
         "6. 每次工具调用后分析结果，根据结果决定是否需要更多信息\n"
         "7. 最终用中文给出清晰完整的总结回答\n"
-        "8. 如果工具返回错误，分析原因并尝试换一种方式解决\n\n"
+        "8. 如果工具返回错误，分析原因并尝试换一种方式解决\n"
+        "9. 如果用户要求插入、更新或删除数据，使用 execute_sql 工具执行写操作。"
+        "写操作仅在当前连接用户具有 admin 权限时才能执行成功，"
+        "如被安全策略拦截请告知用户权限不足\n"
         "## 对话历史\n"
         f"{conversation_history}"
     )

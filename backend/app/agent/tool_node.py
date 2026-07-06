@@ -81,8 +81,15 @@ async def safe_tools_node(state: AgentState) -> dict[str, Any]:
         # ── 1. 连接配置注入 ──
         # 将 conn_config 合并到工具参数中（LLM 不可见这些参数）
         for key in (
-            "connection_id", "db_type", "host", "port", "database",
-            "user", "password", "ssl_enabled", "ssl_ca_cert",
+            "connection_id",
+            "db_type",
+            "host",
+            "port",
+            "database",
+            "user",
+            "password",
+            "ssl_enabled",
+            "ssl_ca_cert",
         ):
             if key in conn_config and key not in tool_args:
                 tool_args[key] = conn_config[key]
@@ -99,19 +106,23 @@ async def safe_tools_node(state: AgentState) -> dict[str, Any]:
                 tool=tool_name,
                 reason=safety_result.reason,
             )
-            tool_messages.append(ToolMessage(
-                content=f"操作被安全策略拦截: {safety_result.reason}",
-                tool_call_id=tc["id"],
-                name=tool_name,
-            ))
-            sse_events.append({
-                "type": "tool_result",
-                "tool": tool_name,
-                "summary": f"拦截: {safety_result.reason}",
-                "agent_run_id": run_id,
-                "iteration": iteration,
-                "safety_checks_passed": False,
-            })
+            tool_messages.append(
+                ToolMessage(
+                    content=f"操作被安全策略拦截: {safety_result.reason}",
+                    tool_call_id=tc["id"],
+                    name=tool_name,
+                )
+            )
+            sse_events.append(
+                {
+                    "type": "tool_result",
+                    "tool": tool_name,
+                    "summary": f"拦截: {safety_result.reason}",
+                    "agent_run_id": run_id,
+                    "iteration": iteration,
+                    "safety_checks_passed": False,
+                }
+            )
             continue
 
         # 记录安全护栏的非阻断警告（将在 ToolMessage 中传递给 Agent）
@@ -133,11 +144,13 @@ async def safe_tools_node(state: AgentState) -> dict[str, Any]:
                 tool=tool_name,
                 available=list(TOOL_REGISTRY.keys()),
             )
-            tool_messages.append(ToolMessage(
-                content=f"工具 '{tool_name}' 未注册，请联系管理员",
-                tool_call_id=tc["id"],
-                name=tool_name,
-            ))
+            tool_messages.append(
+                ToolMessage(
+                    content=f"工具 '{tool_name}' 未注册，请联系管理员",
+                    tool_call_id=tc["id"],
+                    name=tool_name,
+                )
+            )
             continue
 
         # ── 4. 执行工具 ──
@@ -150,19 +163,23 @@ async def safe_tools_node(state: AgentState) -> dict[str, Any]:
                 tool=tool_name,
                 error=str(exc)[:300],
             )
-            tool_messages.append(ToolMessage(
-                content=f"工具执行失败: {str(exc)[:200]}",
-                tool_call_id=tc["id"],
-                name=tool_name,
-            ))
-            sse_events.append({
-                "type": "tool_result",
-                "tool": tool_name,
-                "summary": f"执行失败: {str(exc)[:100]}",
-                "agent_run_id": run_id,
-                "iteration": iteration,
-                "safety_checks_passed": True,
-            })
+            tool_messages.append(
+                ToolMessage(
+                    content=f"工具执行失败: {str(exc)[:200]}",
+                    tool_call_id=tc["id"],
+                    name=tool_name,
+                )
+            )
+            sse_events.append(
+                {
+                    "type": "tool_result",
+                    "tool": tool_name,
+                    "summary": f"执行失败: {str(exc)[:100]}",
+                    "agent_run_id": run_id,
+                    "iteration": iteration,
+                    "safety_checks_passed": True,
+                }
+            )
             continue
 
         elapsed = int((time.monotonic() - tool_start) * 1000)
@@ -183,50 +200,53 @@ async def safe_tools_node(state: AgentState) -> dict[str, Any]:
         tool_content = _json.dumps(result, ensure_ascii=False, default=str)
         # 将安全护栏的性能警告前缀到 ToolMessage 中，Agent 可据此决定优化方案
         if safety_warnings:
-            tool_content = (
-                "[性能提示] " + " | ".join(safety_warnings) + "\n\n" + tool_content
+            tool_content = "[性能提示] " + " | ".join(safety_warnings) + "\n\n" + tool_content
+        tool_messages.append(
+            ToolMessage(
+                content=tool_content,
+                tool_call_id=tc["id"],
+                name=tool_name,
             )
-        tool_messages.append(ToolMessage(
-            content=tool_content,
-            tool_call_id=tc["id"],
-            name=tool_name,
-        ))
+        )
 
         # ── 7. 生成 SSE 事件 ──
         if isinstance(result, dict):
             # 如果工具返回了 SQL（如 run_query），发送 sql 事件
             sql_text = result.get("sql") or result.get("sql_executed", "")
             if sql_text:
-                sse_events.append({
-                    "type": "sql",
-                    "content": sql_text,
-                    "audit_status": result.get("audit_status", "passed"),
-                    "is_readonly": True,
+                sse_events.append(
+                    {
+                        "type": "sql",
+                        "content": sql_text,
+                        "audit_status": result.get("audit_status", "passed"),
+                        "is_readonly": result.get("is_readonly", True),
+                        "agent_run_id": run_id,
+                        "iteration": iteration,
+                    }
+                )
+            sse_events.append(
+                {
+                    "type": "tool_result",
+                    "tool": tool_name,
+                    "summary": (result.get("summary", "") or f"{tool_name} 执行完成"),
+                    "duration_ms": result.get("execution_time_ms", elapsed),
                     "agent_run_id": run_id,
                     "iteration": iteration,
-                })
-            sse_events.append({
-                "type": "tool_result",
-                "tool": tool_name,
-                "summary": (
-                    result.get("summary", "")
-                    or f"{tool_name} 执行完成"
-                ),
-                "duration_ms": result.get("execution_time_ms", elapsed),
-                "agent_run_id": run_id,
-                "iteration": iteration,
-                "safety_checks_passed": True,
-            })
+                    "safety_checks_passed": True,
+                }
+            )
         else:
-            sse_events.append({
-                "type": "tool_result",
-                "tool": tool_name,
-                "summary": str(result)[:200],
-                "duration_ms": elapsed,
-                "agent_run_id": run_id,
-                "iteration": iteration,
-                "safety_checks_passed": True,
-            })
+            sse_events.append(
+                {
+                    "type": "tool_result",
+                    "tool": tool_name,
+                    "summary": str(result)[:200],
+                    "duration_ms": elapsed,
+                    "agent_run_id": run_id,
+                    "iteration": iteration,
+                    "safety_checks_passed": True,
+                }
+            )
 
     return {
         "messages": tool_messages,  # add_messages reducer 自动追加 ToolMessage 列表
@@ -261,8 +281,17 @@ def _sanitize_sensitive_data(result: Any) -> Any:
         return result
 
     sensitive_patterns = [
-        "password", "passwd", "pwd", "secret", "token", "api_key",
-        "phone", "mobile", "email", "id_card", "ssn",
+        "password",
+        "passwd",
+        "pwd",
+        "secret",
+        "token",
+        "api_key",
+        "phone",
+        "mobile",
+        "email",
+        "id_card",
+        "ssn",
     ]
     sensitive_indices: list[int] = []
     for i, col_name in enumerate(columns):

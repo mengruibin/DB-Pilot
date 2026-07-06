@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Annotated, Any
 
 import structlog
@@ -22,6 +23,12 @@ from app.db.factory import AdapterFactory
 from app.engine.sql_auditor import audit
 from app.engine.sql_error_parser import parse_db_error
 from app.models.schemas import ConnectionCreateRequest
+
+# 只读 SQL 语句前缀匹配：匹配其中任一视为不修改数据（SELECT/SHOW/DESC/EXPLAIN 等）
+_IS_READONLY_SQL = re.compile(
+    r"^\s*(?:SELECT|SHOW|DESC|DESCRIBE|EXPLAIN|WITH|USE|SET)\b",
+    re.IGNORECASE,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -57,7 +64,8 @@ def _build_config(
 
 
 def _safe_tool_call(
-    fn_name: str, exc: Exception,
+    fn_name: str,
+    exc: Exception,
     connection_id: str | None = None,
     database: str | None = None,
 ) -> dict[str, Any]:
@@ -72,11 +80,13 @@ def _safe_tool_call(
         connection_id: 数据库连接 ID（用于日志关联）。
         database: 目标数据库名（用于日志关联）。
     """
-    logger.error("工具调用失败",
-                 tool=fn_name,
-                 connection_id=connection_id,
-                 database=database,
-                 error=str(exc)[:200])
+    logger.error(
+        "工具调用失败",
+        tool=fn_name,
+        connection_id=connection_id,
+        database=database,
+        error=str(exc)[:200],
+    )
     return {
         "error": f"{fn_name} 执行失败",
         "detail": f"{type(exc).__name__}: {exc}",
@@ -86,6 +96,7 @@ def _safe_tool_call(
 # =============================================================================
 # list_tables：列出数据库中的表
 # =============================================================================
+
 
 @tool
 async def list_tables(
@@ -124,23 +135,32 @@ async def list_tables(
     # SAFETY: 使用参数化连接配置，不拼接连接串（AGENTS.md §数据库操作原则）
     try:
         config = _build_config(
-            connection_id, db_type, host, port, database, user,
-            password, ssl_enabled, ssl_ca_cert,
+            connection_id,
+            db_type,
+            host,
+            port,
+            database,
+            user,
+            password,
+            ssl_enabled,
+            ssl_ca_cert,
         )
         adapter = AdapterFactory.create(db_type, config)
         await adapter.connect(config, user_role=user_role)
         tables = await adapter.get_tables(database)
         await adapter.disconnect()
 
-        logger.info("工具执行成功", tool="list_tables",
-                     connection_id=connection_id, table_count=len(tables))
+        logger.info(
+            "工具执行成功", tool="list_tables", connection_id=connection_id, table_count=len(tables)
+        )
         return {
             "tables": tables,
             "summary": f"找到 {len(tables)} 张表",
         }
     except Exception as exc:
         return _safe_tool_call(
-            "list_tables", exc,
+            "list_tables",
+            exc,
             connection_id=connection_id,
             database=database,
         )
@@ -149,6 +169,7 @@ async def list_tables(
 # =============================================================================
 # describe_table：获取表结构和索引
 # =============================================================================
+
 
 @tool
 async def describe_table(
@@ -189,8 +210,15 @@ async def describe_table(
     # SAFETY: 使用参数化连接配置，不拼接连接串
     try:
         config = _build_config(
-            connection_id, db_type, host, port, database, user,
-            password, ssl_enabled, ssl_ca_cert,
+            connection_id,
+            db_type,
+            host,
+            port,
+            database,
+            user,
+            password,
+            ssl_enabled,
+            ssl_ca_cert,
         )
         adapter = AdapterFactory.create(db_type, config)
         await adapter.connect(config, user_role=user_role)
@@ -198,9 +226,14 @@ async def describe_table(
         indexes = await adapter.get_indexes(database, table_name)
         await adapter.disconnect()
 
-        logger.info("工具执行成功", tool="describe_table",
-                     connection_id=connection_id, table_name=table_name,
-                     column_count=len(columns), index_count=len(indexes))
+        logger.info(
+            "工具执行成功",
+            tool="describe_table",
+            connection_id=connection_id,
+            table_name=table_name,
+            column_count=len(columns),
+            index_count=len(indexes),
+        )
         return {
             "columns": columns,
             "indexes": indexes,
@@ -208,18 +241,20 @@ async def describe_table(
         }
     except Exception as exc:
         return _safe_tool_call(
-            "describe_table", exc,
+            "describe_table",
+            exc,
             connection_id=connection_id,
             database=database,
         )
 
 
 # =============================================================================
-# run_query：执行只读 SQL 查询
+# execute_sql：执行 SQL 语句（读写由审计和角色控制）
 # =============================================================================
 
+
 @tool
-async def run_query(
+async def execute_sql(
     connection_id: Annotated[str, InjectedToolArg],
     db_type: Annotated[str, InjectedToolArg],
     host: Annotated[str, InjectedToolArg],
@@ -232,7 +267,12 @@ async def run_query(
     ssl_enabled: Annotated[bool, InjectedToolArg] = False,
     ssl_ca_cert: Annotated[str | None, InjectedToolArg] = None,
 ) -> dict[str, Any]:
-    """执行只读 SQL 查询并返回结果。
+    """执行 SQL 语句并返回结果。
+
+    支持 SELECT / INSERT / UPDATE / DELETE / SHOW / DESCRIBE / EXPLAIN 等。
+    允许的操作范围由当前连接的用户角色（user_role）决定：
+      - admin：可执行 INSERT/UPDATE/DELETE 等写操作
+      - readonly：仅允许 SELECT/SHOW/DESCRIBE/EXPLAIN 等只读操作
 
     执行流程：
       1. 调用 sql_auditor.audit() 审计 SQL 安全性
@@ -240,46 +280,55 @@ async def run_query(
       3. 对敏感列进行脱敏处理（T-4：列名正则匹配）
 
     SAFETY: 所有 SQL 执行前必须经过审计（AGENTS.md §安全与合规红线）。
+    SAFETY: 写操作（INSERT/UPDATE/DELETE）仅在用户角色为 admin 时放行，
+            readonly 用户会被审计层拦截。
 
     Args:
-        connection_id: 连接标识符。
-        db_type: 数据库类型。
-        host: 主机地址。
-        port: 端口号。
-        database: 数据库名。
-        user: 用户名。
-        password: 密码。
         sql: 要执行的 SQL 语句。
-        user_role: 用户角色（readonly / standard / admin）。
-        ssl_enabled: 是否启用 SSL。
-        ssl_ca_cert: SSL CA 证书（可选）。
+        user_role: 当前用户角色（由系统自动检测注入，调用方无需手动指定）。
+            - "admin"：可执行所有非 DDL 操作
+            - "readonly"：仅限只读查询
 
     Returns:
         成功：{"columns": [...], "rows": [...], "execution_time_ms": int,
-              "audit_status": "passed"}
-        审计拦截：{"error": "SQL 审计未通过", "detail": "...", "violations": [...]}
-        失败：{"error": "run_query 执行失败", "detail": "..."}
+              "audit_status": "passed", "is_readonly": bool}
+        审计拦截：{"error": "SQL 审计未通过", "detail": "...", "violations": [...],
+                  "audit_status": "blocked"}
+        失败：{"error": "execute_sql 执行失败", "detail": "..."}
     """
     # Step 1: SQL 安全审计（AGENTS.md §安全与合规红线）
     # SAFETY: 不跳过 SQL 审计直接执行用户/LLM 生成的 SQL
     audit_result = audit(sql, db_type=db_type, user_role=user_role)
     if not audit_result.passed:
-        logger.warning("工具审计拦截", tool="run_query", sql=sql[:200],
-                        connection_id=connection_id)
+        logger.warning(
+            "工具审计拦截",
+            tool="execute_sql",
+            sql=sql[:200],
+            connection_id=connection_id,
+            user_role=user_role,
+        )
         return {
             "error": "SQL 审计未通过",
             "detail": "语句包含危险操作，已被拦截",
-            "violations": [
-                {"type": v.type, "message": v.message} for v in audit_result.violations
-            ],
+            "violations": [{"type": v.type, "message": v.message} for v in audit_result.violations],
             "audit_status": "blocked",
         }
+
+    # 判断本次 SQL 是否为只读（用于返回值和日志）
+    is_readonly = bool(_IS_READONLY_SQL.match(sql))
 
     # Step 2: 执行查询
     try:
         config = _build_config(
-            connection_id, db_type, host, port, database, user,
-            password, ssl_enabled, ssl_ca_cert,
+            connection_id,
+            db_type,
+            host,
+            port,
+            database,
+            user,
+            password,
+            ssl_enabled,
+            ssl_ca_cert,
         )
         adapter = AdapterFactory.create(db_type, config)
         await adapter.connect(config, user_role=user_role)
@@ -289,9 +338,18 @@ async def run_query(
         # Step 3: 敏感列脱敏（T-4：列名正则匹配）
         # 对列名匹配敏感模式的列进行 *** 替换
         sensitive_patterns = [
-            "password", "token", "secret", "key", "auth",
-            "credit", "card", "ssn", "id_card", "phone",
-            "email", "cert",
+            "password",
+            "token",
+            "secret",
+            "key",
+            "auth",
+            "credit",
+            "card",
+            "ssn",
+            "id_card",
+            "phone",
+            "email",
+            "cert",
         ]
         masked_columns: list[bool] = []
         for col in result["columns"]:
@@ -301,24 +359,42 @@ async def run_query(
         # 对敏感列逐行脱敏
         masked_rows = []
         for row in result["rows"]:
-            masked_row = [
-                "***" if masked_columns[i] else row[i]
-                for i in range(len(row))
-            ]
+            masked_row = ["***" if masked_columns[i] else row[i] for i in range(len(row))]
             masked_rows.append(masked_row)
 
-        logger.info("工具执行成功", tool="run_query",
-                     connection_id=connection_id,
-                     total_rows=result.get("total_rows", 0),
-                     audit_status="passed")
+        # 写操作记录额外审计日志
+        if not is_readonly:
+            sql_type = sql.strip().split()[0].upper() if sql.strip() else "UNKNOWN"
+            logger.info(
+                "写操作执行成功",
+                tool="execute_sql",
+                connection_id=connection_id,
+                sql_type=sql_type,
+                affected_rows=result.get("total_rows", 0),
+                user_role=user_role,
+            )
+        else:
+            logger.info(
+                "工具执行成功",
+                tool="execute_sql",
+                connection_id=connection_id,
+                total_rows=result.get("total_rows", 0),
+                audit_status="passed",
+            )
+
+        summary = (
+            f"影响 {result.get('affected_rows', result['total_rows'])} 行"
+            if not is_readonly
+            else f"返回 {result['total_rows']} 行"
+        )
         return {
             "columns": result["columns"],
             "rows": masked_rows,
             "total_rows": result["total_rows"],
             "execution_time_ms": result["execution_time_ms"],
             "audit_status": "passed",
-            "is_readonly": True,
-            "summary": f"返回 {result['total_rows']} 行",
+            "is_readonly": is_readonly,
+            "summary": summary,
         }
 
     except Exception as exc:
@@ -326,7 +402,7 @@ async def run_query(
         parsed = parse_db_error(exc, db_type, sql)
         logger.warning(
             "SQL 执行失败",
-            tool="run_query",
+            tool="execute_sql",
             connection_id=connection_id,
             database=database,
             error_type=parsed.error_type,

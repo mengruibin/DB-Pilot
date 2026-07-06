@@ -66,6 +66,7 @@ _session_adapter_info: dict[str, dict[str, Any]] = {}
 # 通用工具函数
 # =============================================================================
 
+
 async def _build_conversation_history(
     db: AsyncSession,
     session_id: str,
@@ -97,7 +98,7 @@ async def _build_conversation_history(
         return None
 
     # 取最近 max_messages 条（不含最新一条——当前用户消息已写入但还没处理）
-    recent = messages[-(max_messages + 1):-1]
+    recent = messages[-(max_messages + 1) : -1]
     if not recent:
         return None
 
@@ -114,6 +115,7 @@ async def _build_conversation_history(
 # =============================================================================
 # 会话管理
 # =============================================================================
+
 
 async def _get_or_create_session(
     db: AsyncSession,
@@ -133,16 +135,13 @@ async def _get_or_create_session(
         SessionModel 实例。
     """
     if session_id:
-        result = await db.execute(
-            select(SessionModel).where(SessionModel.id == session_id)
-        )
+        result = await db.execute(select(SessionModel).where(SessionModel.id == session_id))
         session = result.scalar_one_or_none()
         if session:
             # 更新活跃时间
             session.last_active_at = datetime.now(UTC)
             await db.commit()
-            logger.info("续接会话", session_id=session.id,
-                        connection_id=connection_id)
+            logger.info("续接会话", session_id=session.id, connection_id=connection_id)
             return session
 
     # 创建新会话
@@ -157,8 +156,7 @@ async def _get_or_create_session(
     db.add(session)
     await db.commit()
     await db.refresh(session)
-    logger.info("创建新会话", session_id=session.id,
-                connection_id=connection_id, title=title)
+    logger.info("创建新会话", session_id=session.id, connection_id=connection_id, title=title)
     return session
 
 
@@ -207,9 +205,7 @@ async def _save_message(
     db.add(msg)
 
     # 更新会话的消息计数和活跃时间
-    result = await db.execute(
-        select(SessionModel).where(SessionModel.id == session_id)
-    )
+    result = await db.execute(select(SessionModel).where(SessionModel.id == session_id))
     session = result.scalar_one_or_none()
     if session:
         # FIXED: 使用实例属性自增，而非类属性（类属性永远是默认值0）
@@ -225,6 +221,7 @@ async def _save_message(
 # =============================================================================
 # 连接配置解析
 # =============================================================================
+
 
 async def _resolve_connection_config(
     db: AsyncSession,
@@ -244,9 +241,7 @@ async def _resolve_connection_config(
         包含 db_type, host, port, database, user, password 等字段的 dict。
     """
     result = await db.execute(
-        select(ConnectionConfigModel).where(
-            ConnectionConfigModel.id == connection_id
-        )
+        select(ConnectionConfigModel).where(ConnectionConfigModel.id == connection_id)
     )
     conn = result.scalar_one_or_none()
     if conn is None:
@@ -278,9 +273,9 @@ async def _resolve_connection_config(
         cached = get_cached_role(connection_id, trace_id=trace_id)
         if cached is not None:
             config["user_role"] = cached
-            logger.debug("角色取自缓存",
-                         connection_id=connection_id, role=cached,
-                         trace_id=trace_id)
+            logger.debug(
+                "角色取自缓存", connection_id=connection_id, role=cached, trace_id=trace_id
+            )
         else:
             role = await detect_mysql_role(
                 host=conn.host,
@@ -294,9 +289,9 @@ async def _resolve_connection_config(
             )
             set_cached_role(connection_id, role, trace_id=trace_id)
             config["user_role"] = role
-            logger.info("角色来自实时检测",
-                        connection_id=connection_id, role=role,
-                        trace_id=trace_id)
+            logger.info(
+                "角色来自实时检测", connection_id=connection_id, role=role, trace_id=trace_id
+            )
     else:
         config["user_role"] = "standard"
 
@@ -310,6 +305,7 @@ async def _resolve_connection_config(
 # 所有工具编排逻辑现在由 app/agent/graph.py 中的 LangGraph StateGraph 处理：
 #   classify_node → route → agent_node ↔ tools_node → format_response
 # =============================================================================
+
 
 async def _kill_db_query(conn_info: dict[str, Any]) -> None:
     """取消目标数据库上的活跃查询（KILL QUERY）。
@@ -363,9 +359,7 @@ async def _kill_db_query(conn_info: dict[str, Any]) -> None:
                 rows = result.get("rows", [])
 
                 # 构建列名→索引映射，兼容不同 MySQL 版本
-                col_index: dict[str, int] = {
-                    c.lower(): i for i, c in enumerate(cols)
-                }
+                col_index: dict[str, int] = {c.lower(): i for i, c in enumerate(cols)}
                 id_idx = col_index.get("id", -1)
                 user_idx = col_index.get("user", -1)
                 cmd_idx = col_index.get("command", -1)
@@ -382,20 +376,22 @@ async def _kill_db_query(conn_info: dict[str, Any]) -> None:
                             thread_id = row[id_idx]
                             try:
                                 await adapter.execute(
-                                    f"KILL QUERY {thread_id}", params={},
+                                    f"KILL QUERY {thread_id}",
+                                    params={},
                                 )
                                 killed_count += 1
-                                logger.info("MySQL KILL QUERY 成功",
-                                            db_type="mysql", thread_id=thread_id)
+                                logger.info(
+                                    "MySQL KILL QUERY 成功", db_type="mysql", thread_id=thread_id
+                                )
                             except Exception as exc:
-                                logger.warning("MySQL KILL QUERY 失败",
-                                               thread_id=thread_id,
-                                               error=str(exc)[:200])
-                    logger.info("MySQL KILL QUERY 完成",
-                                killed_count=killed_count)
+                                logger.warning(
+                                    "MySQL KILL QUERY 失败",
+                                    thread_id=thread_id,
+                                    error=str(exc)[:200],
+                                )
+                    logger.info("MySQL KILL QUERY 完成", killed_count=killed_count)
                 else:
-                    logger.warning("MySQL PROCESSLIST 列名异常",
-                                   columns=cols)
+                    logger.warning("MySQL PROCESSLIST 列名异常", columns=cols)
             except Exception as exc:
                 logger.warning("MySQL KILL 异常", error=str(exc)[:200])
 
@@ -411,22 +407,26 @@ async def _kill_db_query(conn_info: dict[str, Any]) -> None:
                     params={"username": user},
                 )
                 cancelled = len(result.get("rows", []))
-                logger.info("PostgreSQL pg_cancel_backend 完成",
-                            cancelled_count=cancelled)
+                logger.info("PostgreSQL pg_cancel_backend 完成", cancelled_count=cancelled)
             except Exception as exc:
                 logger.warning("PostgreSQL KILL 异常", error=str(exc)[:200])
 
         elif db_type == "oracle":
             # Oracle: 无法自动获取 SID/SERIAL#，仅记录提示
-            logger.info("Oracle KILL QUERY 跳过：需要 SID/SERIAL#，"
-                        "依赖连接关闭后自动回滚", db_type="oracle")
+            logger.info(
+                "Oracle KILL QUERY 跳过：需要 SID/SERIAL#，依赖连接关闭后自动回滚", db_type="oracle"
+            )
 
         await adapter.disconnect()
         logger.info("KILL 管理连接已关闭", db_type=db_type)
 
     except Exception as exc:
-        logger.warning("KILL DB 查询失败（网络/权限），连接关闭时将自动回滚",
-                       db_type=db_type, host=host, error=str(exc)[:200])
+        logger.warning(
+            "KILL DB 查询失败（网络/权限），连接关闭时将自动回滚",
+            db_type=db_type,
+            host=host,
+            error=str(exc)[:200],
+        )
 
 
 # =============================================================================
@@ -462,7 +462,7 @@ def _infer_message_type(state: dict[str, Any]) -> str:
         return "troubleshoot"
     if tools_called & {"explain_query", "get_slow_queries"}:
         return "diagnosis"
-    if tools_called & {"run_query", "list_tables", "describe_table"}:
+    if tools_called & {"execute_sql", "list_tables", "describe_table"}:
         return "query"
     return "general"
 
@@ -504,32 +504,44 @@ async def _stream_events(
         async with async_session_factory() as db:
             # ========== Step 1: 会话管理 ==========
             session = await _get_or_create_session(
-                db, body.connection_id, body.session_id, body.message,
+                db,
+                body.connection_id,
+                body.session_id,
+                body.message,
             )
             set_connection_id(body.connection_id)
 
             # 持久化用户消息
             await _save_message(
-                db, session.id, "user", body.message,
+                db,
+                session.id,
+                "user",
+                body.message,
                 message_type=body.mode,
             )
 
             # ── 获取会话历史（最近 10 条，用于记忆上下文） ──
             conversation_history = await _build_conversation_history(
-                db, session.id, max_messages=10,
+                db,
+                session.id,
+                max_messages=10,
             )
 
             # ========== Step 2: 解析连接配置 ==========
             precheck_trace_id = f"role_{uuid4().hex[:12]}"
             conn_config = await _resolve_connection_config(
-                db, body.connection_id, body.password,
+                db,
+                body.connection_id,
+                body.password,
                 trace_id=precheck_trace_id,
             )
-            logger.info("连接配置已解析",
-                        connection_id=body.connection_id,
-                        db_type=conn_config.get("db_type"),
-                        user_role=conn_config.get("user_role", "N/A"),
-                        trace_id=precheck_trace_id)
+            logger.info(
+                "连接配置已解析",
+                connection_id=body.connection_id,
+                db_type=conn_config.get("db_type"),
+                user_role=conn_config.get("user_role", "N/A"),
+                trace_id=precheck_trace_id,
+            )
 
             # 存储适配器连接信息，供取消时 KILL QUERY（AC-3）
             if body.session_id:
@@ -569,14 +581,15 @@ async def _stream_events(
             async for state in graph.astream(initial_state, stream_mode="values"):
                 # 检查取消信号
                 if cancel_event.is_set():
-                    logger.info("SSE 流被取消（cancel_event 触发）",
-                                session_id=session.id)
-                    yield format_sse({
-                        "type": "done",
-                        "session_id": session.id,
-                        "tokens_used": total_tokens,
-                        "agent_run_id": run_id,
-                    })
+                    logger.info("SSE 流被取消（cancel_event 触发）", session_id=session.id)
+                    yield format_sse(
+                        {
+                            "type": "done",
+                            "session_id": session.id,
+                            "tokens_used": total_tokens,
+                            "agent_run_id": run_id,
+                        }
+                    )
                     return
 
                 # 发射新增的 SSE 事件
@@ -586,9 +599,7 @@ async def _stream_events(
                         yield format_sse(msg)
                         # 收集助手回复片段
                         if msg.get("type") == "result":
-                            assistant_content_parts.append(
-                                msg.get("summary", "")
-                            )
+                            assistant_content_parts.append(msg.get("summary", ""))
                 emitted_count = len(sse_events)
 
                 # 检查图是否执行完毕
@@ -601,53 +612,72 @@ async def _stream_events(
                 assistant_content = state.get("final_answer") or "已完成"
             # 构建 Agent Trace（B-31 可观测性）
             trace_iterations = state.get("trace_iterations", [])
-            agent_trace = json.dumps({
-                "run_id": run_id,
-                "total_iterations": len(trace_iterations),
-                "iterations": trace_iterations,
-            }, ensure_ascii=False) if trace_iterations else None
+            agent_trace = (
+                json.dumps(
+                    {
+                        "run_id": run_id,
+                        "total_iterations": len(trace_iterations),
+                        "iterations": trace_iterations,
+                    },
+                    ensure_ascii=False,
+                )
+                if trace_iterations
+                else None
+            )
 
             await _save_message(
-                db, session.id, "assistant", assistant_content,
+                db,
+                session.id,
+                "assistant",
+                assistant_content,
                 message_type=_infer_message_type(state),
                 agent_trace=agent_trace,
             )
 
             # ========== Step 5: done 事件 ==========
-            yield format_sse({
-                "type": "done",
-                "session_id": session.id,
-                "tokens_used": total_tokens,
-                "agent_run_id": run_id,
-                "total_iterations": len(state.get("trace_iterations", [])),
-            })
+            yield format_sse(
+                {
+                    "type": "done",
+                    "session_id": session.id,
+                    "tokens_used": total_tokens,
+                    "agent_run_id": run_id,
+                    "total_iterations": len(state.get("trace_iterations", [])),
+                }
+            )
 
     except asyncio.CancelledError:
         # B-20 AC-2：asyncio.Task.cancel() 触发 → 捕获 CancelledError
-        logger.info("SSE 流任务被取消（CancelledError）",
-                    session_id=session.id if session else None)
-        yield format_sse({
-            "type": "done",
-            "session_id": session.id if session else "",
-            "tokens_used": total_tokens,
-            "agent_run_id": run_id if 'run_id' in dir() else "",
-        })
+        logger.info(
+            "SSE 流任务被取消（CancelledError）", session_id=session.id if session else None
+        )
+        yield format_sse(
+            {
+                "type": "done",
+                "session_id": session.id if session else "",
+                "tokens_used": total_tokens,
+                "agent_run_id": run_id if "run_id" in dir() else "",
+            }
+        )
         return
 
     except Exception as exc:
         logger.error("SSE 流异常", error=str(exc)[:200])
-        yield format_sse({
-            "type": "error",
-            "error_code": "AGENT_ERROR",
-            "user_message": "AI 服务暂时不可用，请稍后重试",
-            "severity": "error",
-        })
+        yield format_sse(
+            {
+                "type": "error",
+                "error_code": "AGENT_ERROR",
+                "user_message": "AI 服务暂时不可用，请稍后重试",
+                "severity": "error",
+            }
+        )
         if session:
-            yield format_sse({
-                "type": "done",
-                "session_id": session.id,
-                "tokens_used": total_tokens,
-            })
+            yield format_sse(
+                {
+                    "type": "done",
+                    "session_id": session.id,
+                    "tokens_used": total_tokens,
+                }
+            )
     finally:
         # 清理所有追踪标记（AC-5：回滚由 DB 连接断开时自动完成）
         if body.session_id:
@@ -677,10 +707,12 @@ async def chat_stream(body: ChatRequest) -> StreamingResponse:
     Returns:
         StreamingResponse（Content-Type: text/event-stream）。
     """
-    logger.info("SSE 请求开始",
-                connection_id=body.connection_id,
-                session_id=body.session_id or "(新会话)",
-                message_length=len(body.message))
+    logger.info(
+        "SSE 请求开始",
+        connection_id=body.connection_id,
+        session_id=body.session_id or "(新会话)",
+        message_length=len(body.message),
+    )
 
     return StreamingResponse(
         _stream_events(body),
@@ -721,62 +753,63 @@ async def cancel_chat(
     cancel_event = _active_streams.get(session_id)
     if cancel_event:
         cancel_event.set()
-        logger.info("取消 Step 1/5 完成：SSE 流取消标记已设置",
-                    session_id=session_id)
+        logger.info("取消 Step 1/5 完成：SSE 流取消标记已设置", session_id=session_id)
     else:
-        logger.warning("取消 Step 1/5 跳过：未找到活跃 SSE 流取消标记"
-                       "（会话可能已结束）", session_id=session_id)
+        logger.warning(
+            "取消 Step 1/5 跳过：未找到活跃 SSE 流取消标记（会话可能已结束）", session_id=session_id
+        )
 
     # ========== Step 2: 取消 asyncio Task ==========
     # AC-2：调用 asyncio.Task.cancel() 取消当前 session 的 Agent 协程
-    logger.info("取消 Step 2/5：取消 Agent 协程（task.cancel()）",
-                session_id=session_id)
+    logger.info("取消 Step 2/5：取消 Agent 协程（task.cancel()）", session_id=session_id)
     task = _running_tasks.pop(session_id, None)
     if task is not None and not task.done():
         task.cancel()
-        logger.info("取消 Step 2/5 完成：Agent 协程已取消",
-                    session_id=session_id)
+        logger.info("取消 Step 2/5 完成：Agent 协程已取消", session_id=session_id)
     else:
-        logger.warning("取消 Step 2/5 跳过：未找到活跃的 Agent 协程"
-                       "（可能已结束或从未启动）", session_id=session_id)
+        logger.warning(
+            "取消 Step 2/5 跳过：未找到活跃的 Agent 协程（可能已结束或从未启动）",
+            session_id=session_id,
+        )
 
     # ========== Step 3: KILL QUERY ==========
     # AC-3：若工具已在目标数据库执行 SQL，发送 KILL QUERY <connection_id>
-    logger.info("取消 Step 3/5：检查是否需要 KILL QUERY",
-                session_id=session_id)
+    logger.info("取消 Step 3/5：检查是否需要 KILL QUERY", session_id=session_id)
     conn_info = _session_adapter_info.pop(session_id, None)
     if conn_info and conn_info.get("db_type"):
         await _kill_db_query(conn_info)
-        logger.info("取消 Step 3/5 完成：KILL QUERY 已发送",
-                    session_id=session_id, db_type=conn_info["db_type"])
+        logger.info(
+            "取消 Step 3/5 完成：KILL QUERY 已发送",
+            session_id=session_id,
+            db_type=conn_info["db_type"],
+        )
     else:
-        logger.info("取消 Step 3/5 跳过：无运行中的工具需要 KILL",
-                    session_id=session_id)
+        logger.info("取消 Step 3/5 跳过：无运行中的工具需要 KILL", session_id=session_id)
 
     # ========== Step 4: 更新 Session 状态 + 回滚 ==========
     # AC-4：回滚未提交事务（KILL 或连接断开时目标 DB 自动回滚）
     # AC-5：更新 Session status 为 "closed"
-    logger.info("取消 Step 4/5：更新 Session 状态 + 回滚",
-                session_id=session_id)
+    logger.info("取消 Step 4/5：更新 Session 状态 + 回滚", session_id=session_id)
     async with async_session_factory() as db:
         try:
-            result = await db.execute(
-                select(SessionModel).where(SessionModel.id == session_id)
-            )
+            result = await db.execute(select(SessionModel).where(SessionModel.id == session_id))
             session = result.scalar_one_or_none()
             if session:
                 session.status = "closed"
                 session.last_active_at = datetime.now(UTC)
                 await db.commit()
-                logger.info("取消 Step 4/5 完成：Session 状态已更新为 closed",
-                            session_id=session_id)
+                logger.info(
+                    "取消 Step 4/5 完成：Session 状态已更新为 closed", session_id=session_id
+                )
             else:
-                logger.warning("取消 Step 4/5 跳过：Session 不存在",
-                               session_id=session_id)
+                logger.warning("取消 Step 4/5 跳过：Session 不存在", session_id=session_id)
         except Exception as exc:
             await db.rollback()
-            logger.error("取消 Step 4/5 异常：Session 状态更新失败",
-                         session_id=session_id, error=str(exc)[:200])
+            logger.error(
+                "取消 Step 4/5 异常：Session 状态更新失败",
+                session_id=session_id,
+                error=str(exc)[:200],
+            )
 
     # 清理可能残留的追踪数据
     _active_streams.pop(session_id, None)
@@ -797,10 +830,11 @@ sessions_router = APIRouter(tags=["Sessions"])
 @sessions_router.get("/api/sessions")
 async def list_sessions(
     connection_id: str | None = Query(default=None, description="按连接 ID 筛选"),
-    status: str | None = Query(default=None, description='按状态筛选（active / idle / closed）'),
+    status: str | None = Query(default=None, description="按状态筛选（active / idle / closed）"),
     page: int = Query(default=1, ge=1, description="页码"),
-    page_size: int = Query(default=20, ge=1, le=100, alias="pageSize",
-                           description="每页条数（最大 100）"),
+    page_size: int = Query(
+        default=20, ge=1, le=100, alias="pageSize", description="每页条数（最大 100）"
+    ),
     session: AsyncSession = Depends(get_session),  # noqa: B008
 ) -> Any:
     """获取会话列表（分页，AC-3）。
@@ -819,8 +853,13 @@ async def list_sessions(
         SessionListResponse（分页会话列表）。
     """
     # AC-6：入口日志
-    logger.info("API 请求开始", endpoint="list_sessions",
-                connection_id=connection_id, status=status, page=page)
+    logger.info(
+        "API 请求开始",
+        endpoint="list_sessions",
+        connection_id=connection_id,
+        status=status,
+        page=page,
+    )
 
     # 构建查询
     query = select(SessionModel)
@@ -841,8 +880,7 @@ async def list_sessions(
 
     # 分页（按 last_active_at 降序）
     stmt = (
-        query
-        .order_by(SessionModel.last_active_at.desc())
+        query.order_by(SessionModel.last_active_at.desc())
         .offset((page - 1) * page_size)
         .limit(page_size)
     )
@@ -851,10 +889,12 @@ async def list_sessions(
 
     items = [SessionResponse.model_validate(s) for s in sessions]
 
-    logger.info("API 请求完成", endpoint="list_sessions",
-                total=total, returned=len(items))
+    logger.info("API 请求完成", endpoint="list_sessions", total=total, returned=len(items))
     return SessionListResponse(
-        items=items, total=total, page=page, page_size=page_size,
+        items=items,
+        total=total,
+        page=page,
+        page_size=page_size,
     )
 
 
@@ -862,8 +902,9 @@ async def list_sessions(
 async def list_session_messages(
     session_id: str,
     page: int = Query(default=1, ge=1, description="页码"),
-    page_size: int = Query(default=50, ge=1, le=200, alias="pageSize",
-                           description="每页条数（最大 200）"),
+    page_size: int = Query(
+        default=50, ge=1, le=200, alias="pageSize", description="每页条数（最大 200）"
+    ),
     db_session: AsyncSession = Depends(get_session),  # noqa: B008
 ) -> Any:
     """获取指定会话的消息历史（分页，AC-4, AC-5）。
@@ -884,8 +925,7 @@ async def list_session_messages(
         HTTPException 404: 会话不存在。
     """
     # AC-6：入口日志
-    logger.info("API 请求开始", endpoint="list_session_messages",
-                session_id=session_id, page=page)
+    logger.info("API 请求开始", endpoint="list_session_messages", session_id=session_id, page=page)
 
     # 验证会话存在（AC-5：跨会话隔离的基础）
     sess_result = await db_session.execute(
@@ -893,8 +933,12 @@ async def list_session_messages(
     )
     session = sess_result.scalar_one_or_none()
     if session is None:
-        logger.warning("API 请求失败", endpoint="list_session_messages",
-                       session_id=session_id, reason="not_found")
+        logger.warning(
+            "API 请求失败",
+            endpoint="list_session_messages",
+            session_id=session_id,
+            reason="not_found",
+        )
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail={
@@ -905,9 +949,7 @@ async def list_session_messages(
 
     # AC-5：WHERE session_id = :id 天然保证跨会话隔离
     count_query = (
-        select(func.count())
-        .select_from(MessageModel)
-        .where(MessageModel.session_id == session_id)
+        select(func.count()).select_from(MessageModel).where(MessageModel.session_id == session_id)
     )
     total_result = await db_session.execute(count_query)
     total = total_result.scalar() or 0
@@ -934,10 +976,18 @@ async def list_session_messages(
         msg_dict["result_preview"] = preview
         items.append(MessageResponse.model_validate(msg_dict))
 
-    logger.info("API 请求完成", endpoint="list_session_messages",
-                session_id=session_id, total=total, returned=len(items))
+    logger.info(
+        "API 请求完成",
+        endpoint="list_session_messages",
+        session_id=session_id,
+        total=total,
+        returned=len(items),
+    )
     return MessageListResponse(
-        items=items, total=total, page=page, page_size=page_size,
+        items=items,
+        total=total,
+        page=page,
+        page_size=page_size,
     )
 
 
@@ -963,17 +1013,15 @@ async def rename_session(
         HTTPException 404: 会话不存在。
     """
     # AC-6：入口日志
-    logger.info("API 请求开始", endpoint="rename_session",
-                session_id=session_id, title=body.title)
+    logger.info("API 请求开始", endpoint="rename_session", session_id=session_id, title=body.title)
 
     # 查找会话
-    result = await db_session.execute(
-        select(SessionModel).where(SessionModel.id == session_id)
-    )
+    result = await db_session.execute(select(SessionModel).where(SessionModel.id == session_id))
     session = result.scalar_one_or_none()
     if session is None:
-        logger.warning("API 请求失败", endpoint="rename_session",
-                       session_id=session_id, reason="not_found")
+        logger.warning(
+            "API 请求失败", endpoint="rename_session", session_id=session_id, reason="not_found"
+        )
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail={
@@ -989,13 +1037,11 @@ async def rename_session(
     await db_session.commit()
     await db_session.refresh(session)
 
-    logger.info("API 请求完成", endpoint="rename_session",
-                session_id=session_id, title=body.title)
+    logger.info("API 请求完成", endpoint="rename_session", session_id=session_id, title=body.title)
     return SessionResponse.model_validate(session)
 
 
-@sessions_router.delete("/api/sessions/{session_id}",
-                        status_code=status.HTTP_204_NO_CONTENT)
+@sessions_router.delete("/api/sessions/{session_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_session(
     session_id: str,
     db_session: AsyncSession = Depends(get_session),  # noqa: B008
@@ -1013,8 +1059,7 @@ async def delete_session(
         HTTPException 404: 会话不存在。
     """
     # AC-6：入口日志
-    logger.info("API 请求开始", endpoint="delete_session",
-                session_id=session_id)
+    logger.info("API 请求开始", endpoint="delete_session", session_id=session_id)
 
     # 如果在活跃流中，先取消
     if session_id in _active_streams:
@@ -1022,13 +1067,12 @@ async def delete_session(
         _active_streams[session_id].set()
 
     # 查找会话
-    result = await db_session.execute(
-        select(SessionModel).where(SessionModel.id == session_id)
-    )
+    result = await db_session.execute(select(SessionModel).where(SessionModel.id == session_id))
     session = result.scalar_one_or_none()
     if session is None:
-        logger.warning("API 请求失败", endpoint="delete_session",
-                       session_id=session_id, reason="not_found")
+        logger.warning(
+            "API 请求失败", endpoint="delete_session", session_id=session_id, reason="not_found"
+        )
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail={
@@ -1041,5 +1085,4 @@ async def delete_session(
     await db_session.delete(session)
     await db_session.commit()
 
-    logger.info("API 请求完成", endpoint="delete_session",
-                session_id=session_id)
+    logger.info("API 请求完成", endpoint="delete_session", session_id=session_id)
