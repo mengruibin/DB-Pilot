@@ -15,7 +15,6 @@ import { useChatStore } from '@/stores/chat'
 import { useConnectionStore } from '@/stores/connection'
 import MessageList from './MessageList.vue'
 import InputArea from './InputArea.vue'
-import ThinkingIndicator from './ThinkingIndicator.vue'
 
 const chatStore = useChatStore()
 const connectionStore = useConnectionStore()
@@ -27,14 +26,6 @@ const inputText = ref('')
 function handleSelectConnection(id: string): void {
   connectionStore.setActiveConnection(id)
 }
-
-/** 是否显示 Agent 思考指示器（streaming 中且尚未收到 sql/result） */
-const showThinking = computed(() => {
-  if (!chatStore.isStreaming) return false
-  return !chatStore.messages.some(
-    (m) => m.type === 'sql' || m.type === 'result'
-  )
-})
 
 /** 面板标题：当前会话标题或 "新会话" */
 const panelTitle = computed(() => {
@@ -91,9 +82,6 @@ function handleNewSession(): void {
       :messages="chatStore.messages"
       :is-streaming="chatStore.isStreaming"
     />
-
-    <!-- Agent 思考指示器 -->
-    <ThinkingIndicator :visible="showThinking" />
 
     <!-- 输入区域（F-10 独立组件） -->
     <InputArea

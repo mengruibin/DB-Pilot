@@ -136,7 +136,7 @@
   │  │  自动追加 ToolMessage 到 state["messages"] 列表           │    │
   │  └─────────────────────────────────────────────────────────┘    │
   │                                                                  │
-  │  无工具 → format_response → SSE 事件流                           │
+  │  无工具 → agent_node 直接设置 is_complete → END（format_response 已移除）     │
   │                                                                  │
   └─────────────────────────────────────────────────────────────────┘
 
@@ -147,6 +147,8 @@
      │ Schema    →  bind_tools() + InjectedToolArg 自动      │
      │ 工具执行  →  SafeToolNode 标准接口                    │
      │ 消息状态  →  add_messages reducer 自动管理            │
+     │ SSE 流    →  stream_mode=["updates","messages"]       │
+     │             双通道解耦，token 逐字推送到用户            │
      └──────────────────────────────────────────────────────┘
 ```
 
@@ -488,19 +490,21 @@
 ### 6.2 SSE 事件流
 
 ```
-  SSE 7 种事件类型 — 重构前后完全兼容，前端无需修改
+  SSE 事件类型（2026-07-08 更新：移除 thinking/result，新增 token）
 
   ┌───────────────────────────────────────────────────────────┐
   │  事件类型      │  触发时机          │  内容                  │
   ├───────────────────────────────────────────────────────────┤
-  │  thinking     │  LLM 推理过程       │  推理文本片段           │
+  │  token        │  LLM 逐 token 输出  │  文本片段（打字机效果）│
   │  tool_call    │  LLM 决定调用工具    │  工具名 + 参数          │
   │  tool_result  │  工具执行完成       │  执行结果摘要          │
   │  sql          │  LLM 生成 SQL       │  SQL 语句              │
-  │  result       │  Agent 给出最终回答  │  回答文本              │
   │  error        │  异常发生           │  错误信息              │
   │  done         │  流结束             │  token 消耗统计        │
   └───────────────────────────────────────────────────────────┘
+  
+  设计原则：面向用户的流式渲染（messages 通道的 token 事件）与
+           面向系统的状态记录（updates 通道的 sse_events）解耦。
 ```
 
 ---
@@ -583,9 +587,9 @@
 
 ```
   🔜 建议 1：迁移到 astream_events()
-     当前 SSE 流仍使用 stream_mode="values" + sse_events 字段
-     未来可迁到 LangGraph 标准事件监听（on_chat_model_stream 等）
-     可获取更细粒度的 LLM 推理事件
+     当前 SSE 流已使用 stream_mode=["updates","messages"] + sse_events 字段
+     实现了双通道解耦。未来可进一步迁到 LangGraph 标准事件监听
+     （on_chat_model_stream 等），获取更细粒度的 LLM 推理事件
 
   🔜 建议 2：SafeToolNode 可继承 ToolNode
      若未来需要中断/审批等人机交互功能

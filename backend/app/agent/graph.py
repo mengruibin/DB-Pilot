@@ -8,7 +8,7 @@ LLM 自主决定调用哪些工具、以什么顺序调用、何时停止并给�
   agent_node ↔ safe_tools_node（ReAct 循环）
         │
         ▼
-  format_response → END
+       END
 
 变更说明（2026-07-04）：
   移除了 classify_node / general_node / route_after_classify，原因：
@@ -16,6 +16,12 @@ LLM 自主决定调用哪些工具、以什么顺序调用、何时停止并给�
     非 GENERAL 分类全部走同一 agent_node，分类结果不影响 Agent 行为
   - 分类步骤增加了额外的 LLM 调用成本，无业务价值
   - Agent（LLM + bind_tools）自身能根据消息内容自主判断是否调用工具
+
+变更说明（2026-07-08）：
+  移除了 format_response_node，原因：
+  - token 流（stream_mode="messages"）已负责面向用户的文本输出
+  - agent_node 直接设置 is_complete: True 结束图，无需中间节点
+  - thinking/result SSE 事件已移除，用户通过 token 通道看到打字机效果
 
 未来扩展（人机交互）：
   safe_tools_node 中检测危险操作 → interrupt() 暂停
@@ -53,7 +59,7 @@ _MAX_AGENT_ITERATIONS = 10
 
 def route_after_agent(
     state: AgentState,
-) -> Literal["tools", "format_response"]:
+) -> Literal["tools", "__end__"]:
     """Agent 决策后路由：继续调用工具 vs 给出最终回答。
 
     检查 state["messages"] 最后一条 AIMessage.tool_calls（LangChain 标准模式）：
@@ -80,7 +86,7 @@ def route_after_agent(
         answer_length=len(state.get("final_answer") or ""),
         total_iterations=len(state.get("trace_iterations", [])),
     )
-    return "format_response"
+    return "__end__"
 
 
 # =============================================================================
@@ -98,7 +104,7 @@ async def agent_node(state: AgentState) -> dict[str, Any]:
 
     LLM 决定：
       - 调用工具：AIMessage.tool_calls 非空 → 图自动路由到 safe_tools_node
-      - 给出回答：AIMessage.content → 图自动路由到 format_response
+      - 给出回答：AIMessage.content → 图路由到 END（agent_node 设置 is_complete: True）
 
     Args:
         state: 当前 AgentState，需含 user_message, conn_config, messages。
@@ -120,6 +126,7 @@ async def agent_node(state: AgentState) -> dict[str, Any]:
             "final_answer": (
                 "抱歉，当前问题分析步骤较多，已超出我的处理上限。请尝试简化问题或分步提问。"
             ),
+            "is_complete": True,
             "trace_iterations": state.get("trace_iterations", [])
             + [
                 {
@@ -177,6 +184,7 @@ async def agent_node(state: AgentState) -> dict[str, Any]:
                     "请切换为支持 function calling 的模型（如 qwen-plus、claude-sonnet 等），"
                     "或联系管理员配置兼容的 LLM 提供商。"
                 ),
+                "is_complete": True,
                 "trace_iterations": state.get("trace_iterations", [])
                 + [
                     {
@@ -273,73 +281,16 @@ async def agent_node(state: AgentState) -> dict[str, Any]:
         trace_entry["final_answer"] = True
         trace_iterations.append(trace_entry)
 
-        # 写入 SSE thinking 事件（LLM 最终思考结果）
-        sse_events.append(
-            {
-                "type": "thinking",
-                "content": final_text[:500] + ("..." if len(final_text) > 500 else ""),
-                "agent_run_id": run_id,
-                "iteration": iteration,
-                "duration_ms": elapsed_ms,
-                "reasoning_type": "concluding",
-            }
-        )
+        # 不再发送 thinking SSE 事件：token 流（stream_mode="messages"）
+        # 已负责面向用户的逐字文本输出，"thinking" 事件已从协议中移除
 
         return {
             "messages": [response],  # AIMessage（无 tool_calls）
             "final_answer": final_text,
+            "is_complete": True,
             "trace_iterations": trace_iterations,
             "sse_events": sse_events,
         }
-
-
-def format_response_node(state: AgentState) -> dict[str, Any]:
-    """Step 6: 最终响应格式化节点。
-
-    将 Agent 的最终回答封装为 SSE 兼容的消息格式。
-    累积所有消息到 state.messages 列表，
-    外部 SSE 流引擎据此发送 done 事件。
-
-    Args:
-        state: 当前 AgentState，需含 final_answer。
-
-    Returns:
-        包含 messages 和 is_complete 的更新 dict。
-    """
-    run_id = state.get("run_id", "")
-    final_answer = state.get("final_answer") or ""
-    # 从 trace_iterations 中统计实际调用的工具数（替代已移除的 pending_tool_results）
-    trace_entries = state.get("trace_iterations", [])
-    tools_called = sum(1 for entry in trace_entries if entry.get("tool_calls"))
-
-    logger.info(
-        "图节点执行: format_response（格式化响应）",
-        run_id=run_id,
-        answer_length=len(final_answer),
-        tools_called=tools_called,
-        total_iterations=len(trace_entries),
-    )
-
-    sse_events = list(state.get("sse_events", []))
-    sse_events.append(
-        {
-            "type": "result",
-            "summary": final_answer,
-            "tool_calls_made": tools_called,
-        }
-    )
-
-    logger.info(
-        "图节点执行完成: format_response（格式化响应）",
-        run_id=run_id,
-        answer_preview=final_answer[:200] if final_answer else "(空)",
-        tools_called=tools_called,
-    )
-
-    return {
-        "sse_events": sse_events,
-        "is_complete": True,
-    }
 
 
 # =============================================================================
@@ -348,15 +299,18 @@ def format_response_node(state: AgentState) -> dict[str, Any]:
 
 
 def build_agent_graph() -> CompiledStateGraph:
-    """构建 Agent 状态图（2026-07 重构：移除了意图分类）。
+    """构建 Agent 状态图（2026-07 重构：移除了意图分类 + format_response）。
 
     图结构：
       agent → route_after_agent（条件边）
         ├── "tools" → safe_tools_node → agent（ReAct 循环）
-        └── "format_response" → format_response_node → END
+        └── "__end__" → END（agent_node 直接设置 is_complete: True）
 
-    外部通过 graph.astream(initial_state, stream_mode="values") 执行，
+    外部通过 graph.astream(initial_state, stream_mode=["updates", "messages"]) 执行，
     从 state["sse_events"] 读取 SSE 事件并序列化为 SSE 流。
+
+    MemorySaver checkpointer 在每次 node 完成后自动保存完整 state 快照，
+    支持调试时查询任意 checkpoint。
 
     变更（2026-07-04）：
       移除了 classify_node（原本在入口之前做 5 分类），
@@ -364,9 +318,16 @@ def build_agent_graph() -> CompiledStateGraph:
       移除了 IntentRouter（LLM 分类调用）。
       Agent 入口直接为 agent_node，LLM 自主判断是否调用工具。
 
+    变更（2026-07-08）：
+      移除了 format_response_node（thinking/result SSE 事件已废弃），
+      agent_node 在最终回答和超上限时直接设置 is_complete: True，
+      图编译时传入 MemorySaver checkpointer 用于状态快照。
+
     Returns:
         编译后的 LangGraph 图，可直接执行。
     """
+    from langgraph.checkpoint.memory import MemorySaver  # noqa: I001
+
     from app.agent.tool_node import safe_tools_node  # noqa: I001
 
     workflow = StateGraph(AgentState)
@@ -374,7 +335,6 @@ def build_agent_graph() -> CompiledStateGraph:
     # ── 注册节点 ──
     workflow.add_node("agent", agent_node)
     workflow.add_node("tools", safe_tools_node)
-    workflow.add_node("format_response", format_response_node)
 
     # ── 入口：直接进入 Agent ──
     workflow.set_entry_point("agent")
@@ -385,17 +345,16 @@ def build_agent_graph() -> CompiledStateGraph:
         route_after_agent,
         {
             "tools": "tools",
-            "format_response": "format_response",
+            "__end__": END,
         },
     )
 
     # ── tools → agent（结果返回，继续决策） ──
     workflow.add_edge("tools", "agent")
 
-    # ── format_response → END ──
-    workflow.add_edge("format_response", END)
-
-    return workflow.compile()
+    # ── 编译图（MemorySaver 自动保存 checkpoint 快照） ──
+    checkpointer = MemorySaver()
+    return workflow.compile(checkpointer=checkpointer)
 
 
 # =============================================================================

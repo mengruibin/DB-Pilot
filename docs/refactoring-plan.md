@@ -162,6 +162,8 @@
 
 **状态**：✅ 已完成
 
+> **后续变更（2026-07-08）**：`format_response_node` 已删除。token 流（`stream_mode="messages"`）替代了 thinking/result SSE 事件，agent_node 直接设置 `is_complete: True` 结束图。见 `docs/optimization-plan.md`。
+
 **目标**：build_agent_graph() 使用标准 LangGraph 模式
 
 **要做的事**：

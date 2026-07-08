@@ -58,6 +58,11 @@ def build_chat_model(
         "timeout": float(timeout),
     }
 
+    # streaming=True 是必须的：LangGraph stream_mode="messages" 依赖它来
+    # 拦截 LLM 内部流式调用并将 token chunk 暴露给 astream 迭代器。
+    # ChatAnthropic 和 ChatOpenAI 都支持此参数。
+    _common["streaming"] = True
+
     if provider == "anthropic":
         return ChatAnthropic(**_common)  # pyright: ignore[reportCallIssue]
 

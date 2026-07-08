@@ -5,7 +5,8 @@ SSE 对话流 API 路由。
   1. 接收用户消息 + 会话管理 + 连接解析
   2. 构建 AgentState → 执行 LangGraph ReAct Agent 图
   3. LLM 自主决定工具调用 → 图自动路由 agent ↔ tools（ReAct 循环）
-  4. 通过 SSE 流式推送 thinking/tool_call/tool_result/sql/result/done 事件
+  4. 通过 SSE 流式推送 token/tool_call/tool_result/sql/done 事件
+  5. 双通道 streaming：messages（用户可见 token 流）+ updates（系统状态增量）
 
 变更（2026-07-04）：
   移除了意图分类步骤（classify_node），Agent 入口直接为 agent_node。
@@ -303,7 +304,10 @@ async def _resolve_connection_config(
 #
 # 旧 _execute_tool_chain() 函数 (~460行) 已于 2026-07-02 删除。
 # 所有工具编排逻辑现在由 app/agent/graph.py 中的 LangGraph StateGraph 处理：
-#   classify_node → route → agent_node ↔ tools_node → format_response
+#   agent_node ↔ tools_node（ReAct 循环）→ END
+#
+# 2026-07-08：stream_mode 从 "values" 改为 "updates"，
+#   双通道 streaming（messages + updates），移除 thinking/result 事件。
 # =============================================================================
 
 
@@ -487,7 +491,6 @@ async def _stream_events(
         SSE 格式化的事件字符串。
     """
     session: SessionModel | None = None
-    assistant_content_parts: list[str] = []
     total_tokens = 0
     cancel_event = asyncio.Event()
 
@@ -575,43 +578,115 @@ async def _stream_events(
             }
 
             graph = build_agent_graph()
+            # accumulated_state：累积各节点状态增量（final_answer、trace_iterations 等）
+            # 不同于 "values" 模式的完整状态，"updates" 模式仅返回每个节点的增量
+            accumulated_state: dict[str, Any] = {}
+            # sse_events 去重计数器：每个节点返回的是全量 sse_events 列表
+            # （agent_node/tools_node 从 state 读取全量历史、追加新事件后返回全量），
+            # 用 emitted_count 追踪已发射事件数，避免重复发射
             emitted_count = 0
 
-            # 使用 stream_mode="values" 获取每次节点执行后的完整状态
-            async for state in graph.astream(initial_state, stream_mode="values"):
-                # 检查取消信号
-                if cancel_event.is_set():
-                    logger.info("SSE 流被取消（cancel_event 触发）", session_id=session.id)
-                    yield format_sse(
-                        {
-                            "type": "done",
-                            "session_id": session.id,
-                            "tokens_used": total_tokens,
-                            "agent_run_id": run_id,
-                        }
+            # 使用 stream_mode=["updates", "messages"] 双通道流式：
+            # "updates" → 每个节点执行后的状态增量 {node_name: state_delta}
+            # "messages" → (AIMessageChunk, metadata) 逐 token 流
+            # config 传入 thread_id 用于 MemorySaver checkpoint 追踪
+            # 注意：LangGraph astream 在联合 stream_mode 时可能返回 2 元组 (mode, data)
+            # 或 3 元组 (namespace, mode, data)，取决于是否有子图
+            async for stream_item in graph.astream(
+                initial_state,
+                stream_mode=["updates", "messages"],
+                config={"configurable": {"thread_id": session.id}},
+            ):
+                # ── 解析 astream 输出（兼容 2 元组和 3 元组） ──
+                if len(stream_item) == 3:
+                    _namespace, mode, data = stream_item
+                else:
+                    mode, data = stream_item
+
+                # ── 处理 LLM Token 流（优化方案：逐 token 推送） ──
+                if mode == "messages":
+                    # LangGraph stream_mode="messages" 每次 yield 一个单独的事件：
+                    # data 直接就是 (AIMessageChunk, metadata_dict) 元组，不是列表
+                    if isinstance(data, tuple) and len(data) >= 2:
+                        # 从元组中提取 chunk 和 metadata dict
+                        chunk = data[0]
+                        meta = data[1] if isinstance(data[1], dict) else {}
+                        node_name = str(meta.get("langgraph_node", "") or "")
+                        if node_name == "agent":
+                            content = str(getattr(chunk, "content", "") or "")
+                            if content.strip():
+                                yield format_sse(
+                                    {
+                                        "type": "token",
+                                        "content": content,
+                                        "agent_run_id": run_id,
+                                    }
+                                )
+                    continue
+
+                # ── mode == "updates"：处理节点状态增量 ──
+                # "updates" 模式返回 {node_name: state_delta}，
+                # 每个 delta 仅包含该节点返回的字段（增量而非全量）
+                # data 在此分支中为 dict[str, dict]（非 str/tuple）
+                updates: dict[str, dict[str, Any]] = data  # type: ignore[assignment]
+                completed = False
+                for node_name, node_output in updates.items():
+                    # 检查取消信号（在每个节点增量处理后检查）
+                    if cancel_event.is_set():
+                        logger.info(
+                            "SSE 流被取消（cancel_event 触发）",
+                            session_id=session.id,
+                            node=node_name,
+                        )
+                        yield format_sse(
+                            {
+                                "type": "done",
+                                "session_id": session.id,
+                                "tokens_used": total_tokens,
+                                "agent_run_id": run_id,
+                            }
+                        )
+                        return
+
+                    # 发射本节点的 SSE 事件（tool_call / tool_result / sql / error）
+                    # 注意：节点返回的是全量 sse_events 列表（含历史事件），
+                    # 必须用 emitted_count 去重，只发射新增部分
+                    sse_events: list[dict[str, Any]] = node_output.get("sse_events", [])
+                    for msg in sse_events[emitted_count:]:
+                        if msg:
+                            yield format_sse(msg)
+                    emitted_count = len(sse_events)
+
+                    # 累积状态增量（跳过 messages 和 sse_events：
+                    # messages 由 LangGraph add_messages reducer 管理，
+                    # sse_events 已即时发射无需累积）
+                    for key, value in node_output.items():
+                        if key in ("sse_events", "messages"):
+                            continue
+                        accumulated_state[key] = value
+
+                    logger.info(
+                        "节点执行完成",
+                        node=node_name,
+                        run_id=run_id,
+                        delta_keys=list(node_output.keys()),
+                        sse_event_count=len(sse_events),
                     )
-                    return
 
-                # 发射新增的 SSE 事件
-                sse_events: list[dict[str, Any]] = state.get("sse_events", [])  # type: ignore[assignment]
-                for msg in sse_events[emitted_count:]:
-                    if msg:
-                        yield format_sse(msg)
-                        # 收集助手回复片段
-                        if msg.get("type") == "result":
-                            assistant_content_parts.append(msg.get("summary", ""))
-                emitted_count = len(sse_events)
+                    # agent_node 最终回答/超上限/工具绑定失败时设置 is_complete
+                    if node_output.get("is_complete"):
+                        completed = True
+                        break
 
-                # 检查图是否执行完毕
-                if state.get("is_complete"):
+                if completed:
                     break
 
             # ========== Step 4: 保存助手消息 ==========
-            assistant_content = "\n".join(filter(None, assistant_content_parts))
-            if not assistant_content:
-                assistant_content = state.get("final_answer") or "已完成"
+            # 不再拼接 result 事件摘要（result 事件已移除），
+            # 直接使用 agent_node 设置的 final_answer
+            assistant_content = accumulated_state.get("final_answer") or "已完成"
             # 构建 Agent Trace（B-31 可观测性）
-            trace_iterations = state.get("trace_iterations", [])
+            trace_iterations = accumulated_state.get("trace_iterations", [])
             agent_trace = (
                 json.dumps(
                     {
@@ -630,7 +705,7 @@ async def _stream_events(
                 session.id,
                 "assistant",
                 assistant_content,
-                message_type=_infer_message_type(state),
+                message_type=_infer_message_type(accumulated_state),
                 agent_trace=agent_trace,
             )
 
@@ -641,7 +716,7 @@ async def _stream_events(
                     "session_id": session.id,
                     "tokens_used": total_tokens,
                     "agent_run_id": run_id,
-                    "total_iterations": len(state.get("trace_iterations", [])),
+                    "total_iterations": len(accumulated_state.get("trace_iterations", [])),
                 }
             )
 
@@ -655,7 +730,7 @@ async def _stream_events(
                 "type": "done",
                 "session_id": session.id if session else "",
                 "tokens_used": total_tokens,
-                "agent_run_id": run_id if "run_id" in dir() else "",
+                "agent_run_id": locals().get("run_id", ""),
             }
         )
         return

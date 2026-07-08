@@ -12,7 +12,8 @@
 
 ```
 之前: classify → route → general/agent → tools ↔ agent → format → END
-之后:           agent ↔ tools → format → END
+之后（2026-07-04）:    agent ↔ tools → format → END
+之后（2026-07-08）:    agent ↔ tools → END（format_response 已删除）
 ```
 
 Agent 直接处理所有用户消息（包括问候/闲聊），LLM 自己判断是否调用工具。
@@ -50,32 +51,30 @@ Agent 直接处理所有用户消息（包括问候/闲聊），LLM 自己判断
 **修改 `build_agent_graph()`：**
 ```python
 def build_agent_graph() -> CompiledStateGraph:
-    # 新图结构：agent → tools ↔ agent → format → END
+    # 新图结构：agent → tools ↔ agent → END（format_response 已移除）
+    from langgraph.checkpoint.memory import MemorySaver
     workflow = StateGraph(AgentState)
 
     workflow.add_node("agent", agent_node)
     workflow.add_node("tools", safe_tools_node)
-    workflow.add_node("format_response", format_response_node)
 
-    workflow.set_entry_point("agent")  # 直接进入 Agent（原为 classify）
+    workflow.set_entry_point("agent")
 
     workflow.add_conditional_edges(
         "agent",
         route_after_agent,
-        {"tools": "tools", "format_response": "format_response"},
+        {"tools": "tools", "__end__": END},
     )
     workflow.add_edge("tools", "agent")
-    workflow.add_edge("format_response", END)
 
-    return workflow.compile()
+    checkpointer = MemorySaver()
+    return workflow.compile(checkpointer=checkpointer)
 ```
 
-**不变：**
-- `agent_node()` — 无需修改
-- `safe_tools_node` — 无需修改
-- `format_response_node()` — 无需修改
-- `route_after_agent()` — 无需修改
-- `_build_system_prompt()` / `_build_llm_messages()` — 无需修改
+**变更（2026-07-08）：**
+- `format_response_node` 已删除，agent_node 直接设置 `is_complete: True`
+- `route_after_agent` 返回 `Literal["tools", "__end__"]` 而非 `"format_response"`
+- 编译时传入 MemorySaver checkpointer 用于状态快照
 
 ### 任务 2：删除 `router.py`
 

@@ -16,7 +16,7 @@ import { useConnectionStore } from '@/stores/connection'
 import { getSessions, getSessionMessages, renameSession as apiRenameSession, deleteSession as apiDeleteSession } from '@/api/session'
 import type { Session, Message } from '@/types/chat'
 import type { FindingSeverity } from '@/types/report'
-import type { ThinkingEvent, ToolCallEvent, ToolResultEvent, SqlEvent, ResultEvent, TextEvent, ErrorEvent, DoneEvent } from '@/types/chat'
+import type { ThinkingEvent, TokenEvent, ToolCallEvent, ToolResultEvent, SqlEvent, ResultEvent, TextEvent, ErrorEvent, DoneEvent } from '@/types/chat'
 
 // ─── 内部消息类型（Store 展示用） ───
 
@@ -24,6 +24,7 @@ import type { ThinkingEvent, ToolCallEvent, ToolResultEvent, SqlEvent, ResultEve
 export type StoreMessageType =
   | 'text'        // 用户文字 / 纯文本回复
   | 'thinking'    // Agent 推理过程（可折叠）
+  | 'waiting'     // Agent 等待占位（动态点动画 + 计时器）
   | 'tool_call'    // 工具调用步骤卡片
   | 'tool_result'  // 工具返回结果
   | 'sql'         // SQL 代码块
@@ -143,6 +144,15 @@ export const useChatStore = defineStore('chat', () => {
   /** SSE 错误信息 */
   const sseError = ref<string | null>(null)
 
+  // ─── 流式 Token 累加状态（优化方案） ───
+
+  /** 当前累积的流式文本 */
+  const streamingText = ref('')
+  /** 正在流式更新的消息 ID */
+  const streamingMessageId = ref<string | null>(null)
+  /** 是否已收到首个 SSE 事件（防止重复移除 waiting） */
+  const hasReceivedFirstEvent = ref(false)
+
   // ─── F2: 会话管理状态 ───
 
   /** 会话列表加载状态 */
@@ -216,6 +226,45 @@ export const useChatStore = defineStore('chat', () => {
     )
   }
 
+  // ─── 优化方案：等待消息 & 流式 Token 辅助方法 ───
+
+  /** 移除 waiting 占位消息（仅首次调用生效） */
+  function removeWaitingMessage(): void {
+    if (hasReceivedFirstEvent.value) return
+    hasReceivedFirstEvent.value = true
+    const idx = messages.value.findIndex((m) => m.type === 'waiting')
+    if (idx >= 0) messages.value.splice(idx, 1)
+  }
+
+  /** 创建或更新流式 text 消息（token 逐字累加，打字机效果） */
+  function updateStreamingMessage(content: string): void {
+    if (streamingMessageId.value) {
+      const msg = messages.value.find((m) => m.id === streamingMessageId.value)
+      if (msg && msg.type === 'text') {
+        msg.content = content
+        // 触发响应式更新
+        messages.value = [...messages.value]
+      }
+    } else {
+      const msg: StoreMessage = {
+        id: nextMsgId(),
+        sessionId: currentSessionId.value ?? '',
+        role: 'assistant',
+        type: 'text',  // 优化方案：用户可见的流式文本，由 MarkdownRenderer 渲染
+        content: content,
+        createdAt: new Date().toISOString(),
+      }
+      messages.value.push(msg)
+      streamingMessageId.value = msg.id
+    }
+  }
+
+  /** 封存当前流式消息（重置 streaming 状态，保留已累积内容） */
+  function sealStreamingMessage(): void {
+    streamingMessageId.value = null
+    streamingText.value = ''
+  }
+
   // ═══════════════════════════════════════════════════
   //  Actions — SSE 流式连接
   // ═══════════════════════════════════════════════════
@@ -234,11 +283,24 @@ export const useChatStore = defineStore('chat', () => {
     // 1. 添加用户消息
     addUserMessage(text)
 
-    // 2. 设置流式状态
+    // 2. 重置流式状态 + 插入 waiting 占位消息
+    streamingText.value = ''
+    streamingMessageId.value = null
+    hasReceivedFirstEvent.value = false
+    messages.value.push({
+      id: nextMsgId(),
+      sessionId: currentSessionId.value ?? '',
+      role: 'assistant',
+      type: 'waiting',
+      content: '',
+      createdAt: new Date().toISOString(),
+    })
+
+    // 3. 设置流式状态
     isStreaming.value = true
     sseError.value = null
 
-    // 3. 获取连接密码并启动 SSE 连接
+    // 4. 获取连接密码并启动 SSE 连接
     const connectionStore = useConnectionStore()
     const password = connectionStore.getPassword(connectionId)
 
@@ -252,24 +314,51 @@ export const useChatStore = defineStore('chat', () => {
         password,  // AGENTS.md §安全与合规红线：密码仅存于内存，每次请求传入
       },
       {
-        // ── thinking ──
+        // ── token（优化方案：LLM 逐 token 流式输出） ──
+        onToken: (event: TokenEvent) => {
+          removeWaitingMessage()
+          streamingText.value += event.content
+          updateStreamingMessage(streamingText.value)
+        },
+
+        // ── thinking（优化方案：不覆盖 token 流式内容，仅更新 metadata） ──
         onThinking: (event: ThinkingEvent) => {
-          messages.value.push({
-            id: nextMsgId(),
-            sessionId: currentSessionId.value ?? '',
-            role: 'assistant',
-            type: 'thinking',
-            content: event.content,
-            agentRunId: event.agent_run_id,
-            iteration: event.iteration,
-            reasoningType: event.reasoning_type,
-            durationMs: event.duration_ms,
-            createdAt: new Date().toISOString(),
-          })
+          removeWaitingMessage()
+          if (streamingMessageId.value) {
+            // token 流已在输出文本 → 仅更新 metadata，不替换 content
+            const msg = messages.value.find((m) => m.id === streamingMessageId.value)
+            if (msg && msg.type === 'text') {
+              msg.durationMs = event.duration_ms
+              msg.reasoningType = event.reasoning_type
+              msg.agentRunId = event.agent_run_id
+              msg.iteration = event.iteration
+              messages.value = [...messages.value]
+            }
+            // 注意：thinking 不再 sealStreamingMessage()，
+            // token 流可能继续追加到同一 text 消息
+          } else {
+            // 快响应降级：token 流未触发时，推一条 text 消息
+            const msg: StoreMessage = {
+              id: nextMsgId(),
+              sessionId: currentSessionId.value ?? '',
+              role: 'assistant',
+              type: 'text',
+              content: event.content,
+              agentRunId: event.agent_run_id,
+              iteration: event.iteration,
+              reasoningType: event.reasoning_type,
+              durationMs: event.duration_ms,
+              createdAt: new Date().toISOString(),
+            }
+            messages.value.push(msg)
+            sealStreamingMessage()
+          }
         },
 
         // ── tool_call ──
         onToolCall: (event: ToolCallEvent) => {
+          removeWaitingMessage()
+          sealStreamingMessage()
           messages.value.push({
             id: nextMsgId(),
             sessionId: currentSessionId.value ?? '',
@@ -302,6 +391,8 @@ export const useChatStore = defineStore('chat', () => {
 
         // ── sql ──
         onSql: (event: SqlEvent) => {
+          removeWaitingMessage()
+          sealStreamingMessage()
           messages.value.push({
             id: nextMsgId(),
             sessionId: currentSessionId.value ?? '',
@@ -317,24 +408,18 @@ export const useChatStore = defineStore('chat', () => {
           })
         },
 
-        // ── result ──
-        onResult: (event: ResultEvent) => {
-          messages.value.push({
-            id: nextMsgId(),
-            sessionId: currentSessionId.value ?? '',
-            role: 'assistant',
-            type: 'result',
-            content: event.summary,
-            summary: event.summary,
-            dataPreview: event.data_preview,
-            totalRows: event.data_preview?.total_rows ?? 0,
-            executionTimeMs: event.duration_ms,
-            createdAt: new Date().toISOString(),
-          })
+        // ── result（优化方案：不推新消息，token 流已渲染完整文本） ──
+        onResult: (_event: ResultEvent) => {
+          removeWaitingMessage()
+          sealStreamingMessage()
+          // result 事件已从后端移除（Task 1），此处仅保留兼容：
+          // 不再 push 新消息，用户通过 token 通道看到打字机效果
         },
 
         // ── text ──
         onText: (event: TextEvent) => {
+          removeWaitingMessage()
+          sealStreamingMessage()
           messages.value.push({
             id: nextMsgId(),
             sessionId: currentSessionId.value ?? '',
@@ -347,6 +432,8 @@ export const useChatStore = defineStore('chat', () => {
 
         // ── error ──
         onError: (event: ErrorEvent) => {
+          removeWaitingMessage()
+          sealStreamingMessage()
           messages.value.push({
             id: nextMsgId(),
             sessionId: currentSessionId.value ?? '',
@@ -362,6 +449,8 @@ export const useChatStore = defineStore('chat', () => {
 
         // ── done ──
         onDone: (event: DoneEvent) => {
+          removeWaitingMessage()
+          sealStreamingMessage()
           isStreaming.value = false
           currentSessionId.value = event.session_id
           // 更新最后一条助手消息的 token 计数及 Agent 汇总信息
@@ -377,12 +466,16 @@ export const useChatStore = defineStore('chat', () => {
 
         // ── disconnect ──
         onDisconnect: (reason: string) => {
+          removeWaitingMessage()
+          sealStreamingMessage()
           isStreaming.value = false
           sseError.value = reason
         },
 
         // ── timeout ──
         onTimeout: () => {
+          removeWaitingMessage()
+          sealStreamingMessage()
           isStreaming.value = false
           sseError.value = '响应超时（120s 无消息）'
         },
@@ -396,6 +489,10 @@ export const useChatStore = defineStore('chat', () => {
    */
   async function cancelStreaming(): Promise<void> {
     if (!isStreaming.value) return
+
+    // 清理 waiting 占位和流式累加状态
+    removeWaitingMessage()
+    sealStreamingMessage()
 
     const sessionId = currentSessionId.value
     try {
@@ -618,6 +715,11 @@ export const useChatStore = defineStore('chat', () => {
     inputMode,
     sseConnected,
     sseError,
+
+    // 优化方案：流式 Token 累加状态
+    streamingText,
+    streamingMessageId,
+    hasReceivedFirstEvent,
 
     // F2: 会话管理状态
     sessionsLoading,

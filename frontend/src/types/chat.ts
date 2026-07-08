@@ -108,6 +108,17 @@ export interface ExplainResponse {
 
 // ─── SSE 事件类型 ───
 
+/** SSE 事件：LLM Token 流式输出块（逐 token/块推送） */
+export interface TokenEvent {
+  type: 'token'
+  /** 增量文本片段 */
+  content: string
+  /** Agent 运行唯一 ID */
+  agent_run_id?: string
+  /** 当前是 Agent 第几轮 ReAct 迭代 */
+  iteration?: number
+}
+
 /** SSE 事件：Agent 推理过程 */
 export interface ThinkingEvent {
   type: 'thinking'
@@ -205,6 +216,7 @@ export interface DoneEvent {
 /** SSE 事件联合类型 */
 export type SSEEvent =
   | ThinkingEvent
+  | TokenEvent
   | ToolCallEvent
   | ToolResultEvent
   | SqlEvent
@@ -216,6 +228,7 @@ export type SSEEvent =
 /** SSE 事件回调映射 */
 export interface SSEEventCallbacks {
   onThinking?: (event: ThinkingEvent) => void
+  onToken?: (event: TokenEvent) => void
   onToolCall?: (event: ToolCallEvent) => void
   onToolResult?: (event: ToolResultEvent) => void
   onSql?: (event: SqlEvent) => void

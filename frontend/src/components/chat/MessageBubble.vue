@@ -54,6 +54,34 @@ onUnmounted(() => {
   if (timerInterval) clearInterval(timerInterval)
 })
 
+// ─── waiting 计时器 ───
+
+const waitingStartTime = ref(0)
+const waitingElapsed = ref(0)
+let waitingTimerInterval: ReturnType<typeof setInterval> | null = null
+
+/** 格式化 waiting 耗时 X.Xs */
+const formattedWaitingElapsed = computed(() => {
+  const sec = waitingElapsed.value / 1000
+  return `${sec.toFixed(1)}s`
+})
+
+onMounted(() => {
+  if (props.message.type === 'waiting') {
+    waitingStartTime.value = Date.now()
+    waitingTimerInterval = setInterval(() => {
+      waitingElapsed.value = Date.now() - waitingStartTime.value
+    }, 100)
+  }
+})
+
+onUnmounted(() => {
+  if (waitingTimerInterval) {
+    clearInterval(waitingTimerInterval)
+    waitingTimerInterval = null
+  }
+})
+
 /** 格式化耗时 mm:ss.x */
 function formatElapsed(ms: number): string {
   const sec = Math.floor(ms / 1000)
@@ -134,6 +162,19 @@ const resultRows = computed(() => {
         <!-- === text（Markdown 渲染） === -->
         <template v-if="message.type === 'text'">
           <MarkdownRenderer :content="message.content" />
+        </template>
+
+        <!-- === waiting（优化方案：Agent 等待占位，动态点 + 计时器） === -->
+        <template v-if="message.type === 'waiting'">
+          <div class="waiting-content">
+            <div class="dot-container">
+              <span class="dot"></span>
+              <span class="dot"></span>
+              <span class="dot"></span>
+            </div>
+            <span class="waiting-label">AI 正在分析</span>
+            <span class="waiting-timer">{{ formattedWaitingElapsed }}</span>
+          </div>
         </template>
 
         <!-- === thinking === -->
@@ -303,6 +344,50 @@ const resultRows = computed(() => {
 .assistant-text {
   color: var(--text-primary);
   white-space: pre-wrap;
+}
+
+/* ─── waiting 占位（优化方案） ─── */
+.waiting-content {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+}
+
+.waiting-label {
+  font-size: 13px;
+  color: var(--text-secondary);
+  font-weight: 450;
+}
+
+.waiting-timer {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-tertiary);
+}
+
+/* ─── 三点脉冲（从 ThinkingIndicator 复用） ─── */
+.dot-container {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--text-tertiary);
+  animation: dot-bounce 1.4s ease-in-out infinite both;
+}
+
+.dot:nth-child(1) { animation-delay: 0s; }
+.dot:nth-child(2) { animation-delay: 0.2s; }
+.dot:nth-child(3) { animation-delay: 0.4s; }
+
+@keyframes dot-bounce {
+  0%, 80%, 100% { opacity: 0.3; transform: scale(0.8); }
+  40% { opacity: 1; transform: scale(1.1); }
 }
 
 /* ─── 打字光标 ─── */

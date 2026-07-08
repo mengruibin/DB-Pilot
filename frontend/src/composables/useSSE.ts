@@ -101,6 +101,9 @@ export function useSSE() {
       case 'thinking':
         userCallbacks?.onThinking?.(payload as any)
         break
+      case 'token':
+        userCallbacks?.onToken?.(payload as any)
+        break
       case 'tool_call':
         userCallbacks?.onToolCall?.(payload as any)
         break

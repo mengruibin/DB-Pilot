@@ -192,7 +192,7 @@
 | **关联契约** | api-contract §1.2 SSE 事件类型；PRD §4.2 Agent 工作流 6 步；backend AGENTS.md §技术栈约束（LangGraph>=0.3.0） |
 | **输入** | PRD §6.3 Agent 设计（工具注册表、意图路由流程） |
 | **输出物** | `backend/app/agent/state.py`（增强）、`backend/app/agent/router.py`、`backend/app/agent/graph.py`（重写）、`backend/app/agent/safety.py`（新增）、`backend/app/agent/tools/registry.py`（新增）、`backend/app/agent/sse_utils.py`（新增） |
-| **验收标准** | 1. `AgentState` TypedDict 含：`user_message`/`connection_id`/`session_id`/`conn_config`/`pending_tool_calls`/`pending_tool_results`/`final_answer`/`run_id`/`trace_iterations` 等字段<br>2. `IntentRouter.classify()` 保留两层分类（关键词+LLM回退），作为 classify_node 核心逻辑<br>3. LangGraph 图节点真正执行工具（非骨架）：`classify` → route → `agent` ↔ `tools` → `format_response` / `general`<br>4. `agent_node` 调用 LLM（带工具定义），自主决定工具调用或给出最终回答<br>5. `tools_node` 执行工具前运行安全护栏链（SQL审计+只读检查）<br>6. **2026-07-02 重写**：图节点从骨架代码改为真正执行工具，LLM 自主决策工具调用顺序 |
+| **验收标准** | 1. `AgentState` TypedDict 含：`user_message`/`connection_id`/`session_id`/`conn_config`/`pending_tool_calls`/`pending_tool_results`/`final_answer`/`run_id`/`trace_iterations` 等字段<br>2. `IntentRouter.classify()` 保留两层分类（关键词+LLM回退），作为 classify_node 核心逻辑<br>3. LangGraph 图节点真正执行工具（非骨架）：`classify` → route → `agent` ↔ `tools` → `format_response` / `general`<br>4. `agent_node` 调用 LLM（带工具定义），自主决定工具调用或给出最终回答<br>5. `tools_node` 执行工具前运行安全护栏链（SQL审计+只读检查）<br>6. **2026-07-02 重写**：图节点从骨架代码改为真正执行工具，LLM 自主决策工具调用顺序<br>7. **2026-07-08 后续变更**：`format_response_node` 已删除，`agent_node` 直接设置 `is_complete` 结束图；SSE 流改为双通道 `["updates","messages"]`，thinking/result 事件由 token 流替代 |
 | **前置依赖** | B-01、B-26（LLMClient Tool Calling 增强） |
 | **继承 TODO** | 无 |
 | **状态** | 已完成 |

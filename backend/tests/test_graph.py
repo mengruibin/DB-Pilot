@@ -20,7 +20,7 @@ os.environ.setdefault("LLM_API_KEY", "test-key")
 os.environ.setdefault("LLM_MODEL", "test-model")
 os.environ.setdefault("DATABASE_URL", "sqlite+aiosqlite:///test.db")
 
-from app.agent.graph import build_agent_graph  # noqa: E402
+from app.agent.graph import build_agent_graph  # noqa: E402, I001
 # from app.agent.state import Intent  # noqa: E402
 
 # =============================================================================
@@ -49,19 +49,23 @@ class TestGraphStructure:
         assert "general" not in graph.nodes
 
     def test_required_nodes_exist(self):
-        """图中应存在 agent/tools/format_response 节点。"""
+        """图中应存在 agent/tools 节点（format_response 已在 2026-07 移除）。"""
         graph = build_agent_graph()
         assert "agent" in graph.nodes
         assert "tools" in graph.nodes
-        assert "format_response" in graph.nodes
+
+    def test_format_response_removed(self):
+        """图中不应存在 format_response 节点（2026-07 已删除）。"""
+        graph = build_agent_graph()
+        assert "format_response" not in graph.nodes
 
     def test_only_expected_nodes(self):
-        """图中仅应有 agent/tools/format_response（以及 LangGraph 内置 __start__）。"""
+        """图中仅应有 agent/tools（以及 LangGraph 内置 __start__）。"""
         graph = build_agent_graph()
         actual_nodes = set(graph.nodes.keys())
         # LangGraph 自动添加 __start__ 内部节点
-        assert actual_nodes >= {"agent", "tools", "format_response"}
-        assert actual_nodes - {"__start__", "agent", "tools", "format_response"} == set()
+        assert actual_nodes >= {"agent", "tools"}
+        assert actual_nodes - {"__start__", "agent", "tools"} == set()
 
 
 # =============================================================================
