@@ -164,18 +164,21 @@ class MySQLAdapter(BaseAdapter):
             async with self._pool.acquire() as conn, conn.cursor() as cur:
                 # 参数化查询：params dict 转为位置参数列表
                 param_values = list(params.values()) if params else []
-                await cur.execute(sql, param_values)
-                rows = await cur.fetchall()
+                # cur.execute() 返回值：SELECT 返回行数，INSERT/UPDATE/DELETE 返回影响行数
+                affected = await cur.execute(sql, param_values)
+                rows = await cur.fetchall() if cur.description else []
                 columns = [desc[0] for desc in cur.description] if cur.description else []
 
             elapsed = int((time.monotonic() - start) * 1000)
             logger.debug("MySQL 查询完成",
                          sql=sql[:200], execution_time_ms=elapsed,
-                         rows_returned=len(rows))
+                         rows_returned=len(rows),
+                         affected_rows=affected)
             return {
                 "columns": columns,
                 "rows": [list(row) for row in rows],
                 "total_rows": len(rows),
+                "affected_rows": affected,  # 写操作时为影响行数，读操作时 = total_rows
                 "execution_time_ms": elapsed,
                 "is_readonly": True,
                 "audit_status": "passed",

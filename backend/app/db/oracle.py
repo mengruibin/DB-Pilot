@@ -140,17 +140,27 @@ class OracleAdapter(BaseAdapter):
 
             async with self._conn.cursor() as cur:
                 await cur.execute(sql, param_values)
-                rows = await cur.fetchall() if cur.description else []
-                columns = [desc[0] for desc in cur.description] if cur.description else []
+                if cur.description:
+                    # 读操作：有结果集返回
+                    rows = await cur.fetchall()
+                    columns = [desc[0] for desc in cur.description]
+                    affected = len(rows)
+                else:
+                    # 写操作：无结果集，cur.rowcount 即为影响行数
+                    affected = cur.rowcount
+                    rows = []
+                    columns = []
 
             elapsed = int((time.monotonic() - start) * 1000)
             logger.debug("Oracle 查询完成",
                          sql=sql[:200], execution_time_ms=elapsed,
-                         rows_returned=len(rows))
+                         rows_returned=len(rows),
+                         affected_rows=affected)
             return {
                 "columns": columns,
                 "rows": [list(row) for row in rows],
                 "total_rows": len(rows),
+                "affected_rows": affected,  # 写操作时为影响行数，读操作时 = total_rows
                 "execution_time_ms": elapsed,
                 "is_readonly": True,
                 "audit_status": "passed",

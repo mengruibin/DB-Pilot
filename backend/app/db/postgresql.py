@@ -140,22 +140,41 @@ class PostgresAdapter(BaseAdapter):
         try:
             # asyncpg 使用 $1, $2 位置参数，将 dict values 转为列表
             param_values = list(params.values()) if params else []
+            # 判断 SQL 类型：INSERT/UPDATE/DELETE 等写操作使用 execute() 获取影响行数
+            sql_upper = sql.strip().upper()
+            is_write = any(sql_upper.startswith(kw) for kw in [
+                "INSERT", "UPDATE", "DELETE", "TRUNCATE", "CREATE",
+                "ALTER", "DROP", "GRANT", "REVOKE", "MERGE", "REPLACE",
+            ])
 
             async with self._pool.acquire() as conn:
                 # 设置当前会话的 statement_timeout（30s 执行保护）
                 await conn.execute("SET statement_timeout = '30000'")
-                # 使用 fetch() 返回所有行
-                rows = await conn.fetch(sql, *param_values)
-                columns = list(rows[0].keys()) if rows else []
+
+                if is_write:
+                    # 写操作：execute() 返回状态字符串如 "INSERT 0 1"、"UPDATE 3"
+                    status = await conn.execute(sql, *param_values)
+                    # 状态字符串最后一个 token 即为影响行数
+                    parts = status.split()
+                    affected = int(parts[-1]) if parts and parts[-1].isdigit() else 0
+                    rows = []
+                    columns = []
+                else:
+                    # 读操作：使用 fetch() 返回所有行
+                    rows = await conn.fetch(sql, *param_values)
+                    columns = list(rows[0].keys()) if rows else []
+                    affected = len(rows)
 
             elapsed = int((time.monotonic() - start) * 1000)
             logger.debug("PostgreSQL 查询完成",
                          sql=sql[:200], execution_time_ms=elapsed,
-                         rows_returned=len(rows))
+                         rows_returned=len(rows),
+                         affected_rows=affected)
             return {
                 "columns": columns,
                 "rows": [list(row.values()) for row in rows],
                 "total_rows": len(rows),
+                "affected_rows": affected,  # 写操作时为影响行数，读操作时 = total_rows
                 "execution_time_ms": elapsed,
                 "is_readonly": True,
                 "audit_status": "passed",
