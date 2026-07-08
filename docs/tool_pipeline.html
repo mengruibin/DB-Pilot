@@ -107,10 +107,9 @@
 flowchart TD
     subgraph Layer0["📦 Layer 0 — 安全护栏 (safe_tools_node)"]
         direction TB
-        SA1["SQLAuditCheck<br/>sqlglot AST 解析"]
-        SA2["ReadOnlyCheck<br/>角色权限（预留桩）"]
+        SA1["SQLAuditCheck<br/>sqlglot AST 解析 + 角色权限"]
         SA3["PerformanceCheck<br/>性能静态分析"]
-        SA1 --> SA2 --> SA3
+        SA1 --> SA3
     end
 
     subgraph Layer1["📦 Layer 1 — 工具内部二次审计 (run_query)"]
@@ -186,12 +185,10 @@ flowchart TD
       <td><strong>安全护栏链</strong></td>
       <td class="muted">
         safety.py → SQLAuditCheck<br/>
-        safety.py → ReadOnlyCheck<br/>
         safety.py → PerformanceCheck
       </td>
       <td>
-        SQLAuditCheck: INSERT 不在 _FORBIDDEN_STATEMENTS，不在 _ADMIN_ONLY_STATEMENTS<br/>
-        ReadOnlyCheck: 预留桩，注释写"由 SQLAuditCheck 确保只读"<br/>
+        SQLAuditCheck: INSERT 不在 _FORBIDDEN_STATEMENTS，不在 _ADMIN_ONLY_STATEMENTS（ReadOnlyCheck 已合并至此，`_ADMIN_ONLY` 已新增 INSERT/MERGE）<br/>
         PerformanceCheck: INSERT 非 SELECT，跳过
       </td>
       <td><span class="badge badge-yellow">放行</span></td>
@@ -245,7 +242,7 @@ flowchart TD
 <strong>但这属于"偶然防御"，不是设计意图：</strong>
 </p>
 <ul style="margin: 8px 0 0 20px; font-size: 14px; line-height: 2;">
-  <li><code>ReadOnlyCheck</code> 注释明确写 "由 SQLAuditCheck 确保只读"，但 <code>SQLAuditCheck</code> 的 <code>_check_statement_type()</code> 根本<strong>没有处理 INSERT</strong></li>
+  <li>ReadOnlyCheck 已在后续重构中移除（功能合并至 SQLAuditCheck 的 <code>_ADMIN_ONLY_STATEMENTS</code>，新增了 INSERT/MERGE）</li>
   <li>INSERT 安全通过所有应用层检查，白白消耗了两次 LLM 推理 + 一次 MySQL 连接</li>
   <li>如果未来支持开启读写事务的适配器（如 PostgreSQL 未设置 READ ONLY），INSERT 将<strong>直接被写入数据库</strong></li>
   <li>应该在 <code>sql_auditor.py</code> 的 <code>_ADMIN_ONLY_STATEMENTS</code> 中加入 INSERT/MERGE，在应用层就拦截</li>

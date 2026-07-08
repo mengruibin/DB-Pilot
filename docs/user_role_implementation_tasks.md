@@ -108,7 +108,6 @@ POST /api/chat/stream  (或 /api/troubleshoot/stream)
   │
   ├─→ safe_tools_node
   │     ├─→ SQLAuditCheck(user_role) ← INSERT/UPDATE/DELETE 需 admin
-  │     └─→ ReadOnlyCheck(user_role)
   │
   ├─→ run_query() / explain_query() / ...
   │     ├─→ audit(sql, user_role=...) ← 工具内二次审计

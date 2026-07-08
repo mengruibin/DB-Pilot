@@ -5,9 +5,8 @@ Agent 安全护栏（B-30）。
 安全护栏不参与 Agent 决策逻辑，仅约束工具的执行。
 
 护栏链执行顺序：
-  1. SQLAuditCheck — 对 SQL 类工具进行 sqlglot 审计
-  2. ReadOnlyCheck — 非 admin 角色仅允许只读操作
-  3. ConnectionLimitCheck — 限制单次会话最大查询次数（预留）
+  1. SQLAuditCheck — 对 SQL 类工具进行 sqlglot 审计，含只读角色权限拦截
+  2. ConnectionLimitCheck — 限制单次会话最大查询次数（预留）
 """
 
 from __future__ import annotations
@@ -60,12 +59,15 @@ class SafetyCheck(ABC):
 
 
 class SQLAuditCheck(SafetyCheck):
-    """SQL 审计护栏。
+    """SQL 审计护栏（含只读角色权限拦截）。
 
-    对 execute_sql / explain_query 工具中传入的 SQL 执行 sqlglot 审计。
+    对 execute_sql / explain_query 工具中传入的 SQL 执行 sqlglot 审计，
+    同时负责非 admin 角色的只读权限拦截（通过 _ADMIN_ONLY_STATEMENTS）。
+    不再需要独立的 ReadOnlyCheck 护栏。
+
     依据 AGENTS.md §安全与合规红线：
       - 绝对禁止: DROP/ALTER/TRUNCATE/CREATE/GRANT/REVOKE
-      - DELETE/UPDATE 仅 admin 角色可通过
+      - DELETE/UPDATE/INSERT/MERGE 仅 admin 角色可通过
       - 多语句直接拦截
     """
 
@@ -112,60 +114,6 @@ class SQLAuditCheck(SafetyCheck):
 
         return SafetyResult(blocked=False)
 
-
-class ReadOnlyCheck(SafetyCheck):
-    """只读护栏。
-
-    非 admin 角色的 SQL 操作仅允许 SELECT 只读查询。
-    admin 角色不受此限制。
-    此护栏与 SQLAuditCheck 互补——SQLAuditCheck 检查语句结构，
-    ReadOnlyCheck 检查角色权限。增强后：非 admin + 非 SELECT 直接拦截，
-    不依赖 SQLAuditCheck 兜底。
-    """
-
-    _READONLY_KEYWORDS = frozenset(
-        {
-            "SELECT",
-            "SHOW",
-            "DESC",
-            "DESCRIBE",
-            "EXPLAIN",
-            "WITH",
-            "USE",
-            "SET",
-        }
-    )
-
-    async def check(
-        self,
-        tool_name: str,
-        tool_args: dict[str, Any],
-        conn_config: dict[str, Any],
-    ) -> SafetyResult:
-        """检查角色权限是否允许此操作。"""
-        user_role = conn_config.get("user_role", "standard")
-
-        # admin 角色不受限制
-        if user_role == "admin":
-            return SafetyResult(blocked=False)
-
-        # 非 SQL 类工具不检查读写权限
-        if tool_name not in ("execute_sql",):
-            return SafetyResult(blocked=False)
-
-        # 对非 admin 角色：检测 SQL 首词，非只读关键字则拦截
-        sql = (tool_args.get("sql") or "").strip().upper()
-        first_word = sql.split(maxsplit=1)[0] if sql else ""
-        if first_word and first_word not in self._READONLY_KEYWORDS:
-            return SafetyResult(
-                blocked=True,
-                reason=(
-                    f"当前用户角色为「{user_role}」，仅允许只读操作。"
-                    f"语句以 {first_word} 开头，已被只读护栏拦截"
-                ),
-            )
-
-        return SafetyResult(blocked=False)
 
 
 class ConnectionLimitCheck(SafetyCheck):
@@ -377,6 +325,5 @@ def _default_checks() -> list[SafetyCheck]:
     """返回默认安全护栏链。"""
     return [
         SQLAuditCheck(),
-        ReadOnlyCheck(),
         PerformanceCheck(),  # SQL 性能静态分析（非阻断，仅警告）
     ]

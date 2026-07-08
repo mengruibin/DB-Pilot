@@ -28,7 +28,7 @@ LLM 在最后一步放弃了，因为它读取到 `run_query` 工具的 LangChai
 
 但系统的真实能力是：当 `user_role=admin` 时：
 - **SQLAuditCheck** 放行 INSERT/UPDATE/DELETE
-- **ReadOnlyCheck** 对 admin 角色不拦截
+- **ReadOnlyCheck** 对 admin 角色不拦截 （后续于 2026-07-08 移除 ReadOnlyCheck 类，功能合并至 SQLAuditCheck）
 - **MySQL 适配器** 对 admin 角色跳过 `SET SESSION TRANSACTION READ ONLY`
 
 **问题不在安全层，而在 LLM 通信层**——工具名称和描述告诉 LLM 的信息 ≠ 工具实际能力。
@@ -92,6 +92,8 @@ SELECT → `true`，INSERT → `false`，DDL 在审计层已被拦截。
 
 从 stub（始终返回 `blocked=False`）变为**实际检查**——非 admin 角色执行非 SELECT 语句时拦截，形成第二道防线。
 
+> **后续变更**：ReadOnlyCheck 类已在 2026-07-08 重构中移除，其功能已合并至 SQLAuditCheck（通过 `_ADMIN_ONLY_STATEMENTS` 覆盖非 admin 写操作）。
+
 ### 3.5 写操作日志
 
 写操作成功时额外记录：`sql_type`（INSERT/UPDATE/DELETE）、`affected_rows`、`user_role`，便于审计追踪。
@@ -129,7 +131,7 @@ SELECT → `true`，INSERT → `false`，DDL 在审计层已被拦截。
 | 项 | 说明 |
 |---|---|
 | 文件 | `backend/app/agent/safety.py` |
-| 改动 | 4 处 `tool_name in ("run_query", ...)` → `"execute_sql"`；ReadOnlyCheck 从 stub 增强为实际检查 |
+| 改动 | 4 处 `tool_name in ("run_query", ...)` → `"execute_sql"`；ReadOnlyCheck 从 stub 增强为实际检查（后于 2026-07-08 移除合并至 SQLAuditCheck） |
 | 验收 | admin 放行 INSERT，readonly 拦截 INSERT，DDL 始终拦截 |
 
 ### 任务 4：修复 SSE 事件（`tool_node.py`）
@@ -182,7 +184,7 @@ SELECT → `true`，INSERT → `false`，DDL 在审计层已被拦截。
 LLM 决定写操作 → execute_sql 被调用
   ├── Step 1: SQLAuditCheck ─── 拦截 DDL（所有角色）
   │                             拦截 DML 非 admin 用户
-  ├── Step 2: ReadOnlyCheck ─── 增强后：非 admin + 非 SELECT 拦截
+  ├── Step 2: [已移除] ReadOnlyCheck 曾在此，功能已合并至 Step 1
   ├── Step 3: PerformanceCheck ─ 非阻断，仅警告
   ├── Step 4: 工具内 audit() ── 第二道审计
   └── Step 5: MySQL READ ONLY ── 数据库级兜底
@@ -207,7 +209,7 @@ pytest tests/ -v
 | 场景 | 输入 | 预期行为 | 验证方式 |
 |------|------|---------|---------|
 | 1. admin + INSERT | "帮我在 users 表插入一个名为小孟的记录" | LLM 调用 execute_sql，INSERT 执行成功，前端显示 🟡 "此操作将修改数据"，返回 `is_readonly=false`，`summary="影响 1 行"` | 日志可见 `写操作执行成功` |
-| 2. readonly + INSERT | 同上，角色为 readonly | SQLAuditCheck 或 ReadOnlyCheck 拦截，返回 `audit_status="blocked"` | LLM 告诉用户权限不足 |
+| 2. readonly + INSERT | 同上，角色为 readonly | SQLAuditCheck 拦截（ReadOnlyCheck 已合并至此），返回 `audit_status="blocked"` | LLM 告诉用户权限不足 |
 | 3. 所有角色 + DDL | "帮我把 users 表删掉" | SQLAuditCheck 拦截 DROP，返回 `audit_status="blocked"` | 行为不变 |
 | 4. 所有角色 + SELECT | "查询 users 表" | `is_readonly=true`，正常返回数据 | 行为不变 |
 
@@ -219,7 +221,7 @@ pytest tests/ -v
 |---|------|------|------|
 | 1 | 重命名工具函数 + 更新描述/返回值/日志 | `query.py` | ✅ 已完成 |
 | 2 | 更新工具注册 | `registry.py` | ✅ 已完成 |
-| 3 | 更新安全护栏引用 + 增强 ReadOnlyCheck | `safety.py` | ✅ 已完成 |
+| 3 | 更新安全护栏引用 + 增强 ReadOnlyCheck | `safety.py` | ✅ 已完成（后于 2026-07-08 移除合并至 SQLAuditCheck） |
 | 4 | 修复 SSE 事件 is_readonly | `tool_node.py` | ✅ 已完成 |
 | 5 | 更新消息类型推断 | `chat.py` | ✅ 已完成 |
 | 6 | 更新系统 Prompt | `graph.py` | ✅ 已完成 |
