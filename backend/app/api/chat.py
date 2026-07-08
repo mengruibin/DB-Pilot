@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from collections.abc import AsyncGenerator
 from datetime import UTC, datetime
 from typing import Any
@@ -505,6 +506,8 @@ async def _stream_events(
     try:
         # 创建独立数据库会话（SSE 流期间不能持有 FastAPI 注入的依赖事务）
         async with async_session_factory() as db:
+            # 记录流开始时间，用于 done 事件的 total_duration_ms 字段
+            stream_start_time = time.monotonic()
             # ========== Step 1: 会话管理 ==========
             session = await _get_or_create_session(
                 db,
@@ -618,6 +621,7 @@ async def _stream_events(
                                 yield format_sse(
                                     {
                                         "type": "token",
+                                        "stage": "thinking",  # 默认 stage: thinking，最终回答由 stage_change 事件修正
                                         "content": content,
                                         "agent_run_id": run_id,
                                     }
@@ -644,6 +648,7 @@ async def _stream_events(
                                 "session_id": session.id,
                                 "tokens_used": total_tokens,
                                 "agent_run_id": run_id,
+                                "total_duration_ms": 0,
                             }
                         )
                         return
@@ -675,6 +680,14 @@ async def _stream_events(
 
                     # agent_node 最终回答/超上限/工具绑定失败时设置 is_complete
                     if node_output.get("is_complete"):
+                        # 通知前端：最终的 token 流内容属于回答阶段，前端将其归入回答区
+                        yield format_sse(
+                            {
+                                "type": "stage_change",
+                                "stage": "answer",
+                                "agent_run_id": run_id,
+                            }
+                        )
                         completed = True
                         break
 
@@ -710,6 +723,7 @@ async def _stream_events(
             )
 
             # ========== Step 5: done 事件 ==========
+            total_duration_ms = int((time.monotonic() - stream_start_time) * 1000)
             yield format_sse(
                 {
                     "type": "done",
@@ -717,6 +731,7 @@ async def _stream_events(
                     "tokens_used": total_tokens,
                     "agent_run_id": run_id,
                     "total_iterations": len(accumulated_state.get("trace_iterations", [])),
+                    "total_duration_ms": total_duration_ms,  # 整个 SSE 流的总耗时（毫秒）
                 }
             )
 
@@ -731,6 +746,7 @@ async def _stream_events(
                 "session_id": session.id if session else "",
                 "tokens_used": total_tokens,
                 "agent_run_id": locals().get("run_id", ""),
+                "total_duration_ms": 0,
             }
         )
         return
@@ -751,6 +767,7 @@ async def _stream_events(
                     "type": "done",
                     "session_id": session.id,
                     "tokens_used": total_tokens,
+                    "total_duration_ms": 0,
                 }
             )
     finally:

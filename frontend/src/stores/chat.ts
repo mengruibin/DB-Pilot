@@ -16,7 +16,7 @@ import { useConnectionStore } from '@/stores/connection'
 import { getSessions, getSessionMessages, renameSession as apiRenameSession, deleteSession as apiDeleteSession } from '@/api/session'
 import type { Session, Message } from '@/types/chat'
 import type { FindingSeverity } from '@/types/report'
-import type { ThinkingEvent, TokenEvent, ToolCallEvent, ToolResultEvent, SqlEvent, ResultEvent, TextEvent, ErrorEvent, DoneEvent } from '@/types/chat'
+import type { ThinkingEvent, TokenEvent, ToolCallEvent, ToolResultEvent, SqlEvent, ResultEvent, TextEvent, ErrorEvent, DoneEvent, StageChangeEvent } from '@/types/chat'
 
 // ─── 内部消息类型（Store 展示用） ───
 
@@ -31,6 +31,17 @@ export type StoreMessageType =
   | 'result'      // 查询结果表格
   | 'error'       // 错误卡片
   | 'diagnosis'   // 诊断结果卡片
+  | 'thinking_group'  // 思考过程折叠分组
+
+/** 思考过程分组数据 */
+export interface ThinkingGroupData {
+  /** 分组内的步骤消息（thinking text + tool_call + tool_result + sql） */
+  steps: StoreMessage[]
+  /** 工具调用步骤数量 */
+  stepCount: number
+  /** 整个 SSE 流总耗时（毫秒） */
+  totalDurationMs: number
+}
 
 /** Store 内部消息结构 */
 export interface StoreMessage {
@@ -48,6 +59,10 @@ export interface StoreMessage {
   createdAt: string
 
   // ─── 按类型扩展字段 ───
+
+  // 通用
+  /** Token 阶段：thinking（思考过程）/ answer（最终回答），用于 SSE 分组判断 */
+  stage?: 'thinking' | 'answer'
 
   // thinking
   /** Agent 运行唯一 ID（Agent 架构升级） */
@@ -106,6 +121,10 @@ export interface StoreMessage {
     reference: string
   }>
   targetSql?: string
+
+  // thinking_group
+  /** 思考过程分组数据（仅 type='thinking_group' 时有效） */
+  thinkingGroup?: ThinkingGroupData
 }
 
 // ─── 输入模式 ───
@@ -152,6 +171,11 @@ export const useChatStore = defineStore('chat', () => {
   const streamingMessageId = ref<string | null>(null)
   /** 是否已收到首个 SSE 事件（防止重复移除 waiting） */
   const hasReceivedFirstEvent = ref(false)
+
+  /** 当前 SSE 流阶段：thinking（思考过程）/ answer（最终回答） */
+  const currentStage = ref<'thinking' | 'answer'>('thinking')
+  /** 当前 turn 的起始索引（最后一条 user 消息的位置），供 postProcessTurn 分组使用 */
+  const turnStartIndex = ref(-1)
 
   // ─── F2: 会话管理状态 ───
 
@@ -251,6 +275,7 @@ export const useChatStore = defineStore('chat', () => {
         sessionId: currentSessionId.value ?? '',
         role: 'assistant',
         type: 'text',  // 优化方案：用户可见的流式文本，由 MarkdownRenderer 渲染
+        stage: currentStage.value,  // 标记当前阶段，供 postProcessTurn 分组使用
         content: content,
         createdAt: new Date().toISOString(),
       }
@@ -263,6 +288,93 @@ export const useChatStore = defineStore('chat', () => {
   function sealStreamingMessage(): void {
     streamingMessageId.value = null
     streamingText.value = ''
+  }
+
+  /**
+   * 后处理当前 turn：将思考过程消息折叠为 thinking_group
+   *
+   * 分组启发式规则：
+   * 1. 从 turnStartIndex（最后一条 user 消息）之后开始扫描
+   * 2. 查找 stage === 'answer' 的 text 消息 → 视为 final answer，保留在顶层
+   * 3. final answer 之前的 text/tool_call/tool_result/sql → 归入 thinking_group
+   * 4. error/diagnosis 等异常类型保留在顶层（不隐藏）
+   * 5. 无工具调用的纯文本回答跳过分组
+   *
+   * @param totalDurationMs 后端返回的 SSE 流总耗时
+   */
+  function postProcessTurn(totalDurationMs: number): void {
+    if (turnStartIndex.value < 0) return
+
+    const turnMsgs = messages.value.slice(turnStartIndex.value + 1)
+    if (turnMsgs.length === 0) { turnStartIndex.value = -1; return }
+
+    // 检查是否有工具调用 — 纯文本回答无需分组
+    const hasTools = turnMsgs.some(
+      (m) => m.type === 'tool_call' || m.type === 'tool_result',
+    )
+    if (!hasTools) { turnStartIndex.value = -1; return }
+
+    // 找到 stage === 'answer' 的 text 消息作为分界点
+    let answerBoundary = -1
+    for (let i = 0; i < turnMsgs.length; i++) {
+      if (turnMsgs[i].type === 'text' && turnMsgs[i].stage === 'answer') {
+        answerBoundary = i
+        break
+      }
+    }
+
+    // 没有 answer 标记的消息（可能无 stage_change 触发），无需分组
+    if (answerBoundary < 0) { turnStartIndex.value = -1; return }
+
+    const groupingTypes = new Set(['text', 'tool_call', 'tool_result', 'sql'])
+    // 检查分界点之前是否有可分组的内容
+    const hasGroupable = turnMsgs.slice(0, answerBoundary).some((m) => groupingTypes.has(m.type))
+    if (!hasGroupable) { turnStartIndex.value = -1; return }
+
+    // 分离：thinking steps（final answer 之前）vs keep（final answer 及其他）
+    const thinkingSteps: StoreMessage[] = []
+    const keepMessages: StoreMessage[] = []
+
+    for (let i = 0; i < turnMsgs.length; i++) {
+      if (i >= answerBoundary) {
+        // final answer 及之后的消息 — 保留在顶层
+        keepMessages.push(turnMsgs[i])
+      } else if (groupingTypes.has(turnMsgs[i].type)) {
+        // thinking 内容 — 归入分组
+        thinkingSteps.push(turnMsgs[i])
+      } else {
+        // error / diagnosis 等 — 保留在顶层（不隐藏）
+        keepMessages.push(turnMsgs[i])
+      }
+    }
+
+    if (thinkingSteps.length === 0) { turnStartIndex.value = -1; return }
+
+    // 统计工具调用步数
+    const toolCallCount = thinkingSteps.filter((m) => m.type === 'tool_call').length
+
+    // 构建 thinking_group 消息
+    const groupMsg: StoreMessage = {
+      id: `thinking_group_${Date.now()}`,
+      sessionId: currentSessionId.value ?? '',
+      role: 'assistant',
+      type: 'thinking_group',
+      content: '',
+      createdAt: new Date().toISOString(),
+      thinkingGroup: {
+        steps: thinkingSteps,
+        stepCount: toolCallCount,
+        totalDurationMs,
+      },
+    }
+
+    // 重建 messages 数组：保留 turn 之前的消息 + user 消息 + thinking_group + 保留消息
+    const before = messages.value.slice(0, turnStartIndex.value + 1)
+    messages.value = [...before, groupMsg, ...keepMessages]
+
+    // 重置状态
+    turnStartIndex.value = -1
+    currentStage.value = 'thinking'
   }
 
   // ═══════════════════════════════════════════════════
@@ -282,6 +394,10 @@ export const useChatStore = defineStore('chat', () => {
 
     // 1. 添加用户消息
     addUserMessage(text)
+
+    // 重置双区渲染状态，记录 turn 起始索引供 postProcessTurn 分组使用
+    currentStage.value = 'thinking'
+    turnStartIndex.value = messages.value.length - 1
 
     // 2. 重置流式状态 + 插入 waiting 占位消息
     streamingText.value = ''
@@ -430,6 +546,25 @@ export const useChatStore = defineStore('chat', () => {
           })
         },
 
+        // ── stage_change（阶段切换：确认当前流式内容为最终回答） ──
+        onStageChange: (_event: StageChangeEvent) => {
+          if (currentStage.value === 'answer') return  // 幂等保护
+
+          // 更新最后一条流式 text 消息的 stage 为 answer，标记其为最终回答
+          if (streamingMessageId.value) {
+            const msg = messages.value.find((m) => m.id === streamingMessageId.value)
+            if (msg && msg.type === 'text') {
+              msg.stage = 'answer'
+              messages.value = [...messages.value]
+            }
+          }
+
+          // 封存当前思考区流式文本，后续 token 将创建新消息
+          sealStreamingMessage()
+          // 切换至回答阶段，后续 token 创建的消息 stage 将为 answer
+          currentStage.value = 'answer'
+        },
+
         // ── error ──
         onError: (event: ErrorEvent) => {
           removeWaitingMessage()
@@ -453,6 +588,10 @@ export const useChatStore = defineStore('chat', () => {
           sealStreamingMessage()
           isStreaming.value = false
           currentSessionId.value = event.session_id
+
+          // 将思考过程折叠为 thinking_group（需在更新 lastAssistantMessage 之前）
+          postProcessTurn(event.total_duration_ms ?? 0)
+
           // 更新最后一条助手消息的 token 计数及 Agent 汇总信息
           const last = lastAssistantMessage.value
           if (last) {
@@ -511,6 +650,8 @@ export const useChatStore = defineStore('chat', () => {
   function clearMessages(): void {
     messages.value = []
     currentSessionId.value = null
+    turnStartIndex.value = -1
+    currentStage.value = 'thinking'
   }
 
   /** 设置输入模式 */
@@ -633,6 +774,9 @@ export const useChatStore = defineStore('chat', () => {
       const reversed = [...response.items].reverse()
       currentSessionId.value = sessionId
       messages.value = reversed.map(messageResponseToStoreMessage)
+      // 切换会话时重置双区渲染状态，防止影响后续流式
+      turnStartIndex.value = -1
+      currentStage.value = 'thinking'
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : '加载消息历史失败'
       console.warn('[chatStore] switchToSession 失败:', msg)
@@ -650,6 +794,8 @@ export const useChatStore = defineStore('chat', () => {
   function startNewSession(): void {
     messages.value = []
     currentSessionId.value = null
+    turnStartIndex.value = -1
+    currentStage.value = 'thinking'
   }
 
   /**

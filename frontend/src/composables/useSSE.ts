@@ -126,6 +126,9 @@ export function useSSE() {
       case 'done':
         userCallbacks?.onDone?.(payload as any)
         break
+      case 'stage_change':
+        userCallbacks?.onStageChange?.(payload as any)
+        break
       default:
         console.warn('[SSE] 未注册的事件类型:', type)
     }

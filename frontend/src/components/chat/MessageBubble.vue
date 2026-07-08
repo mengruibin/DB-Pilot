@@ -14,6 +14,7 @@ import ResultTable from '@/components/sql/ResultTable.vue'
 import ErrorCard from '@/components/common/ErrorCard.vue'
 import DiagnosisCard from '@/components/chat/DiagnosisCard.vue'
 import MarkdownRenderer from '@/components/chat/MarkdownRenderer.vue'
+import ThinkingGroup from '@/components/chat/ThinkingGroup.vue'
 
 const props = defineProps<{
   message: StoreMessage
@@ -195,6 +196,15 @@ const resultRows = computed(() => {
               <p class="thinking-content">{{ message.content }}</p>
             </div>
           </div>
+        </template>
+
+        <!-- === thinking_group（思考过程折叠块）=== -->
+        <template v-if="message.type === 'thinking_group' && message.thinkingGroup">
+          <ThinkingGroup
+            :steps="message.thinkingGroup.steps"
+            :step-count="message.thinkingGroup.stepCount"
+            :total-duration-ms="message.thinkingGroup.totalDurationMs"
+          />
         </template>
 
         <!-- === tool_call === -->

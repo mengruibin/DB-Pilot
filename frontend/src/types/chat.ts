@@ -111,6 +111,8 @@ export interface ExplainResponse {
 /** SSE 事件：LLM Token 流式输出块（逐 token/块推送） */
 export interface TokenEvent {
   type: 'token'
+  /** Token 阶段：thinking（思考过程）/ answer（最终回答） */
+  stage: 'thinking' | 'answer'
   /** 增量文本片段 */
   content: string
   /** Agent 运行唯一 ID */
@@ -211,6 +213,17 @@ export interface DoneEvent {
     tools_called: string[]
     total_duration_ms: number
   }
+  /** 整个 SSE 流的总耗时（毫秒），从请求开始到 done 事件的时间差 */
+  total_duration_ms?: number
+}
+
+/** SSE 事件：阶段切换（最终回答确认） */
+export interface StageChangeEvent {
+  type: 'stage_change'
+  /** 切换到的阶段：answer */
+  stage: 'answer'
+  /** Agent 运行唯一 ID */
+  agent_run_id?: string
 }
 
 /** SSE 事件联合类型 */
@@ -224,6 +237,7 @@ export type SSEEvent =
   | TextEvent
   | ErrorEvent
   | DoneEvent
+  | StageChangeEvent
 
 /** SSE 事件回调映射 */
 export interface SSEEventCallbacks {
@@ -235,6 +249,7 @@ export interface SSEEventCallbacks {
   onResult?: (event: ResultEvent) => void
   onText?: (event: TextEvent) => void
   onError?: (event: ErrorEvent) => void
+  onStageChange?: (event: StageChangeEvent) => void
   onDone?: (event: DoneEvent) => void
   onDisconnect?: (reason: string) => void
   onTimeout?: () => void
