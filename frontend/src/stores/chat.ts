@@ -16,15 +16,16 @@ import { useConnectionStore } from '@/stores/connection'
 import { getSessions, getSessionMessages, renameSession as apiRenameSession, deleteSession as apiDeleteSession } from '@/api/session'
 import type { Session, Message } from '@/types/chat'
 import type { FindingSeverity } from '@/types/report'
-import type { ThinkingEvent, TokenEvent, ToolCallEvent, ToolResultEvent, SqlEvent, ResultEvent, TextEvent, ErrorEvent, DoneEvent, StageChangeEvent } from '@/types/chat'
+import type { ThinkingEvent, ReasoningEvent, TokenEvent, ToolCallEvent, ToolResultEvent, SqlEvent, ResultEvent, TextEvent, ErrorEvent, DoneEvent, StageChangeEvent } from '@/types/chat'
 
 // ─── 内部消息类型（Store 展示用） ───
 
 /** 消息展示类型 */
 export type StoreMessageType =
   | 'text'        // 用户文字 / 纯文本回复
-  | 'thinking'    // Agent 推理过程（可折叠）
-  | 'waiting'     // Agent 等待占位（动态点动画 + 计时器）
+  | 'thinking'    // Agent 推理过程（可折叠，已废弃）
+  | 'reasoning'   // 模型深度推理内容（reasoning_content → 思考面板）
+  | 'waiting'     // Agent 等待占位（动态点动画）
   | 'tool_call'    // 工具调用步骤卡片
   | 'tool_result'  // 工具返回结果
   | 'sql'         // SQL 代码块
@@ -169,6 +170,10 @@ export const useChatStore = defineStore('chat', () => {
   const streamingText = ref('')
   /** 正在流式更新的消息 ID */
   const streamingMessageId = ref<string | null>(null)
+  /** 当前累积的推理文本 */
+  const streamingReasoningText = ref('')
+  /** 正在流式更新的推理消息 ID */
+  const streamingReasoningMessageId = ref<string | null>(null)
   /** 是否已收到首个 SSE 事件（防止重复移除 waiting） */
   const hasReceivedFirstEvent = ref(false)
 
@@ -263,11 +268,14 @@ export const useChatStore = defineStore('chat', () => {
   /** 创建或更新流式 text 消息（token 逐字累加，打字机效果） */
   function updateStreamingMessage(content: string): void {
     if (streamingMessageId.value) {
-      const msg = messages.value.find((m) => m.id === streamingMessageId.value)
-      if (msg && msg.type === 'text') {
-        msg.content = content
-        // 触发响应式更新
-        messages.value = [...messages.value]
+      const idx = messages.value.findIndex((m) => m.id === streamingMessageId.value)
+      if (idx >= 0 && messages.value[idx].type === 'text') {
+        // 创建新对象触发完整的响应式链路（确保 MarkdownRenderer computed 正确重算）
+        messages.value = [
+          ...messages.value.slice(0, idx),
+          { ...messages.value[idx], content },
+          ...messages.value.slice(idx + 1),
+        ]
       }
     } else {
       const msg: StoreMessage = {
@@ -284,10 +292,41 @@ export const useChatStore = defineStore('chat', () => {
     }
   }
 
+  /** 创建或更新流式 reasoning 消息（推理文本逐 chunk 累加） */
+  function updateStreamingReasoningMessage(content: string): void {
+    if (streamingReasoningMessageId.value) {
+      const idx = messages.value.findIndex((m) => m.id === streamingReasoningMessageId.value)
+      if (idx >= 0 && messages.value[idx].type === 'reasoning') {
+        messages.value = [
+          ...messages.value.slice(0, idx),
+          { ...messages.value[idx], content },
+          ...messages.value.slice(idx + 1),
+        ]
+      }
+    } else {
+      const msg: StoreMessage = {
+        id: nextMsgId(),
+        sessionId: currentSessionId.value ?? '',
+        role: 'assistant',
+        type: 'reasoning',
+        content: content,
+        createdAt: new Date().toISOString(),
+      }
+      messages.value.push(msg)
+      streamingReasoningMessageId.value = msg.id
+    }
+  }
+
   /** 封存当前流式消息（重置 streaming 状态，保留已累积内容） */
   function sealStreamingMessage(): void {
     streamingMessageId.value = null
     streamingText.value = ''
+  }
+
+  /** 封存当前推理流式消息 */
+  function sealStreamingReasoningMessage(): void {
+    streamingReasoningMessageId.value = null
+    streamingReasoningText.value = ''
   }
 
   /**
@@ -402,6 +441,8 @@ export const useChatStore = defineStore('chat', () => {
     // 2. 重置流式状态 + 插入 waiting 占位消息
     streamingText.value = ''
     streamingMessageId.value = null
+    streamingReasoningText.value = ''
+    streamingReasoningMessageId.value = null
     hasReceivedFirstEvent.value = false
     messages.value.push({
       id: nextMsgId(),
@@ -433,8 +474,17 @@ export const useChatStore = defineStore('chat', () => {
         // ── token（优化方案：LLM 逐 token 流式输出） ──
         onToken: (event: TokenEvent) => {
           removeWaitingMessage()
+          sealStreamingReasoningMessage()  // reasoning 结束，切换到 token 流
           streamingText.value += event.content
           updateStreamingMessage(streamingText.value)
+        },
+
+        // ── reasoning（模型深度推理 → 思考面板，逐 chunk 累加到同一条消息） ──
+        onReasoning: (event: ReasoningEvent) => {
+          removeWaitingMessage()
+          sealStreamingMessage()  // 推理与 token 文本互斥：token 流存在时先封存
+          streamingReasoningText.value += event.content
+          updateStreamingReasoningMessage(streamingReasoningText.value)
         },
 
         // ── thinking（优化方案：不覆盖 token 流式内容，仅更新 metadata） ──
@@ -475,6 +525,7 @@ export const useChatStore = defineStore('chat', () => {
         onToolCall: (event: ToolCallEvent) => {
           removeWaitingMessage()
           sealStreamingMessage()
+          sealStreamingReasoningMessage()
           messages.value.push({
             id: nextMsgId(),
             sessionId: currentSessionId.value ?? '',
@@ -546,23 +597,30 @@ export const useChatStore = defineStore('chat', () => {
           })
         },
 
-        // ── stage_change（阶段切换：确认当前流式内容为最终回答） ──
+        // ── stage_change（乐观渲染收编：thinking → answer 双向切换） ──
         onStageChange: (_event: StageChangeEvent) => {
-          if (currentStage.value === 'answer') return  // 幂等保护
+          const newStage = (_event as any).stage as 'thinking' | 'answer'
+          if (newStage === currentStage.value) return  // 幂等保护
 
-          // 更新最后一条流式 text 消息的 stage 为 answer，标记其为最终回答
-          if (streamingMessageId.value) {
-            const msg = messages.value.find((m) => m.id === streamingMessageId.value)
-            if (msg && msg.type === 'text') {
-              msg.stage = 'answer'
-              messages.value = [...messages.value]
+          if (newStage === 'answer') {
+            // 收编：向前扫描，将本 turn 内所有 stage='thinking' 的 text
+            // 消息改为 'answer'——文字从思考面板"上升"到主聊天区
+            for (let i = messages.value.length - 1; i >= 0; i--) {
+              const m = messages.value[i]
+              if (m.role !== 'assistant') break
+              if (m.type !== 'text') continue
+              if (m.stage === 'thinking') {
+                m.stage = 'answer'
+              }
             }
+            messages.value = [...messages.value]  // 触发响应式
+            sealStreamingMessage()
+            currentStage.value = 'answer'
+          } else {
+            // 从 answer → thinking（降级：兼容极少数纠偏场景）
+            sealStreamingMessage()
+            currentStage.value = 'thinking'
           }
-
-          // 封存当前思考区流式文本，后续 token 将创建新消息
-          sealStreamingMessage()
-          // 切换至回答阶段，后续 token 创建的消息 stage 将为 answer
-          currentStage.value = 'answer'
         },
 
         // ── error ──
@@ -586,6 +644,7 @@ export const useChatStore = defineStore('chat', () => {
         onDone: (event: DoneEvent) => {
           removeWaitingMessage()
           sealStreamingMessage()
+          sealStreamingReasoningMessage()
           isStreaming.value = false
           currentSessionId.value = event.session_id
 
@@ -632,6 +691,7 @@ export const useChatStore = defineStore('chat', () => {
     // 清理 waiting 占位和流式累加状态
     removeWaitingMessage()
     sealStreamingMessage()
+    sealStreamingReasoningMessage()
 
     const sessionId = currentSessionId.value
     try {
@@ -865,6 +925,8 @@ export const useChatStore = defineStore('chat', () => {
     // 优化方案：流式 Token 累加状态
     streamingText,
     streamingMessageId,
+    streamingReasoningText,
+    streamingReasoningMessageId,
     hasReceivedFirstEvent,
 
     // F2: 会话管理状态

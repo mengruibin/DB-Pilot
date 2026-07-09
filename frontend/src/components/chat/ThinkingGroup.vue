@@ -75,14 +75,10 @@ function toolArgsSummary(step: StoreMessage): string {
         />
       </svg>
 
-      <!-- 思考图标 -->
-      <span class="tg-icon">🧠</span>
 
       <!-- 标题 -->
       <span class="tg-label">思考过程</span>
 
-      <!-- 步数徽章 -->
-      <span class="tg-badge">{{ stepCount }}步</span>
 
       <!-- 总耗时（等宽字体右对齐） -->
       <span class="tg-duration">{{ formatDuration(totalDurationMs) }}</span>

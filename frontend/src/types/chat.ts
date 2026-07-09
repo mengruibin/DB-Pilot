@@ -121,7 +121,7 @@ export interface TokenEvent {
   iteration?: number
 }
 
-/** SSE 事件：Agent 推理过程 */
+/** SSE 事件：Agent 推理过程（已废弃，由 reasoning 事件替代） */
 export interface ThinkingEvent {
   type: 'thinking'
   content: string
@@ -133,6 +133,15 @@ export interface ThinkingEvent {
   reasoning_type?: string
   /** 本次 LLM 推理耗时（ms），后端计算，解决前端计时器从 0 开始的问题 */
   duration_ms?: number
+}
+
+/** SSE 事件：模型深度推理内容（reasoning_content → 思考面板） */
+export interface ReasoningEvent {
+  type: 'reasoning'
+  /** 模型内部推理文本片段（流式） */
+  content: string
+  /** Agent 运行唯一 ID */
+  agent_run_id?: string
 }
 
 /** SSE 事件：Agent 调用工具 */
@@ -217,11 +226,11 @@ export interface DoneEvent {
   total_duration_ms?: number
 }
 
-/** SSE 事件：阶段切换（最终回答确认） */
+/** SSE 事件：阶段切换（thinking ↔ answer 双向切换） */
 export interface StageChangeEvent {
   type: 'stage_change'
-  /** 切换到的阶段：answer */
-  stage: 'answer'
+  /** 切换到的阶段：thinking | answer */
+  stage: 'thinking' | 'answer'
   /** Agent 运行唯一 ID */
   agent_run_id?: string
 }
@@ -229,6 +238,7 @@ export interface StageChangeEvent {
 /** SSE 事件联合类型 */
 export type SSEEvent =
   | ThinkingEvent
+  | ReasoningEvent
   | TokenEvent
   | ToolCallEvent
   | ToolResultEvent
@@ -242,6 +252,7 @@ export type SSEEvent =
 /** SSE 事件回调映射 */
 export interface SSEEventCallbacks {
   onThinking?: (event: ThinkingEvent) => void
+  onReasoning?: (event: ReasoningEvent) => void
   onToken?: (event: TokenEvent) => void
   onToolCall?: (event: ToolCallEvent) => void
   onToolResult?: (event: ToolResultEvent) => void

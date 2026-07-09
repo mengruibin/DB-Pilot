@@ -588,6 +588,11 @@ async def _stream_events(
             # （agent_node/tools_node 从 state 读取全量历史、追加新事件后返回全量），
             # 用 emitted_count 追踪已发射事件数，避免重复发射
             emitted_count = 0
+            # 乐观渲染 + 收编：当前 agent 迭代是否看到 tool_call_chunks
+            # False → 暂不知类型，content 以 stage="thinking" 乐观渲染
+            # True  → 确认工具调用迭代，content 保持 thinking 无需变更
+            # is_complete 时仍为 False → 最终回答，发送 stage_change("answer") 触发前端收编
+            seen_tool_calls = False
 
             # 使用 stream_mode=["updates", "messages"] 双通道流式：
             # "updates" → 每个节点执行后的状态增量 {node_name: state_delta}
@@ -606,26 +611,42 @@ async def _stream_events(
                 else:
                     mode, data = stream_item
 
-                # ── 处理 LLM Token 流（优化方案：逐 token 推送） ──
+                # ── 处理 LLM Token 流（乐观渲染 + 收编） ──
                 if mode == "messages":
-                    # LangGraph stream_mode="messages" 每次 yield 一个单独的事件：
-                    # data 直接就是 (AIMessageChunk, metadata_dict) 元组，不是列表
                     if isinstance(data, tuple) and len(data) >= 2:
-                        # 从元组中提取 chunk 和 metadata dict
                         chunk = data[0]
                         meta = data[1] if isinstance(data[1], dict) else {}
                         node_name = str(meta.get("langgraph_node", "") or "")
                         if node_name == "agent":
+                            # 1) reasoning_content → 独立的 reasoning SSE 事件
+                            reasoning = (
+                                chunk.additional_kwargs.get("reasoning_content", "")
+                                if isinstance(chunk.additional_kwargs, dict)
+                                else ""
+                            )
+                            if reasoning.strip():
+                                yield format_sse({
+                                    "type": "reasoning",
+                                    "content": reasoning,
+                                    "agent_run_id": run_id,
+                                })
+
+                            # 2) tool_call_chunks → 确认工具调用迭代
+                            tool_call_chunks = (
+                                getattr(chunk, "tool_call_chunks", None) or []
+                            )
+                            if tool_call_chunks:
+                                seen_tool_calls = True
+
+                            # 3) content → 乐观渲染为 stage="thinking"
                             content = str(getattr(chunk, "content", "") or "")
                             if content.strip():
-                                yield format_sse(
-                                    {
-                                        "type": "token",
-                                        "stage": "thinking",  # 默认 stage: thinking，最终回答由 stage_change 事件修正
-                                        "content": content,
-                                        "agent_run_id": run_id,
-                                    }
-                                )
+                                yield format_sse({
+                                    "type": "token",
+                                    "stage": "thinking",
+                                    "content": content,
+                                    "agent_run_id": run_id,
+                                })
                     continue
 
                 # ── mode == "updates"：处理节点状态增量 ──
@@ -678,16 +699,23 @@ async def _stream_events(
                         sse_event_count=len(sse_events),
                     )
 
+                    # 重置每个 agent 迭代的标志位
+                    if node_name == "agent":
+                        seen_tool_calls = False
+
                     # agent_node 最终回答/超上限/工具绑定失败时设置 is_complete
                     if node_output.get("is_complete"):
-                        # 通知前端：最终的 token 流内容属于回答阶段，前端将其归入回答区
-                        yield format_sse(
-                            {
-                                "type": "stage_change",
-                                "stage": "answer",
-                                "agent_run_id": run_id,
-                            }
-                        )
+                        # 乐观渲染收编：未检测到 tool_calls → 最终回答
+                        # 发送 stage_change("answer") 触发前端将 stage="thinking"
+                        # 的 text 消息收编为 stage="answer"
+                        if not seen_tool_calls:
+                            yield format_sse(
+                                {
+                                    "type": "stage_change",
+                                    "stage": "answer",
+                                    "agent_run_id": run_id,
+                                }
+                            )
                         completed = True
                         break
 

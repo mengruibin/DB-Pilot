@@ -16,13 +16,20 @@ import DiagnosisCard from '@/components/chat/DiagnosisCard.vue'
 import MarkdownRenderer from '@/components/chat/MarkdownRenderer.vue'
 import ThinkingGroup from '@/components/chat/ThinkingGroup.vue'
 
-const props = defineProps<{
-  message: StoreMessage
-  /** 是否是最后一条消息（用于打字光标） */
-  isLast: boolean
-  /** 是否正在流式接收 */
-  isStreaming: boolean
-}>()
+const props = withDefaults(
+  defineProps<{
+    message: StoreMessage
+    /** 是否是最后一条消息（用于打字光标） */
+    isLast: boolean
+    /** 是否正在流式接收 */
+    isStreaming: boolean
+    /** 是否处于思考阶段（由 MessageList 分组后传入，使用降权样式） */
+    isThinkingPhase?: boolean
+  }>(),
+  {
+    isThinkingPhase: false,
+  },
+)
 
 // ─── thinking 计时器 ───
 
@@ -55,33 +62,6 @@ onUnmounted(() => {
   if (timerInterval) clearInterval(timerInterval)
 })
 
-// ─── waiting 计时器 ───
-
-const waitingStartTime = ref(0)
-const waitingElapsed = ref(0)
-let waitingTimerInterval: ReturnType<typeof setInterval> | null = null
-
-/** 格式化 waiting 耗时 X.Xs */
-const formattedWaitingElapsed = computed(() => {
-  const sec = waitingElapsed.value / 1000
-  return `${sec.toFixed(1)}s`
-})
-
-onMounted(() => {
-  if (props.message.type === 'waiting') {
-    waitingStartTime.value = Date.now()
-    waitingTimerInterval = setInterval(() => {
-      waitingElapsed.value = Date.now() - waitingStartTime.value
-    }, 100)
-  }
-})
-
-onUnmounted(() => {
-  if (waitingTimerInterval) {
-    clearInterval(waitingTimerInterval)
-    waitingTimerInterval = null
-  }
-})
 
 /** 格式化耗时 mm:ss.x */
 function formatElapsed(ms: number): string {
@@ -103,12 +83,6 @@ function reasoningTypeLabel(type: string): string {
   return labels[type] || type
 }
 
-/** 耗时时间颜色 */
-const elapsedColor = computed(() => {
-  if (thinkingElapsed.value < 10000) return 'var(--text-tertiary)'
-  if (thinkingElapsed.value < 30000) return 'var(--color-warning)'
-  return 'var(--color-error)'
-})
 
 // ─── 格式化 duration_ms ───
 
@@ -159,13 +133,13 @@ const resultRows = computed(() => {
 
     <!-- ─── 助手回复 ─── -->
     <template v-else>
-      <div class="bubble assistant-bubble">
+      <div class="bubble" :class="isThinkingPhase ? 'thinking-phase-item' : 'assistant-bubble'">
         <!-- === text（Markdown 渲染） === -->
         <template v-if="message.type === 'text'">
           <MarkdownRenderer :content="message.content" />
         </template>
 
-        <!-- === waiting（优化方案：Agent 等待占位，动态点 + 计时器） === -->
+        <!-- === waiting（三点脉冲动画） === -->
         <template v-if="message.type === 'waiting'">
           <div class="waiting-content">
             <div class="dot-container">
@@ -173,8 +147,13 @@ const resultRows = computed(() => {
               <span class="dot"></span>
               <span class="dot"></span>
             </div>
-            <span class="waiting-label">AI 正在分析</span>
-            <span class="waiting-timer">{{ formattedWaitingElapsed }}</span>
+          </div>
+        </template>
+
+        <!-- === reasoning（模型深度推理，渲染到思考面板） === -->
+        <template v-if="message.type === 'reasoning'">
+          <div class="reasoning-item">
+            <MarkdownRenderer :content="message.content" />
           </div>
         </template>
 
@@ -182,12 +161,11 @@ const resultRows = computed(() => {
         <template v-if="message.type === 'thinking'">
           <div class="thinking-block" :class="{ expanded: thinkingExpanded }">
             <button class="thinking-header" @click="thinkingExpanded = !thinkingExpanded">
-              <span class="thinking-icon">🧠</span>
-              <span class="thinking-title">AI 推理过程</span>
+              <span class="thinking-title">推理过程</span>
               <span v-if="message.reasoningType" class="thinking-badge" :class="`badge-${message.reasoningType}`">
                 {{ reasoningTypeLabel(message.reasoningType) }}
               </span>
-              <span class="thinking-timer" :style="{ color: elapsedColor }">
+              <span class="thinking-timer">
                 {{ formatElapsed(thinkingElapsed) }}
               </span>
               <span class="thinking-toggle">{{ thinkingExpanded ? '收起' : '展开' }}</span>
@@ -279,9 +257,9 @@ const resultRows = computed(() => {
           />
         </template>
 
-        <!-- 打字光标（最后一条流式消息） -->
+        <!-- 打字光标（仅最终答案流式输出时显示） -->
         <span
-          v-if="isStreaming && isLast"
+          v-if="isStreaming && isLast && message.type === 'text' && message.stage !== 'thinking'"
           class="cursor-blink"
         ></span>
       </div>
@@ -356,24 +334,112 @@ const resultRows = computed(() => {
   white-space: pre-wrap;
 }
 
-/* ─── waiting 占位（优化方案） ─── */
+/* ─── thinking-phase-item（思考阶段统一降权容器） ─── */
+.thinking-phase-item {
+  background: transparent;
+  border: none;
+  padding: 2px 14px;
+  max-width: 100%;
+  font-size: 12px;
+  color: var(--text-tertiary);
+}
+
+/* 思考阶段内部各子容器去除独立边框/背景 */
+.thinking-phase-item .thinking-block {
+  border: none;
+  border-radius: 0;
+  opacity: 1;
+}
+
+.thinking-phase-item .thinking-header {
+  font-size: 11px;
+  padding: 3px 6px;
+}
+
+.thinking-phase-item .thinking-body {
+  background: transparent;
+  border-top: none;
+  padding: 4px 8px 8px;
+}
+
+.thinking-phase-item .thinking-content {
+  font-size: 12px;
+  opacity: 0.85;
+}
+
+.thinking-phase-item .thinking-timer {
+  font-size: 10px;
+}
+
+.thinking-phase-item .thinking-toggle {
+  font-size: 10px;
+}
+
+.thinking-phase-item .thinking-badge {
+  font-size: 9px;
+}
+
+.thinking-phase-item .tool-step {
+  padding: 1px 0;
+}
+
+.thinking-phase-item .step-tool {
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--text-tertiary);
+}
+
+.thinking-phase-item .step-desc {
+  font-size: 12px;
+  color: var(--text-tertiary);
+}
+
+.thinking-phase-item .step-icon {
+  font-size: 11px;
+}
+
+.thinking-phase-item .step-spinner {
+  width: 12px;
+  height: 12px;
+}
+
+.thinking-phase-item .step-duration {
+  font-size: 10px;
+}
+
+.thinking-phase-item .tool-result-content {
+  font-size: 12px;
+  color: var(--text-tertiary);
+}
+
+/* ─── reasoning 推理文本（思考面板内） ─── */
+.reasoning-item {
+  font-size: 12px;
+  color: var(--text-tertiary);
+  line-height: 1.6;
+  opacity: 0.85;
+}
+
+.thinking-phase-item .reasoning-item {
+  font-size: 11.5px;
+  opacity: 0.8;
+}
+
+.thinking-phase-item .waiting-content {
+  padding: 2px 0;
+}
+
+.thinking-phase-item .dot {
+  width: 4px;
+  height: 4px;
+}
+
+/* ─── waiting 占位（三点脉冲动画） ─── */
 .waiting-content {
   display: flex;
   align-items: center;
   gap: 8px;
   padding: 4px 0;
-}
-
-.waiting-label {
-  font-size: 13px;
-  color: var(--text-secondary);
-  font-weight: 450;
-}
-
-.waiting-timer {
-  font-family: var(--font-mono);
-  font-size: 12px;
-  color: var(--text-tertiary);
 }
 
 /* ─── 三点脉冲（从 ThinkingIndicator 复用） ─── */
@@ -416,11 +482,12 @@ const resultRows = computed(() => {
   50% { opacity: 0; }
 }
 
-/* ─── thinking 推理区 ─── */
+/* ─── thinking 推理区（低视觉权重，与最终答案拉开差距） ─── */
 .thinking-block {
-  border: 1px solid var(--border-color);
+  border: 1px solid rgba(128, 128, 128, 0.15);
   border-radius: var(--radius-md);
   overflow: hidden;
+  opacity: 0.85;
 }
 
 .thinking-header {
@@ -429,34 +496,30 @@ const resultRows = computed(() => {
   gap: 6px;
   width: 100%;
   padding: 6px 10px;
-  background: var(--bg-surface);
+  background: transparent;
   border: none;
   cursor: pointer;
-  color: var(--text-secondary);
+  color: var(--text-tertiary);
   font-family: var(--font-body);
-  font-size: 12px;
+  font-size: 11.5px;
   text-align: left;
   transition: background var(--transition-fast);
 }
 
 .thinking-header:hover {
-  background: var(--bg-hover);
-}
-
-.thinking-icon {
-  font-size: 14px;
+  background: rgba(128, 128, 128, 0.05);
 }
 
 .thinking-title {
-  font-weight: 500;
-  color: var(--text-secondary);
+  font-weight: 400;
+  color: var(--text-tertiary);
 }
 
 .thinking-timer {
   font-family: var(--font-mono);
   font-size: 11px;
   margin-left: auto;
-  transition: color 0.3s;
+  color: var(--text-tertiary);
 }
 
 .thinking-toggle {
@@ -502,10 +565,11 @@ const resultRows = computed(() => {
 }
 
 .thinking-content {
-  font-size: 13px;
-  color: var(--text-secondary);
+  font-size: 12.5px;
+  color: var(--text-tertiary);
   line-height: 1.7;
   white-space: pre-wrap;
+  opacity: 0.85;
 }
 
 /* ─── tool_call / tool_result ─── */

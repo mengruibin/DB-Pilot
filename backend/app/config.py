@@ -62,6 +62,12 @@ class Settings(BaseSettings):
         "（Anthropic: https://api.anthropic.com/v1/messages, "
         "OpenAI: https://api.openai.com/v1/chat/completions）",
     )
+    ENABLE_REASONING: bool = Field(
+        default=False,
+        description="启用模型深度思考模式（DeepSeek thinking / Claude extended thinking）。"
+        "开启后 LLM 输出分为 reasoning_content（内部推理）和 content（对外回答），"
+        "前端分别渲染到思考面板和主聊天区。",
+    )
 
     # ==================== 内部数据库 ====================
     DATABASE_URL: str = Field(
