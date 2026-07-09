@@ -70,32 +70,39 @@ function handleNewSession(): void {
       </div>
     </div>
 
-    <!-- 历史消息加载中 -->
-    <div v-if="chatStore.messagesLoading" class="loading-state">
-      <n-spin size="small" />
-      <span class="loading-text">加载消息历史...</span>
+    <!-- 消息列表（外层全宽滚动，内层限宽居中，滚动条贴最右侧） -->
+    <div class="message-list-wrapper">
+      <div class="message-list-inner">
+        <!-- 历史消息加载中 -->
+        <div v-if="chatStore.messagesLoading" class="loading-state">
+          <n-spin size="small" />
+          <span class="loading-text">加载消息历史...</span>
+        </div>
+
+        <!-- 消息列表 -->
+        <MessageList
+          v-else
+          :messages="chatStore.messages"
+          :is-streaming="chatStore.isStreaming"
+        />
+      </div>
     </div>
 
-    <!-- 消息列表 -->
-    <MessageList
-      v-else
-      :messages="chatStore.messages"
-      :is-streaming="chatStore.isStreaming"
-    />
-
-    <!-- 输入区域（F-10 独立组件） -->
-    <InputArea
-      v-model="inputText"
-      :input-mode="chatStore.inputMode"
-      :is-streaming="chatStore.isStreaming"
-      :has-connection="!!connectionStore.activeId"
-      :connections="connectionStore.connections"
-      :active-connection-id="connectionStore.activeId"
-      @update:input-mode="chatStore.setInputMode"
-      @send="handleSend"
-      @stop="handleStop"
-      @select-connection="handleSelectConnection"
-    />
+    <!-- 输入区域（与消息列表同宽限宽居中） -->
+    <div class="input-area-wrapper">
+      <InputArea
+        v-model="inputText"
+        :input-mode="chatStore.inputMode"
+        :is-streaming="chatStore.isStreaming"
+        :has-connection="!!connectionStore.activeId"
+        :connections="connectionStore.connections"
+        :active-connection-id="connectionStore.activeId"
+        @update:input-mode="chatStore.setInputMode"
+        @send="handleSend"
+        @stop="handleStop"
+        @select-connection="handleSelectConnection"
+      />
+    </div>
   </div>
 </template>
 
@@ -158,5 +165,30 @@ function handleNewSession(): void {
 .loading-text {
   font-size: 13px;
   color: var(--text-tertiary);
+}
+
+/* 消息列表外层：全宽滚动容器，滚动条贴右边缘 */
+.message-list-wrapper {
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+/* 消息列表内层：限制最大宽度并居中 */
+.message-list-inner {
+  max-width: 1000px;
+  width: 100%;
+  margin: 0 auto;
+  min-height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+/* 输入区域容器：与消息列表同宽限宽居中 */
+.input-area-wrapper {
+  flex-shrink: 0;
+  max-width: 1000px;
+  width: 100%;
+  margin: 0 auto;
 }
 </style>

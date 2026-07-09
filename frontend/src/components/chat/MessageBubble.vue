@@ -2,10 +2,11 @@
 /**
  * MessageBubble — 消息气泡分发组件
  *
- * 根据 message.type 分派到不同渲染组件：
- * text / thinking / tool_call / tool_result / sql / result / error
+ * 根据 message.type / message.role 分派渲染，严格遵照
+ * DB-Pilot 对话界面设计规范（docs/reasoning-answer-separation-plan.md）。
  *
- * 依据 api-contract §三 MessageBubble 组件
+ * 设计理念：分层卡片布局 ——
+ *   用户气泡 → AI 响应卡片（思考面板 → 工具调用 → 最终回答）
  */
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import type { StoreMessage } from '@/stores/chat'
@@ -14,7 +15,6 @@ import ResultTable from '@/components/sql/ResultTable.vue'
 import ErrorCard from '@/components/common/ErrorCard.vue'
 import DiagnosisCard from '@/components/chat/DiagnosisCard.vue'
 import MarkdownRenderer from '@/components/chat/MarkdownRenderer.vue'
-import ThinkingGroup from '@/components/chat/ThinkingGroup.vue'
 
 const props = withDefaults(
   defineProps<{
@@ -23,47 +23,36 @@ const props = withDefaults(
     isLast: boolean
     /** 是否正在流式接收 */
     isStreaming: boolean
-    /** 是否处于思考阶段（由 MessageList 分组后传入，使用降权样式） */
+    /** 是否处于思考阶段（由 MessageList 分组后传入） */
     isThinkingPhase?: boolean
+    /** 是否渲染在 AI 响应卡片内部（压制外壳样式） */
+    isInCard?: boolean
   }>(),
   {
     isThinkingPhase: false,
+    isInCard: false,
   },
 )
 
 // ─── thinking 计时器 ───
-
-const thinkingExpanded = ref(false)
 const thinkingElapsed = ref(0)
 let timerInterval: ReturnType<typeof setInterval> | null = null
 
 onMounted(() => {
   if (props.message.type === 'thinking') {
-    // 优先使用后端返回的实际耗时（durationMs）作为初始值，
-    // 避免 thinking 事件到达流末尾时前端计时器从 0 开始
-    if (props.message.durationMs) {
-      thinkingElapsed.value = props.message.durationMs
-    }
-    timerInterval = setInterval(() => {
-      thinkingElapsed.value += 100
-    }, 100)
+    if (props.message.durationMs) thinkingElapsed.value = props.message.durationMs
+    timerInterval = setInterval(() => { thinkingElapsed.value += 100 }, 100)
   }
 })
 
-/** 流式结束时停止计时 */
 watch(() => props.isStreaming, (streaming) => {
-  if (!streaming && timerInterval) {
-    clearInterval(timerInterval)
-    timerInterval = null
-  }
+  if (!streaming && timerInterval) { clearInterval(timerInterval); timerInterval = null }
 })
 
 onUnmounted(() => {
   if (timerInterval) clearInterval(timerInterval)
 })
 
-
-/** 格式化耗时 mm:ss.x */
 function formatElapsed(ms: number): string {
   const sec = Math.floor(ms / 1000)
   const min = Math.floor(sec / 60)
@@ -72,45 +61,36 @@ function formatElapsed(ms: number): string {
   return min > 0 ? `${min}m${s}.${ds}s` : `${s}.${ds}s`
 }
 
-/** 推理类型中文标签（Agent 架构升级后新增） */
-function reasoningTypeLabel(type: string): string {
-  const labels: Record<string, string> = {
-    planning: '规划中',
-    observing: '观察中',
-    concluding: '总结中',
-    error_recovery: '纠错中',
-  }
-  return labels[type] || type
-}
-
-
-// ─── 格式化 duration_ms ───
-
 function formatDuration(ms: number): string {
   if (ms < 1000) return `${ms}ms`
   if (ms < 60000) return `${(ms / 1000).toFixed(1)}s`
   return `${Math.floor(ms / 60000)}m${Math.floor((ms % 60000) / 1000)}s`
 }
 
-// ─── 用户消息首字符提取（用于头像占位） ───
+// ─── 用户头像首字符 ───
+const userInitial = computed(() => props.message.content.charAt(0).toUpperCase())
 
-const userInitial = computed(() => {
-  return props.message.content.charAt(0).toUpperCase()
-})
-
-// ─── ResultTable 数据转换 ───
-
+// ─── ResultTable 数据 ───
 const resultColumns = computed(() => {
   if (!props.message.dataPreview?.columns) return []
-  return props.message.dataPreview.columns.map((name) => ({
-    name,
-    type: 'text',
-    is_sensitive: false,
-  }))
+  return props.message.dataPreview.columns.map((name) => ({ name, type: 'text', is_sensitive: false }))
+})
+const resultRows = computed(() => props.message.dataPreview?.rows ?? [])
+
+// ─── tool_result 折叠 ───
+const toolResultExpanded = ref(false)
+
+// ─── 工具调用参数 JSON ───
+const toolArgsJson = computed(() => {
+  if (!props.message.toolArgs) return ''
+  return JSON.stringify(props.message.toolArgs, null, 2)
 })
 
-const resultRows = computed(() => {
-  return props.message.dataPreview?.rows ?? []
+// ─── 光标显示条件：仅流式回答阶段 ───
+const showCursor = computed(() => {
+  return props.isStreaming && props.isLast
+    && props.message.type === 'text'
+    && props.message.stage !== 'thinking'
 })
 </script>
 
@@ -121,447 +101,307 @@ const resultRows = computed(() => {
       `role-${message.role}`,
       `type-${message.type}`,
       { 'is-streaming': isStreaming && isLast },
+      { 'in-card': isInCard },
     ]"
   >
-    <!-- ─── 用户消息：纯文本 ─── -->
+    <!-- ═══════════ 用户消息气泡 ═══════════ -->
     <template v-if="message.role === 'user' && message.type === 'text'">
-      <div class="user-avatar">{{ userInitial }}</div>
-      <div class="bubble user-bubble">
-        <p class="user-text">{{ message.content }}</p>
+      <div class="user-msg-wrapper">
+        <div class="user-bubble">
+          <p class="user-text">{{ message.content }}</p>
+        </div>
       </div>
     </template>
 
-    <!-- ─── 助手回复 ─── -->
+    <!-- ═══════════ 助手消息 ═══════════ -->
     <template v-else>
-      <div class="bubble" :class="isThinkingPhase ? 'thinking-phase-item' : 'assistant-bubble'">
-        <!-- === text（Markdown 渲染） === -->
-        <template v-if="message.type === 'text'">
+      <!-- === waiting（三点脉冲） === -->
+      <template v-if="message.type === 'waiting'">
+        <div class="waiting-dots">
+          <span class="dot"></span>
+          <span class="dot"></span>
+          <span class="dot"></span>
+        </div>
+      </template>
+
+      <!-- === reasoning（深度推理文本） === -->
+      <template v-if="message.type === 'reasoning'">
+        <div class="reasoning-text">
           <MarkdownRenderer :content="message.content" />
-        </template>
+        </div>
+      </template>
 
-        <!-- === waiting（三点脉冲动画） === -->
-        <template v-if="message.type === 'waiting'">
-          <div class="waiting-content">
-            <div class="dot-container">
-              <span class="dot"></span>
-              <span class="dot"></span>
-              <span class="dot"></span>
-            </div>
+      <!-- === thinking === -->
+      <template v-if="message.type === 'thinking'">
+        <div class="thinking-block" :class="{ expanded: thinkingElapsed > 0 }">
+          <div class="thinking-header">
+            <span class="thinking-label">推理过程</span>
+            <span class="thinking-timer">{{ formatElapsed(thinkingElapsed) }}</span>
           </div>
-        </template>
+          <div class="thinking-body">
+            <p class="thinking-content">{{ message.content }}</p>
+          </div>
+        </div>
+      </template>
 
-        <!-- === reasoning（模型深度推理，渲染到思考面板） === -->
-        <template v-if="message.type === 'reasoning'">
-          <div class="reasoning-item">
+      <!-- === tool_call（工具调用卡片） === -->
+      <template v-if="message.type === 'tool_call'">
+        <div class="tool-call-card">
+          <div class="tool-call-header">
+            <div class="tool-call-left">
+              <!-- 加载中旋转图标 -->
+              <svg
+                v-if="message.stepStatus === 'running'"
+                class="tool-call-spinner"
+                width="14" height="14" viewBox="0 0 24 24" fill="none"
+                stroke="currentColor" stroke-width="2.5"
+              >
+                <circle cx="12" cy="12" r="10" stroke-opacity="0.25" />
+                <path d="M12 2a10 10 0 0 1 10 10" stroke-linecap="round" />
+              </svg>
+              <!-- 完成勾选 -->
+              <svg
+                v-else-if="message.stepStatus === 'done'"
+                class="tool-call-icon done"
+                width="14" height="14" viewBox="0 0 24 24" fill="none"
+                stroke="currentColor" stroke-width="2.5" stroke-linecap="round"
+                stroke-linejoin="round"
+              >
+                <polyline points="20 6 9 17 4 12" />
+              </svg>
+              <!-- 默认工具图标 -->
+              <svg
+                v-else
+                class="tool-call-icon"
+                width="14" height="14" viewBox="0 0 24 24" fill="none"
+                stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                stroke-linejoin="round"
+              >
+                <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z" />
+              </svg>
+              <span class="tool-call-name">
+                <template v-if="message.stepStatus === 'running'">正在调用工具：</template>
+                <template v-else-if="message.stepStatus === 'done'">已完成调用：</template>
+                <template v-else>调用工具：</template>
+                <strong>{{ message.tool }}</strong>
+              </span>
+            </div>
+            <span
+              v-if="message.durationMs !== undefined"
+              class="tool-call-duration"
+            >{{ formatDuration(message.durationMs) }}</span>
+          </div>
+          <!-- 参数 JSON -->
+          <div v-if="toolArgsJson" class="tool-call-body">
+            <pre class="tool-call-args">{{ toolArgsJson }}</pre>
+          </div>
+        </div>
+      </template>
+
+      <!-- === tool_result（工具返回结果，折叠块） === -->
+      <template v-if="message.type === 'tool_result'">
+        <details class="tool-result-block" @toggle="toolResultExpanded = ($event.target as HTMLDetailsElement).open">
+          <summary class="tool-result-summary">
+            <svg class="tool-result-chevron" :class="{ open: toolResultExpanded }" width="12" height="12" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <path d="M6 4L10 8L6 12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="tool-result-icon">
+              <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>
+              <line x1="3" y1="9" x2="21" y2="9"/>
+              <line x1="9" y1="21" x2="9" y2="9"/>
+            </svg>
+            <span class="tool-result-label">工具返回结果</span>
+            <span v-if="message.durationMs !== undefined" class="tool-result-duration">{{ formatDuration(message.durationMs) }}</span>
+          </summary>
+          <div class="tool-result-content">
             <MarkdownRenderer :content="message.content" />
           </div>
-        </template>
+        </details>
+      </template>
 
-        <!-- === thinking === -->
-        <template v-if="message.type === 'thinking'">
-          <div class="thinking-block" :class="{ expanded: thinkingExpanded }">
-            <button class="thinking-header" @click="thinkingExpanded = !thinkingExpanded">
-              <span class="thinking-title">推理过程</span>
-              <span v-if="message.reasoningType" class="thinking-badge" :class="`badge-${message.reasoningType}`">
-                {{ reasoningTypeLabel(message.reasoningType) }}
-              </span>
-              <span class="thinking-timer">
-                {{ formatElapsed(thinkingElapsed) }}
-              </span>
-              <span class="thinking-toggle">{{ thinkingExpanded ? '收起' : '展开' }}</span>
-            </button>
-            <div v-show="thinkingExpanded" class="thinking-body">
-              <p class="thinking-content">{{ message.content }}</p>
-            </div>
-          </div>
-        </template>
+      <!-- === text（Markdown 回答，区分 thinking / answer 阶段） === -->
+      <template v-if="message.type === 'text'">
+        <!-- thinking 阶段文本：左侧带竖线提示 -->
+        <div v-if="message.stage === 'thinking' || isThinkingPhase" class="thinking-text-block">
+          <MarkdownRenderer :content="message.content" />
+        </div>
+        <!-- answer 阶段：Markdown 渲染 -->
+        <div v-else class="answer-text-block">
+          <MarkdownRenderer :content="message.content" />
+          <span v-if="showCursor" class="cursor-blink"></span>
+        </div>
+      </template>
 
-        <!-- === thinking_group（思考过程折叠块）=== -->
-        <template v-if="message.type === 'thinking_group' && message.thinkingGroup">
-          <ThinkingGroup
-            :steps="message.thinkingGroup.steps"
-            :step-count="message.thinkingGroup.stepCount"
-            :total-duration-ms="message.thinkingGroup.totalDurationMs"
-          />
-        </template>
+      <!-- === sql === -->
+      <template v-if="message.type === 'sql'">
+        <SqlBlock
+          :sql="message.sqlContent || message.content"
+          :audit-status="message.auditStatus"
+          :is-readonly="message.isReadonly"
+        />
+      </template>
 
-        <!-- === tool_call === -->
-        <template v-if="message.type === 'tool_call'">
-          <div class="tool-step">
-            <div class="step-indicator">
-              <span v-if="message.stepStatus === 'running'" class="step-spinner"></span>
-              <span v-else-if="message.stepStatus === 'done'" class="step-icon done">✅</span>
-              <span v-else class="step-icon pending">🔧</span>
-            </div>
-            <div class="step-body">
-              <span class="step-tool">{{ message.tool }}</span>
-              <span class="step-desc">{{ message.content }}</span>
-            </div>
-          </div>
-        </template>
+      <!-- === result === -->
+      <template v-if="message.type === 'result'">
+        <ResultTable
+          v-if="resultColumns.length > 0 || resultRows.length > 0"
+          :columns="resultColumns"
+          :rows="resultRows"
+          :total-rows="message.totalRows ?? resultRows.length"
+          :execution-time-ms="message.executionTimeMs"
+        />
+        <MarkdownRenderer v-else :content="message.summary || message.content" />
+      </template>
 
-        <!-- === tool_result === -->
-        <template v-if="message.type === 'tool_result'">
-          <div class="tool-step result">
-            <div class="step-indicator">
-              <span class="step-icon done">✅</span>
-            </div>
-            <div class="step-body">
-              <span class="step-tool">{{ message.tool }}</span>
-              <MarkdownRenderer class="tool-result-content" :content="message.content" />
-              <span v-if="message.durationMs !== undefined" class="step-duration">
-                {{ formatDuration(message.durationMs) }}
-              </span>
-            </div>
-          </div>
-        </template>
+      <!-- === error === -->
+      <template v-if="message.type === 'error'">
+        <ErrorCard
+          :severity="(message.severity as 'info' | 'warning' | 'error') ?? 'error'"
+          :error-code="message.errorCode"
+          :user-message="message.userMessage"
+          :content="message.content"
+        />
+      </template>
 
-        <!-- === sql（F-08 SqlBlock 组件）=== -->
-        <template v-if="message.type === 'sql'">
-          <SqlBlock
-            :sql="message.sqlContent || message.content"
-            :audit-status="message.auditStatus"
-            :is-readonly="message.isReadonly"
-          />
-        </template>
-
-        <!-- === result（F-09 ResultTable 组件 / 纯文本回退）=== -->
-        <template v-if="message.type === 'result'">
-          <!-- 有结构化数据（dataPreview）→ ResultTable -->
-          <ResultTable
-            v-if="resultColumns.length > 0 || resultRows.length > 0"
-            :columns="resultColumns"
-            :rows="resultRows"
-            :total-rows="message.totalRows ?? resultRows.length"
-            :execution-time-ms="message.executionTimeMs"
-          />
-          <!-- 纯文本回答（无 dataPreview）→ Markdown 渲染 -->
-          <MarkdownRenderer v-else :content="message.summary || message.content" />
-        </template>
-
-        <!-- === error（F-12 ErrorCard 组件）=== -->
-        <template v-if="message.type === 'error'">
-          <ErrorCard
-            :severity="(message.severity as 'info' | 'warning' | 'error') ?? 'error'"
-            :error-code="message.errorCode"
-            :user-message="message.userMessage"
-            :content="message.content"
-          />
-        </template>
-
-        <!-- === diagnosis（F-16 DiagnosisCard 组件）=== -->
-        <template v-if="message.type === 'diagnosis' && message.findings">
-          <DiagnosisCard
-            :findings="message.findings"
-            :target-sql="message.targetSql"
-          />
-        </template>
-
-        <!-- 打字光标（仅最终答案流式输出时显示） -->
-        <span
-          v-if="isStreaming && isLast && message.type === 'text' && message.stage !== 'thinking'"
-          class="cursor-blink"
-        ></span>
-      </div>
+      <!-- === diagnosis === -->
+      <template v-if="message.type === 'diagnosis' && message.findings">
+        <DiagnosisCard
+          :findings="message.findings"
+          :target-sql="message.targetSql"
+        />
+      </template>
     </template>
   </div>
 </template>
 
 <style scoped>
+/* ═══════════ 基础 ═══════════ */
 .message-bubble {
-  display: flex;
-  gap: 10px;
-  margin-bottom: 10px;
   animation: msg-enter 0.2s ease both;
+}
+
+.message-bubble.in-card {
+  animation: none;
 }
 
 @keyframes msg-enter {
   from { opacity: 0; transform: translateY(6px); }
-  to { opacity: 1; transform: translateY(0); }
+  to   { opacity: 1; transform: translateY(0); }
 }
 
-/* ─── 用户消息 ─── */
+/* ═══════════ 用户消息 ─ 右对齐、圆角气泡 ═══════════ */
 .role-user {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 16px;
+}
+
+.user-msg-wrapper {
+  display: flex;
   flex-direction: row-reverse;
+  align-items: flex-end;
+  gap: 10px;
+  max-width: 70%;
 }
 
 .user-avatar {
-  width: 28px;
-  height: 28px;
+  width: 30px;
+  height: 30px;
+  min-width: 30px;
   border-radius: 50%;
   background: var(--accent-teal);
   color: #0B0E14;
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 700;
   display: flex;
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
-  align-self: flex-end;
-}
-
-/* ─── 气泡通用 ─── */
-.bubble {
-  max-width: 80%;
-  border-radius: var(--radius-md);
-  font-size: 14px;
-  line-height: 1.6;
-  word-break: break-word;
 }
 
 .user-bubble {
-  background: rgba(45, 212, 191, 0.1);
-  border: 1px solid rgba(45, 212, 191, 0.2);
-  padding: 8px 14px;
-  border-top-right-radius: 2px;
+  background: var(--chat-user-bg);
+  border: 1px solid var(--chat-user-border);
+  border-radius: var(--radius-2xl);
+  border-top-right-radius: 4px;
+  padding: 10px 18px;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.06);
 }
 
 .user-text {
-  color: var(--text-primary);
+  font-size: 15px;
+  line-height: 1.65;
+  color: var(--chat-user-text);
   white-space: pre-wrap;
+  word-break: break-word;
+  margin: 0;
 }
 
-.assistant-bubble {
-  background: var(--bg-elevated);
-  border: 1px solid var(--border-color);
-  padding: 8px 14px;
-  border-top-left-radius: 2px;
-  max-width: 85%;
-}
-
-.assistant-text {
-  color: var(--text-primary);
-  white-space: pre-wrap;
-}
-
-/* ─── thinking-phase-item（思考阶段统一降权容器） ─── */
-.thinking-phase-item {
-  background: transparent;
-  border: none;
-  padding: 2px 14px;
-  max-width: 100%;
-  font-size: 12px;
-  color: var(--text-tertiary);
-}
-
-/* 思考阶段内部各子容器去除独立边框/背景 */
-.thinking-phase-item .thinking-block {
-  border: none;
-  border-radius: 0;
-  opacity: 1;
-}
-
-.thinking-phase-item .thinking-header {
-  font-size: 11px;
-  padding: 3px 6px;
-}
-
-.thinking-phase-item .thinking-body {
-  background: transparent;
-  border-top: none;
-  padding: 4px 8px 8px;
-}
-
-.thinking-phase-item .thinking-content {
-  font-size: 12px;
-  opacity: 0.85;
-}
-
-.thinking-phase-item .thinking-timer {
-  font-size: 10px;
-}
-
-.thinking-phase-item .thinking-toggle {
-  font-size: 10px;
-}
-
-.thinking-phase-item .thinking-badge {
-  font-size: 9px;
-}
-
-.thinking-phase-item .tool-step {
-  padding: 1px 0;
-}
-
-.thinking-phase-item .step-tool {
-  font-size: 11px;
-  font-weight: 400;
-  color: var(--text-tertiary);
-}
-
-.thinking-phase-item .step-desc {
-  font-size: 12px;
-  color: var(--text-tertiary);
-}
-
-.thinking-phase-item .step-icon {
-  font-size: 11px;
-}
-
-.thinking-phase-item .step-spinner {
-  width: 12px;
-  height: 12px;
-}
-
-.thinking-phase-item .step-duration {
-  font-size: 10px;
-}
-
-.thinking-phase-item .tool-result-content {
-  font-size: 12px;
-  color: var(--text-tertiary);
-}
-
-/* ─── reasoning 推理文本（思考面板内） ─── */
-.reasoning-item {
-  font-size: 12px;
-  color: var(--text-tertiary);
-  line-height: 1.6;
-  opacity: 0.85;
-}
-
-.thinking-phase-item .reasoning-item {
-  font-size: 11.5px;
-  opacity: 0.8;
-}
-
-.thinking-phase-item .waiting-content {
-  padding: 2px 0;
-}
-
-.thinking-phase-item .dot {
-  width: 4px;
-  height: 4px;
-}
-
-/* ─── waiting 占位（三点脉冲动画） ─── */
-.waiting-content {
+/* ═══════════ waiting 三点脉冲 ═══════════ */
+.waiting-dots {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 4px 0;
-}
-
-/* ─── 三点脉冲（从 ThinkingIndicator 复用） ─── */
-.dot-container {
-  display: flex;
-  align-items: center;
-  gap: 4px;
+  gap: 5px;
+  padding: 12px 20px;
 }
 
 .dot {
-  width: 5px;
-  height: 5px;
+  width: 6px;
+  height: 6px;
   border-radius: 50%;
   background: var(--text-tertiary);
   animation: dot-bounce 1.4s ease-in-out infinite both;
 }
-
 .dot:nth-child(1) { animation-delay: 0s; }
 .dot:nth-child(2) { animation-delay: 0.2s; }
 .dot:nth-child(3) { animation-delay: 0.4s; }
 
 @keyframes dot-bounce {
   0%, 80%, 100% { opacity: 0.3; transform: scale(0.8); }
-  40% { opacity: 1; transform: scale(1.1); }
+  40%          { opacity: 1;   transform: scale(1.1); }
 }
 
-/* ─── 打字光标 ─── */
-.cursor-blink {
-  display: inline-block;
-  width: 2px;
-  height: 16px;
-  background: var(--accent-teal);
-  margin-left: 2px;
-  vertical-align: text-bottom;
-  animation: blink-cursor 0.8s step-end infinite;
+/* ═══════════ reasoning（深度推理文本） ═══════════ */
+.reasoning-text {
+  font-size: 13px;
+  color: var(--chat-thinking-text);
+  line-height: 1.7;
+  opacity: 0.85;
+  padding: 2px 0;
 }
 
-@keyframes blink-cursor {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0; }
-}
-
-/* ─── thinking 推理区（低视觉权重，与最终答案拉开差距） ─── */
+/* ═══════════ thinking（推理折叠块） ═══════════ */
 .thinking-block {
-  border: 1px solid rgba(128, 128, 128, 0.15);
+  border: 1px solid var(--chat-thinking-border);
   border-radius: var(--radius-md);
   overflow: hidden;
-  opacity: 0.85;
+  opacity: 0.9;
+  margin: 4px 0;
 }
 
 .thinking-header {
   display: flex;
   align-items: center;
-  gap: 6px;
-  width: 100%;
-  padding: 6px 10px;
-  background: transparent;
-  border: none;
-  cursor: pointer;
-  color: var(--text-tertiary);
-  font-family: var(--font-body);
-  font-size: 11.5px;
-  text-align: left;
-  transition: background var(--transition-fast);
+  justify-content: space-between;
+  padding: 7px 14px;
+  background: var(--bg-surface);
+  border-bottom: 1px solid var(--chat-thinking-divider);
 }
 
-.thinking-header:hover {
-  background: rgba(128, 128, 128, 0.05);
-}
-
-.thinking-title {
-  font-weight: 400;
+.thinking-label {
+  font-size: 12px;
+  font-weight: 500;
   color: var(--text-tertiary);
 }
 
 .thinking-timer {
   font-family: var(--font-mono);
   font-size: 11px;
-  margin-left: auto;
   color: var(--text-tertiary);
-}
-
-.thinking-toggle {
-  font-size: 11px;
-  color: var(--text-tertiary);
-  margin-left: 8px;
-}
-
-/* reasoning_type 标签（Agent 架构升级后新增） */
-.thinking-badge {
-  font-size: 10px;
-  font-weight: 500;
-  padding: 1px 6px;
-  border-radius: 8px;
-  line-height: 1.4;
-  margin-left: 4px;
-}
-
-.badge-planning {
-  background: rgba(251, 191, 36, 0.15);
-  color: var(--color-warning, #fbbf24);
-}
-
-.badge-observing {
-  background: rgba(52, 211, 153, 0.15);
-  color: var(--accent-teal, #34d399);
-}
-
-.badge-concluding {
-  background: rgba(167, 139, 250, 0.15);
-  color: var(--accent-purple, #a78bfa);
-}
-
-.badge-error_recovery {
-  background: rgba(248, 113, 113, 0.15);
-  color: var(--color-error, #f87171);
 }
 
 .thinking-body {
-  padding: 8px 12px 12px;
-  background: var(--bg-surface);
-  border-top: 1px solid var(--border-color);
+  padding: 10px 14px;
 }
 
 .thinking-content {
@@ -570,255 +410,201 @@ const resultRows = computed(() => {
   line-height: 1.7;
   white-space: pre-wrap;
   opacity: 0.85;
+  margin: 0;
 }
 
-/* ─── tool_call / tool_result ─── */
-.tool-step {
-  display: flex;
-  gap: 8px;
-  align-items: flex-start;
-  padding: 2px 0;
+/* ═══════════ 思考阶段文本（左侧竖线） ═══════════ */
+.thinking-text-block {
+  padding: 2px 0 2px 14px;
+  border-left: 2px solid var(--chat-divider);
+  font-size: 13px;
+  color: var(--chat-thinking-text);
+  line-height: 1.65;
+  margin: 6px 0;
 }
 
-.step-indicator {
-  flex-shrink: 0;
-  width: 18px;
-  height: 18px;
+/* ═══════════ tool_call 卡片 ─ 蓝色调 ═══════════ */
+.tool-call-card {
+  border: 1px solid var(--chat-tool-border);
+  border-radius: var(--radius-lg);
+  background: var(--chat-tool-bg);
+  overflow: hidden;
+  margin: 6px 0;
+}
+
+.tool-call-header {
   display: flex;
   align-items: center;
-  justify-content: center;
-  margin-top: 2px;
+  justify-content: space-between;
+  padding: 10px 16px;
+  background: var(--chat-tool-header-bg);
+  border-bottom: 1px solid var(--chat-tool-border);
 }
 
-.step-spinner {
-  width: 14px;
-  height: 14px;
-  border: 2px solid var(--border-color);
-  border-top-color: var(--accent-blue);
-  border-radius: 50%;
-  animation: spin 0.6s linear infinite;
+.tool-call-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.tool-call-spinner {
+  color: var(--accent-blue);
+  animation: spin 0.8s linear infinite;
+  flex-shrink: 0;
 }
 
 @keyframes spin {
   to { transform: rotate(360deg); }
 }
 
-.step-icon {
+.tool-call-icon {
+  color: var(--chat-tool-label);
+  flex-shrink: 0;
+}
+
+.tool-call-icon.done {
+  color: var(--color-success);
+}
+
+.tool-call-name {
   font-size: 13px;
-  line-height: 1;
+  color: var(--chat-tool-text);
+  font-weight: 400;
 }
 
-.step-body {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  gap: 6px;
-  min-width: 0;
+.tool-call-name strong {
+  font-weight: 600;
+  color: var(--chat-tool-label);
 }
 
-.step-tool {
+.tool-call-duration {
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: 10px;
   font-weight: 500;
-  color: var(--accent-blue);
+  color: var(--chat-tool-duration);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
   white-space: nowrap;
 }
 
-.step-desc {
-  font-size: 13px;
-  color: var(--text-secondary);
+.tool-call-body {
+  padding: 14px 16px;
 }
 
-.step-duration {
+.tool-call-args {
   font-family: var(--font-mono);
-  font-size: 11px;
-  color: var(--text-tertiary);
-  margin-left: auto;
-}
-
-.tool-step.result .step-body {
-  align-items: center;
-}
-
-/* tool_result 内的 Markdown 渲染（紧凑模式） */
-.tool-result-content {
   font-size: 13px;
-  color: var(--text-secondary);
-  display: inline;
-}
-.tool-result-content :deep(p) {
-  display: inline;
+  line-height: 1.6;
+  color: var(--chat-tool-args-text);
   margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
-.tool-result-content :deep(p:not(:last-child)::after) {
-  content: ' ';
-}
-.tool-result-content :deep(code):not(.hljs) {
-  font-size: 0.85em;
-  padding: 1px 5px;
-}
-.tool-result-content :deep(pre.code-block) {
+
+/* ═══════════ tool_result 折叠块 ═══════════ */
+.tool-result-block {
   margin: 6px 0;
 }
-.tool-result-content :deep(pre.code-block code.hljs) {
-  padding: 8px 12px;
-  font-size: 11.5px;
-}
-.tool-result-content :deep(strong) {
-  color: var(--text-primary);
-}
 
-/* ─── sql stub ─── */
-.sql-block.stub {
-  border: 1px solid var(--border-color);
-  border-radius: var(--radius-md);
-  overflow: hidden;
-}
-
-.sql-header {
+.tool-result-summary {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 4px 10px;
-  background: var(--bg-surface);
-  border-bottom: 1px solid var(--border-color);
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  list-style: none;
+  padding: 6px 0;
+  transition: color var(--transition-fast);
 }
 
-.sql-badge {
+.tool-result-summary:hover {
+  color: var(--text-secondary);
+}
+
+.tool-result-summary::-webkit-details-marker {
+  display: none;
+}
+
+.tool-result-chevron {
+  flex-shrink: 0;
+  transition: transform 0.2s ease;
+}
+
+.tool-result-chevron.open {
+  transform: rotate(90deg);
+}
+
+.tool-result-icon {
+  flex-shrink: 0;
+}
+
+.tool-result-label {
+  flex: 1;
+}
+
+.tool-result-duration {
   font-family: var(--font-mono);
-  font-size: 11px;
-  font-weight: 600;
-  color: var(--accent-teal);
-  text-transform: uppercase;
+  font-size: 10px;
+  color: var(--text-tertiary);
+  background: var(--bg-surface);
+  padding: 1px 8px;
+  border-radius: var(--radius-sm);
 }
 
-.sql-warning {
-  font-size: 11px;
-  color: var(--color-warning);
+.tool-result-content {
+  padding: 12px 14px;
+  background: var(--chat-result-bg);
+  border: 1px solid var(--chat-result-border);
+  border-radius: var(--radius-md);
+  font-size: 12px;
+  color: var(--chat-result-text);
+  line-height: 1.6;
+  overflow-x: auto;
 }
 
-.sql-rejected {
-  font-size: 11px;
-  color: var(--color-error);
-}
-
-.sql-code {
-  padding: 10px 12px;
+.tool-result-content :deep(pre) {
   margin: 0;
   font-family: var(--font-mono);
   font-size: 12px;
-  line-height: 1.6;
+  white-space: pre-wrap;
+}
+
+/* ═══════════ answer 文本 ═══════════ */
+.answer-text-block {
+  font-size: 14px;
+  line-height: 1.7;
   color: var(--text-primary);
-  background: #0D1117;
-  overflow-x: auto;
-  white-space: pre;
+  word-break: break-word;
 }
 
-/* ─── result stub ─── */
-.result-block.stub {
-  border: 1px solid var(--border-color);
-  border-radius: var(--radius-md);
-  overflow: hidden;
+/* ═══════════ 打字光标 ═══════════ */
+.cursor-blink {
+  display: inline-block;
+  width: 2px;
+  height: 17px;
+  background: var(--accent-teal);
+  margin-left: 2px;
+  vertical-align: text-bottom;
+  animation: blink-cursor 0.8s step-end infinite;
 }
 
-.result-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 6px 10px;
-  background: var(--bg-surface);
-  border-bottom: 1px solid var(--border-color);
+@keyframes blink-cursor {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0; }
 }
 
-.result-summary {
-  font-size: 13px;
-  color: var(--text-secondary);
+/* ═══════════ 卡片内嵌模式 ═══════════ */
+.message-bubble.in-card.role-assistant {
+  margin: 0;
 }
 
-.result-duration {
-  font-family: var(--font-mono);
-  font-size: 11px;
-  color: var(--text-tertiary);
+.message-bubble.in-card .tool-call-card {
+  margin: 8px 0;
 }
 
-.result-preview {
-  padding: 4px;
-  overflow-x: auto;
-}
-
-.preview-table {
-  width: 100%;
-  border-collapse: collapse;
-  font-family: var(--font-mono);
-  font-size: 11px;
-}
-
-.preview-table th {
-  background: var(--bg-surface);
-  color: var(--text-tertiary);
-  padding: 4px 8px;
-  text-align: left;
-  border-bottom: 1px solid var(--border-color);
-  white-space: nowrap;
-}
-
-.preview-table td {
-  padding: 3px 8px;
-  border-bottom: 1px solid var(--border-color);
-  color: var(--text-secondary);
-  white-space: nowrap;
-}
-
-.result-more {
-  padding: 4px 8px;
-  font-size: 11px;
-  color: var(--text-tertiary);
-}
-
-/* ─── error stub ─── */
-.error-card.stub {
-  display: flex;
-  gap: 8px;
-  padding: 8px 12px;
-  border-radius: var(--radius-md);
-  border: 1px solid;
-}
-
-.severity-error {
-  background: rgba(248, 113, 113, 0.08);
-  border-color: rgba(248, 113, 113, 0.25);
-}
-
-.severity-warning {
-  background: rgba(251, 191, 36, 0.08);
-  border-color: rgba(251, 191, 36, 0.25);
-}
-
-.severity-info {
-  background: rgba(96, 165, 250, 0.08);
-  border-color: rgba(96, 165, 250, 0.25);
-}
-
-.error-icon {
-  font-size: 16px;
-  flex-shrink: 0;
-  margin-top: 1px;
-}
-
-.error-body {
-  min-width: 0;
-}
-
-.error-title {
-  font-size: 13px;
-  color: var(--text-primary);
-  line-height: 1.5;
-}
-
-.error-code {
-  font-family: var(--font-mono);
-  font-size: 11px;
-  color: var(--text-tertiary);
-  margin-top: 2px;
+.message-bubble.in-card .reasoning-text {
+  padding: 0;
 }
 </style>

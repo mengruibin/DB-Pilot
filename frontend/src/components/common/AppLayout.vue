@@ -186,5 +186,7 @@ function handleDocClick(): void {
   height: 100%;
   overflow-y: auto;
   padding: 24px;
+  /* max-width: 1020px;
+  margin: 0 auto; */
 }
 </style>

@@ -353,30 +353,31 @@ export const useChatStore = defineStore('chat', () => {
     )
     if (!hasTools) { turnStartIndex.value = -1; return }
 
-    // 找到 stage === 'answer' 的 text 消息作为分界点
-    let answerBoundary = -1
-    for (let i = 0; i < turnMsgs.length; i++) {
-      if (turnMsgs[i].type === 'text' && turnMsgs[i].stage === 'answer') {
-        answerBoundary = i
+    // 找到最后一条工具交互（tool_call / tool_result）的位置作为分界点。
+    // 工具交互及之前的思考内容 → thinking_group；之后的 text(answer) → 最终回答。
+    let lastToolIdx = -1
+    for (let i = turnMsgs.length - 1; i >= 0; i--) {
+      if (turnMsgs[i].type === 'tool_call' || turnMsgs[i].type === 'tool_result') {
+        lastToolIdx = i
         break
       }
     }
 
-    // 没有 answer 标记的消息（可能无 stage_change 触发），无需分组
-    if (answerBoundary < 0) { turnStartIndex.value = -1; return }
+    // 没有工具交互消息（不太可能，但做防御）
+    if (lastToolIdx < 0) { turnStartIndex.value = -1; return }
 
-    const groupingTypes = new Set(['text', 'tool_call', 'tool_result', 'sql'])
-    // 检查分界点之前是否有可分组的内容
-    const hasGroupable = turnMsgs.slice(0, answerBoundary).some((m) => groupingTypes.has(m.type))
+    const groupingTypes = new Set(['text', 'tool_call', 'tool_result', 'sql', 'reasoning'])
+    // 检查分界点及之前是否有可分组的内容
+    const hasGroupable = turnMsgs.slice(0, lastToolIdx + 1).some((m) => groupingTypes.has(m.type))
     if (!hasGroupable) { turnStartIndex.value = -1; return }
 
-    // 分离：thinking steps（final answer 之前）vs keep（final answer 及其他）
+    // 分离：thinking steps（lastToolIdx 及之前）vs keep（lastToolIdx 之后）
     const thinkingSteps: StoreMessage[] = []
     const keepMessages: StoreMessage[] = []
 
     for (let i = 0; i < turnMsgs.length; i++) {
-      if (i >= answerBoundary) {
-        // final answer 及之后的消息 — 保留在顶层
+      if (i > lastToolIdx) {
+        // 工具交互之后的消息 — 保留在顶层（最终回答）
         keepMessages.push(turnMsgs[i])
       } else if (groupingTypes.has(turnMsgs[i].type)) {
         // thinking 内容 — 归入分组
@@ -544,16 +545,32 @@ export const useChatStore = defineStore('chat', () => {
 
         // ── tool_result ──
         onToolResult: (event: ToolResultEvent) => {
+          // 1. 找到对应的 tool_call 消息，标记为 done（不改变 type，保留 tool_call 卡片）
           const toolCall = findLastRunningToolCall()
           if (toolCall && toolCall.tool === event.tool) {
             toolCall.stepStatus = 'done'
             toolCall.durationMs = event.duration_ms
-            toolCall.content = event.summary
-            toolCall.type = 'tool_result'
-            toolCall.safetyChecksPassed = event.safety_checks_passed
             toolCall.agentRunId = event.agent_run_id
             toolCall.iteration = event.iteration
           }
+
+          // 2. 推送独立的 tool_result 消息（「工具返回结果」折叠块）
+          removeWaitingMessage()
+          sealStreamingMessage()
+          sealStreamingReasoningMessage()
+          messages.value.push({
+            id: nextMsgId(),
+            sessionId: currentSessionId.value ?? '',
+            role: 'assistant',
+            type: 'tool_result',
+            content: event.summary,
+            tool: event.tool,
+            durationMs: event.duration_ms,
+            safetyChecksPassed: event.safety_checks_passed,
+            agentRunId: event.agent_run_id,
+            iteration: event.iteration,
+            createdAt: new Date().toISOString(),
+          })
         },
 
         // ── sql ──
@@ -603,13 +620,19 @@ export const useChatStore = defineStore('chat', () => {
           if (newStage === currentStage.value) return  // 幂等保护
 
           if (newStage === 'answer') {
-            // 收编：向前扫描，将本 turn 内所有 stage='thinking' 的 text
-            // 消息改为 'answer'——文字从思考面板"上升"到主聊天区
+            // 收编：只将「最后一条 tool_call/tool_result 之后」的 text(stage=thinking)
+            // 改为 answer。工具调用之前的思考文本保持 thinking 阶段。
+            // 向前扫描，遇到 tool_call/tool_result 时停止收编（之前的文本保持 thinking）。
+            let hitToolInteraction = false
             for (let i = messages.value.length - 1; i >= 0; i--) {
               const m = messages.value[i]
               if (m.role !== 'assistant') break
-              if (m.type !== 'text') continue
-              if (m.stage === 'thinking') {
+              if (m.type === 'tool_call' || m.type === 'tool_result') {
+                hitToolInteraction = true
+                continue  // 工具交互本身不改变 stage，但之后的文本不再收编
+              }
+              if (hitToolInteraction) continue  // 工具交互之前的文本保持 thinking
+              if (m.type === 'text' && m.stage === 'thinking') {
                 m.stage = 'answer'
               }
             }

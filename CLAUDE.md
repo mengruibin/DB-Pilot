@@ -8,11 +8,11 @@ DB-Pilot 是一个基于大语言模型（LLM）的 **AI 数据库运维助手**
 
 ## Commands
 
-### Backend (Python 3.12＋, FastAPI)
+### Backend (Python 3.12＋, FastAPI, uv)
 
 ```bash
 # 启动开发服务器（hot-reload）
-cd backend && uvicorn app.main:app --reload --port 8000
+cd backend && uv run uvicorn app.main:app --reload --port 8000
 
 # 代码检查（Ruff）
 ruff check backend/app/
@@ -28,8 +28,8 @@ pytest backend/tests/ -v
 pytest backend/tests/test_sql_auditor.py -v
 
 # 数据库迁移（Alembic）
-alembic upgrade head
-alembic revision --autogenerate -m "description"
+cd backend && alembic upgrade head
+cd backend && alembic revision --autogenerate -m "description"
 ```
 
 ### Frontend (Vue 3 + TypeScript + Vite)
@@ -55,8 +55,9 @@ npx vue-tsc --noEmit
 # 后端 .env 模板见 backend/.env.example
 # 关键配置项：
 #   LLM_API_KEY, LLM_MODEL, LLM_PROVIDER (anthropic|openai)
+#   ENABLE_REASONING=true (启用模型深度思考模式)
+#   LLM_API_URL (OpenAI 兼容接口地址)
 #   DATABASE_URL (内部库), CORS_ORIGINS
-#   测试用 TEST_MYSQL_URL (可选)
 ```
 
 ## Codebase Architecture
@@ -65,14 +66,14 @@ npx vue-tsc --noEmit
 
 ```
 用户消息 → SSE POST /api/chat/stream
-  → (api/chat.py) 解析连接、构建 AgentState
-  → (agent/graph.py) LangGraph StateGraph:
-      classify_node (意图分类)
-        → general_node (快速路径：问候/帮助) → END
-        → agent_node (LLM 决策: bind_tools)
-            → tools_node (安全护栏 → 工具执行 → 脱敏) → agent_node (循环)
-            → format_response_node → END
-  → SSE 流式返回 thinking/tool_call/sql/result/done 事件
+  → (api/chat.py) 解析连接、构建 AgentState (scoped to connection)
+  → (agent/graph.py) LangGraph StateGraph (双通道流式):
+      agent_node (LLM bind_tools → 决策工具调用或最终回答)
+        → tools_node (安全护栏 → 连接注入 → 工具执行 → 脱敏) → agent_node (ReAct 循环, ≤10 轮)
+        → END (is_complete=True)
+  → SSE 流式返回 11 种事件类型 (messages/updates 双通道)
+      ┌─ messages: reasoning / token / tool_call_chunks (逐 token)
+      └─ updates: tool_call / tool_result / sql / error / stage_change / done
 ```
 
 ### Key Directories
@@ -114,15 +115,35 @@ frontend/
 
 1. **LangGraph ReAct Agent** — LLM 通过 `model.bind_tools()` 决定工具调用顺序，LangGraph 条件边自动路由 `agent ↔ tools` 循环。最多 10 次迭代防无限循环。
 
-2. **Intent Routing** — 两层策略：关键词正则匹配（高置信度快速路径）→ LLM 轻量模型回退。
+2. **SSE 双通道流式** — `astream(stream_mode=["updates", "messages"])` 双通道分离：
+   - "messages" 通道：`(AIMessageChunk, metadata)` 逐 token 流，处理 `reasoning_content` / `tool_call_chunks` / `content`
+   - "updates" 通道：节点执行完成后的状态 delta，从中提取 `sse_events` 列表和 `is_complete` 标志
 
-3. **Security** — 工具执行前经 SafeToolNode：连接配置注入 → 安全护栏链（sqlglot SQL 审计拦截 DROP/ALTER/TRUNCATE 等）→ 执行 → 结果脱敏。
+3. **推理与回答分离** — 模型原生 `reasoning_content` 字段（DeepSeek/GLM 等支持）→ 作为独立 SSE `reasoning` 事件推送。普通 content 采用"乐观渲染+收编"模式：一律以 `stage="thinking"` 发射，`is_complete` 时若未检测到工具调用则发送 `stage_change("answer")` 触发前端收编。
 
-4. **SSE Communication** — 7 种事件类型：`thinking` / `tool_call` / `tool_result` / `sql` / `result` / `error` / `done`。LLM 推理过程和执行结果分开推送。
+4. **Security** — 工具执行前经 SafeToolNode：连接配置注入 → 安全护栏链（sqlglot SQL 审计拦截 DROP/ALTER/TRUNCATE 等）→ 执行 → 结果脱敏。
 
-5. **Database Adapters** — BaseAdapter ABC 定义统一接口（execute/explain/get_slow_queries/等），lazy-loaded 驱动（aiomysql/asyncpg/oracledb），`AdapterFactory.create()` 创建实例。
+5. **SSE 事件协议** — 11 种事件类型通过 SSE `event: message` + `data: JSON` 传输：`thinking` / `reasoning` / `token(stage=thinking|answer)` / `tool_call` / `tool_result` / `sql` / `result` / `text` / `error` / `done` / `stage_change`。前端 `useSSE` composable 统一解析分发到 Pinia store 回调。
 
-6. **Observability** — structlog 结构化日志 + X-Request-ID 全链路追踪 + trace_iterations 记录每轮 ReAct 决策轨迹。
+6. **Database Adapters** — BaseAdapter ABC 定义统一接口（execute/explain/get_slow_queries/等），lazy-loaded 驱动（aiomysql/asyncpg/oracledb），`AdapterFactory.create()` 创建实例。连接密码仅存于请求内存 state，不持久化。
+
+7. **Observability** — structlog 结构化日志 + X-Request-ID 全链路追踪 + trace_iterations 记录每轮 ReAct 决策轨迹。
+
+### Frontend 设计系统
+
+采用分层卡片布局，所有 AI 响应使用统一卡片容器（`ai-response-card`）：
+
+```
+用户消息（右对齐气泡）
+  → AI 响应卡片（思考面板 + 最终回答）
+    ┌─ 思考面板（details/summary 折叠）
+    │   ├─ reasoning（深度推理文本）
+    │   ├─ tool_call 卡片（蓝色调，spinner/check + 参数 JSON）
+    │   └─ tool_result 折叠块
+    └─ 最终回答（绿调，Markdown 渲染 + 打字光标）
+```
+
+设计 token 在 `App.vue` CSS 变量中定义，支持 **深色/浅色** 双主题（通过 `[data-theme="light"]` 切换）。核心变量以 `--chat-*` 前缀命名。字体：Satoshi（正文）+ JetBrains Mono（代码）。
 
 ### Tools Registry
 

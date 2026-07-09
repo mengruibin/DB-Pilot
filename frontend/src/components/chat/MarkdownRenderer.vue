@@ -235,8 +235,8 @@ const renderedHtml = computed(() => {
   margin: 14px 0;
   border-radius: var(--radius-md, 6px);
   overflow: hidden;
-  background: #0D1117;
-  border: 1px solid var(--border-color);
+  background: var(--chat-code-bg, #0D1117);
+  border: 1px solid var(--chat-divider, var(--border-color));
 }
 /* 代码块顶部青绿装饰线 */
 .markdown-body :deep(pre.code-block)::before {

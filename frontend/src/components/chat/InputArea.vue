@@ -155,7 +155,6 @@ const placeholderText = !props.hasConnection
           :disabled="isStreaming || !hasConnection"
           @click="toggleMode('natural_language')"
         >
-          <span class="tab-icon">📝</span>
           <span class="tab-label">自然语言</span>
         </button>
         <button
@@ -164,7 +163,6 @@ const placeholderText = !props.hasConnection
           :disabled="isStreaming || !hasConnection"
           @click="toggleMode('sql_editor')"
         >
-          <span class="tab-icon">💻</span>
           <span class="tab-label">SQL</span>
         </button>
       </div>
@@ -213,7 +211,7 @@ const placeholderText = !props.hasConnection
     </div>
 
     <!-- 底部快捷键提示 -->
-    <p class="area-hint">
+    <!-- <p class="area-hint">
       <template v-if="inputMode === 'natural_language'">
         Enter 发送 · Shift+Enter 换行
       </template>
@@ -223,7 +221,7 @@ const placeholderText = !props.hasConnection
       <template v-if="isStreaming">
         · 点击「停止」或按 Escape 取消
       </template>
-    </p>
+    </p> -->
   </div>
 </template>
 
