@@ -226,6 +226,50 @@ function splitAIResponse(items: StoreMessage[]): {
   return { thinkingItems, answerItems, hasToolCalls, totalDurationMs }
 }
 
+/**
+ * 将 thinkingItems 中的 tool_call 与 tool_result 按 tool_call_id 配对，
+ * 使每个工具调用紧跟着它的返回结果，而不是先全部展示工具再全部展示结果。
+ *
+ * @returns 每一项为 { type: 'pair', toolCall, toolResult } 或 { type, item }
+ */
+function pairToolSteps(thinkingItems: StoreMessage[]): Array<
+  | { type: 'pair'; toolCall: StoreMessage; toolResult: StoreMessage }
+  | { type: 'solo'; item: StoreMessage }
+> {
+  const result: Array<
+    | { type: 'pair'; toolCall: StoreMessage; toolResult: StoreMessage }
+    | { type: 'solo'; item: StoreMessage }
+  > = []
+
+  // 收集所有 tool_result，按 tool_call_id 索引
+  const toolResultMap = new Map<string, StoreMessage>()
+  const usedResultIds = new Set<string>()
+
+  for (const step of thinkingItems) {
+    if (step.type === 'tool_result' && step.toolCallId) {
+      toolResultMap.set(step.toolCallId, step)
+    }
+  }
+
+  for (const step of thinkingItems) {
+    if (step.type === 'tool_call' && step.toolCallId) {
+      const toolResult = toolResultMap.get(step.toolCallId)
+      if (toolResult) {
+        result.push({ type: 'pair', toolCall: step, toolResult })
+        usedResultIds.add(toolResult.id)
+        continue
+      }
+    }
+    // 已配对的 tool_result 跳过
+    if (step.type === 'tool_result' && usedResultIds.has(step.id)) {
+      continue
+    }
+    result.push({ type: 'solo', item: step })
+  }
+
+  return result
+}
+
 // ─── 思考面板折叠状态 ───
 const thinkingExpanded = ref(true)  // 默认展开
 </script>
@@ -280,15 +324,41 @@ const thinkingExpanded = ref(true)  // 默认展开
                 <!-- 思考面板内容 -->
                 <div class="thinking-body">
                   <div
-                    v-for="(step, sIdx) in splitAIResponse(group.items).thinkingItems"
-                    :key="step.id ?? sIdx"
+                    v-for="(p, pIdx) in pairToolSteps(splitAIResponse(group.items).thinkingItems)"
+                    :key="pIdx"
                     class="thinking-step-row"
                   >
-                    <!-- tool_call / tool_result -->
-                    <div v-if="step.type === 'tool_call' || step.type === 'tool_result'" class="thinking-step">
+                    <!-- tool_call + tool_result 配对 -->
+                    <template v-if="p.type === 'pair'">
+                      <div class="thinking-step">
+                        <div class="step-content">
+                          <MessageBubble
+                            :message="p.toolCall"
+                            :is-last="false"
+                            :is-streaming="false"
+                            :is-thinking-phase="true"
+                            :is-in-card="true"
+                          />
+                        </div>
+                      </div>
+                      <div class="thinking-step">
+                        <div class="step-content">
+                          <MessageBubble
+                            :message="p.toolResult"
+                            :is-last="false"
+                            :is-streaming="false"
+                            :is-thinking-phase="true"
+                            :is-in-card="true"
+                          />
+                        </div>
+                      </div>
+                    </template>
+
+                    <!-- 单个 tool_call / tool_result（未配对） -->
+                    <div v-else-if="p.item.type === 'tool_call' || p.item.type === 'tool_result'" class="thinking-step">
                       <div class="step-content">
                         <MessageBubble
-                          :message="step"
+                          :message="p.item"
                           :is-last="false"
                           :is-streaming="false"
                           :is-thinking-phase="true"
@@ -298,11 +368,11 @@ const thinkingExpanded = ref(true)  // 默认展开
                     </div>
 
                     <!-- reasoning -->
-                    <div v-else-if="step.type === 'reasoning'" class="thinking-step">
+                    <div v-else-if="p.item.type === 'reasoning'" class="thinking-step">
                       <span class="step-dot reasoning-dot"></span>
                       <div class="step-content">
                         <MessageBubble
-                          :message="step"
+                          :message="p.item"
                           :is-last="false"
                           :is-streaming="false"
                           :is-thinking-phase="true"
@@ -312,11 +382,11 @@ const thinkingExpanded = ref(true)  // 默认展开
                     </div>
 
                     <!-- text thinking -->
-                    <div v-else-if="step.type === 'text' && step.stage === 'thinking'" class="thinking-step">
+                    <div v-else-if="p.item.type === 'text' && p.item.stage === 'thinking'" class="thinking-step">
                       <span class="step-dot text-dot"></span>
                       <div class="step-content">
                         <MessageBubble
-                          :message="step"
+                          :message="p.item"
                           :is-last="false"
                           :is-streaming="false"
                           :is-thinking-phase="true"
@@ -329,7 +399,7 @@ const thinkingExpanded = ref(true)  // 默认展开
                     <div v-else class="thinking-step">
                       <div class="step-content">
                         <MessageBubble
-                          :message="step"
+                          :message="p.item"
                           :is-last="false"
                           :is-streaming="false"
                           :is-thinking-phase="true"
@@ -371,14 +441,43 @@ const thinkingExpanded = ref(true)  // 默认展开
         <!-- ── 独立思考容器（无 answer 跟随） ── -->
         <template v-else-if="group.type === 'thinking'">
           <div class="thinking-process-container">
-            <MessageBubble
-              v-for="msg in group.items"
-              :key="msg.id"
-              :message="msg"
-              :is-last="msg === group.items[group.items.length - 1]"
-              :is-streaming="isStreaming && msg === group.items[group.items.length - 1]"
-              :is-thinking-phase="true"
-            />
+            <template v-for="(p, pIdx) in pairToolSteps(group.items)" :key="pIdx">
+              <!-- tool_call + tool_result 配对 -->
+              <template v-if="p.type === 'pair'">
+                <div class="thinking-step">
+                  <div class="step-content">
+                    <MessageBubble
+                      :message="p.toolCall"
+                      :is-last="false"
+                      :is-streaming="false"
+                      :is-thinking-phase="true"
+                    />
+                  </div>
+                </div>
+                <div class="thinking-step">
+                  <div class="step-content">
+                    <MessageBubble
+                      :message="p.toolResult"
+                      :is-last="false"
+                      :is-streaming="false"
+                      :is-thinking-phase="true"
+                    />
+                  </div>
+                </div>
+              </template>
+              <!-- 单个工具（未配对）或 reasoning -->
+              <div v-else class="thinking-step">
+                <span v-if="p.item.type === 'reasoning'" class="step-dot reasoning-dot"></span>
+                <div class="step-content">
+                  <MessageBubble
+                    :message="p.item"
+                    :is-last="false"
+                    :is-streaming="false"
+                    :is-thinking-phase="true"
+                  />
+                </div>
+              </div>
+            </template>
           </div>
         </template>
 

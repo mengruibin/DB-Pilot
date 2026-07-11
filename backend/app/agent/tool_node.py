@@ -16,8 +16,10 @@ LangGraph 图节点函数，替代旧的自研 tools_node（graph.py 中 ~170 �
 
 from __future__ import annotations
 
+import asyncio
 import json as _json
 import time
+from collections.abc import Mapping
 from typing import Any
 
 import structlog
@@ -25,15 +27,229 @@ from langchain_core.messages import AIMessage, ToolMessage
 
 from app.agent.safety import run_safety_checks
 from app.agent.state import AgentState
+from app.config import settings
 
 logger = structlog.get_logger(__name__)
 
+# 每轮 ReAct 迭代中最大并行工具数（从配置读取，默认 5）
+_MAX_CONCURRENT_TOOLS = max(1, settings.AGENT_MAX_CONCURRENT_TOOLS)
+
+
+async def _run_one_tool(
+    tc: Mapping[str, Any],
+    conn_config: dict[str, Any],
+    run_id: str,
+    iteration: int,
+    semaphore: asyncio.Semaphore,
+) -> dict:
+    """执行单个工具调用的完整生命周期（连接注入 → 安全护栏 → 执行 → 脱敏 → 消息构造）。
+
+    供 safe_tools_node 内部并行调度使用。
+
+    Args:
+        tc: LangChain ToolCall 字典，含 id/name/args。
+        conn_config: 数据库连接配置字典。
+        run_id: 当前 Agent 运行 ID。
+        iteration: 当前 ReAct 迭代轮次。
+        semaphore: 并发控制信号量。
+
+    Returns:
+        {"tool_message": ToolMessage, "sse_events": list[dict]}
+    """
+    async with semaphore:
+        from app.agent.tools.registry import TOOL_REGISTRY  # noqa: I001
+
+        tool_name = tc["name"]
+        tool_args: dict[str, Any] = dict(tc["args"])
+        local_sse: list[dict] = []
+        tool_start = time.monotonic()
+
+        # ── 1. 连接配置注入 ──
+        for key in (
+            "connection_id",
+            "db_type",
+            "host",
+            "port",
+            "database",
+            "user",
+            "password",
+            "ssl_enabled",
+            "ssl_ca_cert",
+        ):
+            if key in conn_config and key not in tool_args:
+                tool_args[key] = conn_config[key]
+        if "user_role" not in tool_args:
+            tool_args["user_role"] = conn_config.get("user_role", "standard")
+
+        # ── 2. 安全护栏检查 ──
+        safety_result = await run_safety_checks(tool_name, tool_args, conn_config)
+        if safety_result.blocked:
+            logger.warning(
+                "工具被安全护栏拦截",
+                run_id=run_id,
+                tool=tool_name,
+                reason=safety_result.reason,
+            )
+            return {
+                "tool_message": ToolMessage(
+                    content=f"操作被安全策略拦截: {safety_result.reason}",
+                    tool_call_id=tc["id"],
+                    name=tool_name,
+                ),
+                "sse_events": [
+                    {
+                        "type": "tool_result",
+                        "tool": tool_name,
+                        "summary": f"拦截: {safety_result.reason}",
+                        "tool_call_id": tc["id"],
+                        "agent_run_id": run_id,
+                        "iteration": iteration,
+                        "safety_checks_passed": False,
+                    }
+                ],
+            }
+
+        safety_warnings = list(safety_result.warnings)
+        if safety_warnings:
+            logger.info(
+                "安全护栏性能提示已记录（非阻断）",
+                run_id=run_id,
+                tool=tool_name,
+                warning_count=len(safety_warnings),
+            )
+
+        # ── 3. 查找工具 ──
+        tool_fn = TOOL_REGISTRY.get(tool_name)
+        if tool_fn is None:
+            logger.error(
+                "工具未注册",
+                run_id=run_id,
+                tool=tool_name,
+                available=list(TOOL_REGISTRY.keys()),
+            )
+            return {
+                "tool_message": ToolMessage(
+                    content=f"工具 '{tool_name}' 未注册，请联系管理员",
+                    tool_call_id=tc["id"],
+                    name=tool_name,
+                ),
+                "sse_events": [
+                    {
+                        "type": "tool_result",
+                        "tool": tool_name,
+                        "summary": f"工具 '{tool_name}' 未注册",
+                        "tool_call_id": tc["id"],
+                        "agent_run_id": run_id,
+                        "iteration": iteration,
+                        "safety_checks_passed": False,
+                    }
+                ],
+            }
+
+        # ── 4. 执行工具 ──
+        try:
+            result = await tool_fn.ainvoke(tool_args)
+        except Exception as exc:
+            logger.error(
+                "工具执行异常",
+                run_id=run_id,
+                tool=tool_name,
+                error=str(exc)[:300],
+            )
+            return {
+                "tool_message": ToolMessage(
+                    content=f"工具执行失败: {str(exc)[:200]}",
+                    tool_call_id=tc["id"],
+                    name=tool_name,
+                ),
+                "sse_events": [
+                    {
+                        "type": "tool_result",
+                        "tool": tool_name,
+                        "summary": f"执行失败: {str(exc)[:100]}",
+                        "tool_call_id": tc["id"],
+                        "agent_run_id": run_id,
+                        "iteration": iteration,
+                        "safety_checks_passed": True,
+                    }
+                ],
+            }
+
+        elapsed = int((time.monotonic() - tool_start) * 1000)
+
+        # ── 5. 敏感数据脱敏 ──
+        result = _sanitize_sensitive_data(result)
+
+        logger.info(
+            "工具执行完成",
+            run_id=run_id,
+            tool=tool_name,
+            duration_ms=elapsed,
+            success=True,
+            result_summary=str(result)[:200],
+        )
+
+        # ── 6. 构造 ToolMessage（含安全护栏的非阻断警告） ──
+        tool_content = _json.dumps(result, ensure_ascii=False, default=str)
+        if safety_warnings:
+            tool_content = "[性能提示] " + " | ".join(safety_warnings) + "\n\n" + tool_content
+
+        # ── 7. 生成 SSE 事件 ──
+        if isinstance(result, dict):
+            sql_text = result.get("sql") or result.get("sql_executed", "")
+            if sql_text:
+                local_sse.append(
+                    {
+                        "type": "sql",
+                        "content": sql_text,
+                        "audit_status": result.get("audit_status", "passed"),
+                        "is_readonly": result.get("is_readonly", True),
+                        "agent_run_id": run_id,
+                        "iteration": iteration,
+                    }
+                )
+            local_sse.append(
+                {
+                    "type": "tool_result",
+                    "tool": tool_name,
+                    "summary": (result.get("summary", "") or f"{tool_name} 执行完成"),
+                    "duration_ms": result.get("execution_time_ms", elapsed),
+                    "tool_call_id": tc["id"],
+                    "agent_run_id": run_id,
+                    "iteration": iteration,
+                    "safety_checks_passed": True,
+                }
+            )
+        else:
+            local_sse.append(
+                {
+                    "type": "tool_result",
+                    "tool": tool_name,
+                    "summary": str(result)[:200],
+                    "duration_ms": elapsed,
+                    "tool_call_id": tc["id"],
+                    "agent_run_id": run_id,
+                    "iteration": iteration,
+                    "safety_checks_passed": True,
+                }
+            )
+
+        return {
+            "tool_message": ToolMessage(
+                content=tool_content,
+                tool_call_id=tc["id"],
+                name=tool_name,
+            ),
+            "sse_events": local_sse,
+        }
+
 
 async def safe_tools_node(state: AgentState) -> dict[str, Any]:
-    """标准 LangGraph 节点：安全执行 AIMessage 中的工具调用。
+    """标准 LangGraph 节点：安全执行 AIMessage 中的工具调用（并行调度）。
 
     从 state["messages"] 中提取最后一条 AIMessage.tool_calls，
-    依次执行安全检查、连接配置注入、工具调用、结果脱敏。
+    并发执行安全检查、连接配置注入、工具调用、结果脱敏。
+    单个工具异常不会影响其他工具的执行。
 
     Args:
         state: 当前 AgentState，需含 messages, conn_config。
@@ -61,195 +277,59 @@ async def safe_tools_node(state: AgentState) -> dict[str, Any]:
     tool_calls = last_msg.tool_calls
 
     logger.info(
-        "图节点执行: tools（SafeToolNode 标准模式）",
+        "图节点执行: tools（SafeToolNode 并行模式）",
         run_id=run_id,
         iteration=iteration,
         tools_count=len(tool_calls),
         tools=[tc["name"] for tc in tool_calls],
     )
 
-    # 延迟导入——工具注册表
-    from app.agent.tools.registry import TOOL_REGISTRY  # noqa: I001
+    # 并发执行所有工具
+    semaphore = asyncio.Semaphore(_MAX_CONCURRENT_TOOLS)
+    results = await asyncio.gather(
+        *[
+            _run_one_tool(tc, conn_config, run_id, iteration, semaphore)
+            for tc in tool_calls
+        ],
+        return_exceptions=True,
+    )
 
+    # 按原始 tool_calls 顺序组装结果（gather 保持输入顺序）
     tool_messages: list[ToolMessage] = []
-
-    for tc in tool_calls:
-        tool_name = tc["name"]
-        tool_args: dict[str, Any] = dict(tc["args"])  # 复制，避免修改原始数据
-        tool_start = time.monotonic()
-
-        # ── 1. 连接配置注入 ──
-        # 将 conn_config 合并到工具参数中（LLM 不可见这些参数）
-        for key in (
-            "connection_id",
-            "db_type",
-            "host",
-            "port",
-            "database",
-            "user",
-            "password",
-            "ssl_enabled",
-            "ssl_ca_cert",
-        ):
-            if key in conn_config and key not in tool_args:
-                tool_args[key] = conn_config[key]
-        # 注入用户角色（安全护栏需要）
-        if "user_role" not in tool_args:
-            tool_args["user_role"] = conn_config.get("user_role", "standard")
-
-        # ── 2. 安全护栏检查 ──
-        safety_result = await run_safety_checks(tool_name, tool_args, conn_config)
-        if safety_result.blocked:
-            logger.warning(
-                "工具被安全护栏拦截",
-                run_id=run_id,
-                tool=tool_name,
-                reason=safety_result.reason,
-            )
-            tool_messages.append(
-                ToolMessage(
-                    content=f"操作被安全策略拦截: {safety_result.reason}",
-                    tool_call_id=tc["id"],
-                    name=tool_name,
-                )
-            )
-            sse_events.append(
-                {
-                    "type": "tool_result",
-                    "tool": tool_name,
-                    "summary": f"拦截: {safety_result.reason}",
-                    "agent_run_id": run_id,
-                    "iteration": iteration,
-                    "safety_checks_passed": False,
-                }
-            )
-            continue
-
-        # 记录安全护栏的非阻断警告（将在 ToolMessage 中传递给 Agent）
-        safety_warnings = list(safety_result.warnings)
-        if safety_warnings:
-            logger.info(
-                "安全护栏性能提示已记录（非阻断）",
-                run_id=run_id,
-                tool=tool_name,
-                warning_count=len(safety_warnings),
-            )
-
-        # ── 3. 查找工具 ──
-        tool_fn = TOOL_REGISTRY.get(tool_name)
-        if tool_fn is None:
+    for i, r in enumerate(results):
+        if isinstance(r, BaseException):
+            # 极少情况：gather 自身的异常（超时等），非工具抛出的异常
+            tc = tool_calls[i]
             logger.error(
-                "工具未注册",
+                "工具并行执行异常",
                 run_id=run_id,
-                tool=tool_name,
-                available=list(TOOL_REGISTRY.keys()),
+                tool=tc["name"],
+                error=str(r)[:300],
             )
             tool_messages.append(
                 ToolMessage(
-                    content=f"工具 '{tool_name}' 未注册，请联系管理员",
+                    content=f"工具执行异常: {str(r)[:200]}",
                     tool_call_id=tc["id"],
-                    name=tool_name,
-                )
-            )
-            continue
-
-        # ── 4. 执行工具 ──
-        try:
-            result = await tool_fn.ainvoke(tool_args)
-        except Exception as exc:
-            logger.error(
-                "工具执行异常",
-                run_id=run_id,
-                tool=tool_name,
-                error=str(exc)[:300],
-            )
-            tool_messages.append(
-                ToolMessage(
-                    content=f"工具执行失败: {str(exc)[:200]}",
-                    tool_call_id=tc["id"],
-                    name=tool_name,
+                    name=tc["name"],
                 )
             )
             sse_events.append(
                 {
                     "type": "tool_result",
-                    "tool": tool_name,
-                    "summary": f"执行失败: {str(exc)[:100]}",
-                    "agent_run_id": run_id,
-                    "iteration": iteration,
-                    "safety_checks_passed": True,
-                }
-            )
-            continue
-
-        elapsed = int((time.monotonic() - tool_start) * 1000)
-
-        # ── 5. 敏感数据脱敏 ──
-        result = _sanitize_sensitive_data(result)
-
-        logger.info(
-            "工具执行完成",
-            run_id=run_id,
-            tool=tool_name,
-            duration_ms=elapsed,
-            success=True,
-            result_summary=str(result)[:200],
-        )
-
-        # ── 6. 返回 ToolMessage（含安全护栏的非阻断警告） ──
-        tool_content = _json.dumps(result, ensure_ascii=False, default=str)
-        # 将安全护栏的性能警告前缀到 ToolMessage 中，Agent 可据此决定优化方案
-        if safety_warnings:
-            tool_content = "[性能提示] " + " | ".join(safety_warnings) + "\n\n" + tool_content
-        tool_messages.append(
-            ToolMessage(
-                content=tool_content,
-                tool_call_id=tc["id"],
-                name=tool_name,
-            )
-        )
-
-        # ── 7. 生成 SSE 事件 ──
-        if isinstance(result, dict):
-            # 如果工具返回了 SQL（如 run_query），发送 sql 事件
-            sql_text = result.get("sql") or result.get("sql_executed", "")
-            if sql_text:
-                sse_events.append(
-                    {
-                        "type": "sql",
-                        "content": sql_text,
-                        "audit_status": result.get("audit_status", "passed"),
-                        "is_readonly": result.get("is_readonly", True),
-                        "agent_run_id": run_id,
-                        "iteration": iteration,
-                    }
-                )
-            sse_events.append(
-                {
-                    "type": "tool_result",
-                    "tool": tool_name,
-                    "summary": (result.get("summary", "") or f"{tool_name} 执行完成"),
-                    "duration_ms": result.get("execution_time_ms", elapsed),
+                    "tool": tc["name"],
+                    "summary": f"执行异常: {str(r)[:100]}",
+                    "tool_call_id": tc["id"],
                     "agent_run_id": run_id,
                     "iteration": iteration,
                     "safety_checks_passed": True,
                 }
             )
         else:
-            sse_events.append(
-                {
-                    "type": "tool_result",
-                    "tool": tool_name,
-                    "summary": str(result)[:200],
-                    "duration_ms": elapsed,
-                    "agent_run_id": run_id,
-                    "iteration": iteration,
-                    "safety_checks_passed": True,
-                }
-            )
+            tool_messages.append(r["tool_message"])
+            sse_events.extend(r["sse_events"])
 
     return {
-        "messages": tool_messages,  # add_messages reducer 自动追加 ToolMessage 列表
+        "messages": tool_messages,
         "sse_events": sse_events,
     }
 

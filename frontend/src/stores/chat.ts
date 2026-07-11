@@ -75,6 +75,7 @@ export interface StoreMessage {
 
   // tool_call / tool_result
   tool?: string
+  toolCallId?: string
   toolArgs?: Record<string, unknown>
   displayText?: string
   durationMs?: number
@@ -193,6 +194,8 @@ export const useChatStore = defineStore('chat', () => {
 
   // 内部：消息计数器（生成 ID）
   let msgCounter = 0
+  // 内部：tool_call_id → tool_call message 快速查找表（并行安全匹配用）
+  const toolCallMap = new Map<string, StoreMessage>()
   // 内部：SSE composable 实例
   const sse = useSSE()
 
@@ -247,11 +250,12 @@ export const useChatStore = defineStore('chat', () => {
     return msg
   }
 
-  /** 查找最后一条 tool_call（running 状态） */
-  function findLastRunningToolCall(): StoreMessage | undefined {
-    const reversed = [...messages.value].reverse()
-    return reversed.find(
-      (m) => m.role === 'assistant' && m.type === 'tool_call' && m.stepStatus === 'running'
+  /** 按 tool_call_id 查找 tool_call 消息（优先 Map O(1)，回退数组扫描） */
+  function findToolCallById(toolCallId: string): StoreMessage | undefined {
+    const fromMap = toolCallMap.get(toolCallId)
+    if (fromMap) return fromMap
+    return messages.value.find(
+      (m) => m.type === 'tool_call' && m.toolCallId === toolCallId
     )
   }
 
@@ -438,6 +442,8 @@ export const useChatStore = defineStore('chat', () => {
     // 重置双区渲染状态，记录 turn 起始索引供 postProcessTurn 分组使用
     currentStage.value = 'thinking'
     turnStartIndex.value = messages.value.length - 1
+    // 清空上一轮的 tool_call 快速查找表
+    toolCallMap.clear()
 
     // 2. 重置流式状态 + 插入 waiting 占位消息
     streamingText.value = ''
@@ -534,6 +540,7 @@ export const useChatStore = defineStore('chat', () => {
             type: 'tool_call',
             content: event.display || event.tool,
             tool: event.tool,
+            toolCallId: event.tool_call_id,
             toolArgs: event.args,
             displayText: event.display,
             stepStatus: 'running',
@@ -541,13 +548,26 @@ export const useChatStore = defineStore('chat', () => {
             iteration: event.iteration,
             createdAt: new Date().toISOString(),
           })
+          // 注册到快速查找表（Vue 响应式代理）
+          if (event.tool_call_id) {
+            toolCallMap.set(event.tool_call_id, messages.value[messages.value.length - 1])
+          }
         },
 
         // ── tool_result ──
         onToolResult: (event: ToolResultEvent) => {
-          // 1. 找到对应的 tool_call 消息，标记为 done（不改变 type，保留 tool_call 卡片）
-          const toolCall = findLastRunningToolCall()
-          if (toolCall && toolCall.tool === event.tool) {
+          // 1. 找到对应的 tool_call 消息，标记为 done
+          // 优先按 tool_call_id 精确匹配（并行安全），回退到按 tool 名匹配（向后兼容）
+          let toolCall: StoreMessage | undefined
+          if (event.tool_call_id) {
+            toolCall = findToolCallById(event.tool_call_id)
+          }
+          if (!toolCall && event.tool) {
+            toolCall = messages.value.find(
+              (m) => m.type === 'tool_call' && m.tool === event.tool && m.stepStatus === 'running'
+            )
+          }
+          if (toolCall) {
             toolCall.stepStatus = 'done'
             toolCall.durationMs = event.duration_ms
             toolCall.agentRunId = event.agent_run_id
@@ -565,6 +585,7 @@ export const useChatStore = defineStore('chat', () => {
             type: 'tool_result',
             content: event.summary,
             tool: event.tool,
+            toolCallId: event.tool_call_id,
             durationMs: event.duration_ms,
             safetyChecksPassed: event.safety_checks_passed,
             agentRunId: event.agent_run_id,

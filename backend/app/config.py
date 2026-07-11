@@ -126,6 +126,12 @@ class Settings(BaseSettings):
         default=False,
         description="Agent 调试模式。开启后 SSE 事件额外携带完整 LLM prompt/响应和安全检查详情。",
     )
+    AGENT_MAX_CONCURRENT_TOOLS: int = Field(
+        default=5,
+        ge=1,
+        le=20,
+        description="Agent 每轮 ReAct 迭代中最大并行工具数，防止 DB 连接池被冲垮。",
+    )
     LOG_TRACE_ENABLED: bool = Field(
         default=True,
         description="是否启用链路追踪。关闭后 trace_id 仍生成但不强制透传。",

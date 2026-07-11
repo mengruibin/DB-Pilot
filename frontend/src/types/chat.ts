@@ -150,6 +150,8 @@ export interface ToolCallEvent {
   tool: string
   args: Record<string, unknown>
   display: string
+  /** LLM 分配的 tool_call 唯一 ID，用于并行执行时前后端关联 */
+  tool_call_id?: string
   /** Agent 运行唯一 ID（Agent 架构升级后新增） */
   agent_run_id?: string
   /** 当前是 Agent 第几轮 ReAct 迭代（Agent 架构升级后新增） */
@@ -162,6 +164,8 @@ export interface ToolResultEvent {
   tool: string
   summary: string
   duration_ms: number
+  /** 对应的 tool_call 唯一 ID，用于并行执行时精确匹配 */
+  tool_call_id?: string
   /** Agent 运行唯一 ID（Agent 架构升级后新增） */
   agent_run_id?: string
   /** 当前是 Agent 第几轮 ReAct 迭代（Agent 架构升级后新增） */
