@@ -102,32 +102,37 @@ async def check_connections(
     ssl_enabled: Annotated[bool, InjectedToolArg] = False,
     ssl_ca_cert: Annotated[str | None, InjectedToolArg] = None,
 ) -> dict[str, Any]:
-    """检查目标数据库的连接池状态。
-
-    调用适配器的 get_connections_status() 获取连接数指标，
-    根据使用率判定健康状态（PRD §5.3）。
-    适用于排查连接池耗尽、连接数异常增长等场景。
-
-    Args:
-        connection_id: 连接标识符（用于日志追踪）。
-        db_type: 数据库类型（mysql / postgresql / oracle）。
-        host: 数据库主机地址。
-        port: 数据库端口号。
-        database: 目标数据库名。
-        user: 连接用户名。
-        password: 连接密码。
-        ssl_enabled: 是否启用 SSL。
-        ssl_ca_cert: SSL CA 证书（可选）。
+    """检查目标数据库的连接池状态，包括活跃/空闲/等待连接数及使用率。
+    适用于排查连接池耗尽、连接数异常增长、连接泄漏等场景。
 
     Returns:
-        成功：{"status": "pass|warning|error", "data": {...ConnectionStatus}}
-        失败：{"error": "check_connections 执行失败", "detail": "..."}
+        成功: {
+            "status": "pass" | "warning" | "error",  // pass(<=80%), warning(>80%), error(>95%)
+            "data": {
+                "total_connections": int,         // 最大连接数（max_connections）
+                "active_connections": int,        // 当前活跃连接数
+                "idle_connections": int,          // 空闲连接数
+                "waiting_connections": int,       // 等待中的连接数
+                "usage_percent": float,           // 连接使用率（0-100）
+                "aborted_connections_rate": float,// 异常连接率
+                "sampled_at": str                 // 采样时间（ISO 8601）
+            },
+            "summary": str
+        }
+        失败: {"error": str, "detail": str}
     """
     # SAFETY: 只读操作，不修改数据库状态（PRD §8.1 Layer 1）
     try:
         config = _build_config(
-            connection_id, db_type, host, port, database, user,
-            password, ssl_enabled, ssl_ca_cert,
+            connection_id,
+            db_type,
+            host,
+            port,
+            database,
+            user,
+            password,
+            ssl_enabled,
+            ssl_ca_cert,
         )
         adapter = AdapterFactory.create(db_type, config)
         await adapter.connect(config)
@@ -138,8 +143,9 @@ async def check_connections(
         usage = float(status_data.get("usage_percent", 0))
         status = _classify_usage(usage)
 
-        logger.info("工具执行成功", tool="check_connections",
-                     connection_id=connection_id, status=status)
+        logger.info(
+            "工具执行成功", tool="check_connections", connection_id=connection_id, status=status
+        )
         return {
             "status": status,
             "data": status_data,
@@ -166,34 +172,47 @@ async def check_locks(
     ssl_enabled: Annotated[bool, InjectedToolArg] = False,
     ssl_ca_cert: Annotated[str | None, InjectedToolArg] = None,
 ) -> dict[str, Any]:
-    """检查目标数据库的锁等待情况。
-
-    调用适配器的 get_lock_info() 获取当前锁等待信息，
-    识别阻塞事务（PRD §5.3 死锁检测）。
-    适用于排查死锁、锁超时、事务阻塞等场景。
-
-    Args:
-        connection_id: 连接标识符。
-        db_type: 数据库类型。
-        host: 主机地址。
-        port: 端口号。
-        database: 数据库名。
-        user: 用户名。
-        password: 密码。
-        ssl_enabled: 是否启用 SSL。
-        ssl_ca_cert: SSL CA 证书（可选）。
+    """检查目标数据库当前的锁等待情况，检测阻塞事务和等待链。
+    适用于排查死锁、锁超时、事务阻塞导致性能下降等场景。
 
     Returns:
-        成功：{"status": "pass|warning|error",
-              "waiting_transactions": int,
-              "blocking_trx_id": "..."}
-        失败：{"error": "check_locks 执行失败", "detail": "..."}
+        无锁等待: {
+            "status": "pass",
+            "waiting_transactions": 0,
+            "blocking_trx_id": "",
+            "locks": [],
+            "summary": str
+        }
+        有锁等待: {
+            "status": "warning" | "error",   // warning(<=3个), error(>3个)
+            "waiting_transactions": int,
+            "blocking_trx_id": str,           // 首个阻塞事务的 ID
+            "locks": [
+                {
+                    "transaction_id": str,         // 事务 ID
+                    "elapsed_seconds": int,        // 已等待时长（秒）
+                    "state": str,                  // 状态（如 "LOCK WAIT"）
+                    "query": str,                  // 当前执行的查询
+                    "blocking_transaction_id": str,// 阻塞该事务的事务 ID
+                    "thread_id": str               // MySQL 线程 ID
+                }
+            ],
+            "summary": str
+        }
+        失败: {"error": str, "detail": str}
     """
     # SAFETY: 只读操作，不修改数据库状态（PRD §8.1 Layer 1）
     try:
         config = _build_config(
-            connection_id, db_type, host, port, database, user,
-            password, ssl_enabled, ssl_ca_cert,
+            connection_id,
+            db_type,
+            host,
+            port,
+            database,
+            user,
+            password,
+            ssl_enabled,
+            ssl_ca_cert,
         )
         adapter = AdapterFactory.create(db_type, config)
         await adapter.connect(config)
@@ -214,9 +233,13 @@ async def check_locks(
                     break
 
             lock_status = "warning" if waiting_count <= 3 else "error"
-            logger.info("工具执行成功", tool="check_locks",
-                         connection_id=connection_id, status=lock_status,
-                         waiting_transactions=waiting_count)
+            logger.info(
+                "工具执行成功",
+                tool="check_locks",
+                connection_id=connection_id,
+                status=lock_status,
+                waiting_transactions=waiting_count,
+            )
             return {
                 "status": lock_status,
                 "waiting_transactions": waiting_count,
@@ -225,8 +248,7 @@ async def check_locks(
                 "summary": f"等待事务: {waiting_count}（{lock_status}）",
             }
 
-        logger.info("工具执行成功", tool="check_locks",
-                     connection_id=connection_id, status="pass")
+        logger.info("工具执行成功", tool="check_locks", connection_id=connection_id, status="pass")
         return {
             "status": "pass",
             "waiting_transactions": 0,
@@ -254,33 +276,29 @@ async def check_replication(
     ssl_enabled: Annotated[bool, InjectedToolArg] = False,
     ssl_ca_cert: Annotated[str | None, InjectedToolArg] = None,
 ) -> dict[str, Any]:
-    """检查目标数据库的主从复制状态。
-
-    先检查适配器能力声明是否支持复制检测，
-    不支持时返回 status="skipped"（PRD §5.3）。
+    """检查目标数据库的主从复制状态，包括复制延迟、IO 线程和 SQL 线程状态。
     适用于排查主从延迟、复制中断等场景。
-
-    Args:
-        connection_id: 连接标识符。
-        db_type: 数据库类型。
-        host: 主机地址。
-        port: 端口号。
-        database: 数据库名。
-        user: 用户名。
-        password: 密码。
-        ssl_enabled: 是否启用 SSL。
-        ssl_ca_cert: SSL CA 证书（可选）。
+    若数据库类型不支持复制或当前实例非从库，自动返回 status="skipped"。
 
     Returns:
-        成功：{"status": "pass|warning|error|skipped",
-              "delay_seconds": int|None}
-        失败：{"error": "check_replication 执行失败", "detail": "..."}
+        正常:      {"status": "pass",    "delay_seconds": int | null, "summary": str}  // 延迟<=10s
+        延迟警告:  {"status": "warning", "delay_seconds": int,       "summary": str}  // 10-60s
+        延迟严重:  {"status": "error",   "delay_seconds": int,       "summary": str}  // >60s
+        不支持/非主库: {"status": "skipped", "delay_seconds": null,  "summary": str}
+        失败: {"error": str, "detail": str}
     """
     # SAFETY: 只读操作，不修改数据库状态（PRD §8.1 Layer 1）
     try:
         config = _build_config(
-            connection_id, db_type, host, port, database, user,
-            password, ssl_enabled, ssl_ca_cert,
+            connection_id,
+            db_type,
+            host,
+            port,
+            database,
+            user,
+            password,
+            ssl_enabled,
+            ssl_ca_cert,
         )
         adapter = AdapterFactory.create(db_type, config)
         await adapter.connect(config)
@@ -289,8 +307,12 @@ async def check_replication(
         capabilities = adapter.get_capabilities()
         if not capabilities.supports_replication:
             await adapter.disconnect()
-            logger.info("工具执行成功", tool="check_replication",
-                         connection_id=connection_id, status="skipped")
+            logger.info(
+                "工具执行成功",
+                tool="check_replication",
+                connection_id=connection_id,
+                status="skipped",
+            )
             return {
                 "status": "skipped",
                 "delay_seconds": None,
@@ -302,8 +324,12 @@ async def check_replication(
 
         # 若适配器返回 skipped，透传
         if repl_status.get("status") == "skipped":
-            logger.info("工具执行成功", tool="check_replication",
-                         connection_id=connection_id, status="skipped")
+            logger.info(
+                "工具执行成功",
+                tool="check_replication",
+                connection_id=connection_id,
+                status="skipped",
+            )
             return {
                 "status": "skipped",
                 "delay_seconds": None,
@@ -323,9 +349,13 @@ async def check_replication(
         else:
             status = "pass"
 
-        logger.info("工具执行成功", tool="check_replication",
-                     connection_id=connection_id, status=status,
-                     delay_seconds=delay_sec)
+        logger.info(
+            "工具执行成功",
+            tool="check_replication",
+            connection_id=connection_id,
+            status=status,
+            delay_seconds=delay_sec,
+        )
         return {
             "status": status,
             "delay_seconds": delay_sec,
@@ -388,8 +418,7 @@ def _generate_diagnosis(results: list[dict[str, Any]]) -> dict[str, Any]:
         return {
             "conclusion": "数据库连接池即将耗尽，存在大量连接等待",
             "severity": "error",
-            "suggestion": "检查是否有连接泄漏，增加 max_connections "
-                         "或优化应用连接池配置",
+            "suggestion": "检查是否有连接泄漏，增加 max_connections 或优化应用连接池配置",
             "suggestion_is_destructive": True,
         }
     if has_locks_error:
@@ -403,8 +432,7 @@ def _generate_diagnosis(results: list[dict[str, Any]]) -> dict[str, Any]:
         return {
             "conclusion": f"主从复制延迟严重（{replication_delay}s），超过安全阈值",
             "severity": "error",
-            "suggestion": "检查从库 IO/SQL 线程状态及网络带宽，"
-                         "评估是否需要扩容从库",
+            "suggestion": "检查从库 IO/SQL 线程状态及网络带宽，评估是否需要扩容从库",
             "suggestion_is_destructive": False,
         }
     if has_locks_warning:
@@ -471,20 +499,29 @@ class TroubleshootWorkflow:
 
         # AC-1：自动检测模式下执行全部三项检查
         check_steps = [
-            (check_connections, "check_connections", "检查连接池状态...",
-             {"connection_id": self._conn_config.get("connection_id", "")}),
-            (check_locks, "check_locks", "检查锁等待...",
-             {"connection_id": self._conn_config.get("connection_id", "")}),
-            (check_replication, "check_replication", "检查主从复制状态...",
-             {"connection_id": self._conn_config.get("connection_id", "")}),
+            (
+                check_connections,
+                "check_connections",
+                "检查连接池状态...",
+                {"connection_id": self._conn_config.get("connection_id", "")},
+            ),
+            (
+                check_locks,
+                "check_locks",
+                "检查锁等待...",
+                {"connection_id": self._conn_config.get("connection_id", "")},
+            ),
+            (
+                check_replication,
+                "check_replication",
+                "检查主从复制状态...",
+                {"connection_id": self._conn_config.get("connection_id", "")},
+            ),
         ]
 
         yield {
             "type": "thinking",
-            "content": (
-                f"开始故障排查（{issue_type}）："
-                f"依次检查连接数、锁等待和复制状态"
-            ),
+            "content": (f"开始故障排查（{issue_type}）：依次检查连接数、锁等待和复制状态"),
         }
 
         for tool_fn, tool_name, display, extra_args in check_steps:
@@ -536,14 +573,13 @@ class TroubleshootWorkflow:
                 }
 
                 # AC-7：每步记录日志
-                logger.info("故障排查步骤完成",
-                            tool=tool_name, status=status,
-                            duration_ms=elapsed_ms)
+                logger.info(
+                    "故障排查步骤完成", tool=tool_name, status=status, duration_ms=elapsed_ms
+                )
 
             except TimeoutError:
                 # AC-4：超时 → skip 事件，继续下一步
-                logger.warning("故障排查步骤超时",
-                               tool=tool_name, timeout=10)
+                logger.warning("故障排查步骤超时", tool=tool_name, timeout=10)
                 yield {
                     "type": "skip",
                     "tool": tool_name,
@@ -551,8 +587,7 @@ class TroubleshootWorkflow:
                 }
             except Exception as exc:
                 # AC-4：异常 → skip 事件
-                logger.error("故障排查步骤异常",
-                             tool=tool_name, error=str(exc)[:200])
+                logger.error("故障排查步骤异常", tool=tool_name, error=str(exc)[:200])
                 yield {
                     "type": "skip",
                     "tool": tool_name,
@@ -572,9 +607,9 @@ class TroubleshootWorkflow:
         }
 
         # AC-7：结论记录日志
-        logger.info("故障排查结论",
-                    severity=diagnosis["severity"],
-                    conclusion=diagnosis["conclusion"][:100])
+        logger.info(
+            "故障排查结论", severity=diagnosis["severity"], conclusion=diagnosis["conclusion"][:100]
+        )
 
     def get_results(self) -> list[dict[str, Any]]:
         """获取所有步骤的执行结果列表。"""

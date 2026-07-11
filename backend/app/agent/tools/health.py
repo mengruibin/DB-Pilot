@@ -86,35 +86,55 @@ async def run_health_check(
     ssl_enabled: Annotated[bool, InjectedToolArg] = False,
     ssl_ca_cert: Annotated[str | None, InjectedToolArg] = None,
 ) -> dict[str, Any]:
-    """对目标数据库执行健康巡检（20 项检查）。
-
-    调用 HealthCheckEngine 逐项执行检查，按类别汇总评分。
-    适用于数据库日常巡检和性能评估场景（PRD §5.4）。
-
-    支持按检查项名称过滤：传 ["连接数使用率", "主从延迟"] 仅执行指定项。
-    传 None 或 ["all"] 执行全部 20 项检查。
+    """对目标数据库执行全面健康巡检（默认 20 项检查），涵盖连接、复制、性能、
+    慢查询、存储、安全六个类别。支持按检查项名称过滤。
+    适用于数据库日常巡检和性能评估。
 
     Args:
-        connection_id: 连接标识符。
-        db_type: 数据库类型（mysql / postgresql / oracle）。
-        host: 数据库主机地址。
-        port: 数据库端口号。
-        database: 目标数据库名。
-        user: 连接用户名。
-        password: 连接密码。
-        check_items: 要执行的检查项名称列表；None 或 ["all"] 表示全部。
-        ssl_enabled: 是否启用 SSL。
-        ssl_ca_cert: SSL CA 证书（可选）。
+        check_items: 要执行的检查项名称列表。传 None 或 ["all"] 执行全部检查。
+            可用项：连接数使用率 / 等待连接数 / 连接异常率 / 连接详情 /
+            空闲连接占比 / 活跃连接占比 / 主从延迟 / IO 线程状态 / SQL 线程状态 /
+            QPS / TPS / 缓冲池命中率 / 慢查询占比 / 数据库运行时间 /
+            慢查询数量 / 最慢查询耗时 / 表空间使用 / 临时表磁盘使用率 /
+            SSL 加密检查 / 数据库可用性
 
     Returns:
-        成功：{"score": int, "severity_counts": {...}, "categories": [...]}
-        失败：{"error": "run_health_check 执行失败", "detail": "..."}
+        成功: {
+            "score": int,  // 健康评分（0-100，skipped 项不计入分母）
+            "severity_counts": {
+                "error": int, "warning": int, "pass": int, "skipped": int
+            },
+            "categories": [
+                {
+                    "name": str,         // 类别名（连接 / 复制 / 性能 / 慢查询 / 存储 / 安全）
+                    "items": [
+                        {
+                            "item": str,           // 检查项名称
+                            "category": str,
+                            "status": "pass" | "warning" | "error" | "skipped",
+                            "value": str,          // 当前值描述
+                            "threshold": str,      // 阈值（如 "<80%", "N/A"）
+                            "suggestion": str | null  // 优化建议
+                        }
+                    ]
+                }
+            ],
+            "summary": str
+        }
+        失败: {"error": str, "detail": str}
     """
     # SAFETY: 所有检查为只读操作（PRD §8.1 Layer 1）
     try:
         config = _build_config(
-            connection_id, db_type, host, port, database, user,
-            password, ssl_enabled, ssl_ca_cert,
+            connection_id,
+            db_type,
+            host,
+            port,
+            database,
+            user,
+            password,
+            ssl_enabled,
+            ssl_ca_cert,
         )
         adapter = AdapterFactory.create(db_type, config)
         await adapter.connect(config)
@@ -162,8 +182,9 @@ async def run_health_check(
             f"健康评分: {score}/100"
             f"（{error_count} 项异常, {warning_count} 项警告, {pass_count} 项通过）"
         )
-        logger.info("工具执行成功", tool="run_health_check",
-                     connection_id=connection_id, score=score)
+        logger.info(
+            "工具执行成功", tool="run_health_check", connection_id=connection_id, score=score
+        )
         return report
     except Exception as exc:
         return _safe_tool_call("run_health_check", exc)

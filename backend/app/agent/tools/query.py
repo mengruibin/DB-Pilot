@@ -111,26 +111,21 @@ async def list_tables(
     ssl_enabled: Annotated[bool, InjectedToolArg] = False,
     ssl_ca_cert: Annotated[str | None, InjectedToolArg] = None,
 ) -> dict[str, Any]:
-    """列出目标数据库中的所有表。
-
-    调用适配器的 get_tables() 获取表名、注释和行数估计。
-    适用于 NL2SQL 的 Schema 上下文注入和用户快速浏览数据库结构。
-
-    Args:
-        connection_id: 连接标识符（用于日志追踪）。
-        db_type: 数据库类型（mysql / postgresql / oracle）。
-        host: 数据库主机地址。
-        port: 数据库端口号。
-        database: 目标数据库名。
-        user: 连接用户名。
-        password: 连接密码。
-        user_role: 用户角色（readonly / standard / admin）。
-        ssl_enabled: 是否启用 SSL。
-        ssl_ca_cert: SSL CA 证书 PEM（可选）。
+    """获取当前数据库中所有表的基本信息（表名、注释、行数估计）。
+    适用于浏览数据库结构，或在 NL2SQL 场景中获取完整的表清单作为 Schema 上下文。
 
     Returns:
-        成功：{"tables": [{"table_name": "...", "comment": "...", ...}]}
-        失败：{"error": "list_tables 执行失败", "detail": "..."}
+        成功: {
+            "tables": [
+                {
+                    "table_name": str,       // 表名
+                    "comment": str,          // 表注释（无注释时为空字符串）
+                    "row_count_estimate": int  // 行数估计（0 表示未知或空表）
+                }
+            ],
+            "summary": str
+        }
+        失败: {"error": str, "detail": str}
     """
     # SAFETY: 使用参数化连接配置，不拼接连接串（AGENTS.md §数据库操作原则）
     try:
@@ -185,27 +180,36 @@ async def describe_table(
     ssl_enabled: Annotated[bool, InjectedToolArg] = False,
     ssl_ca_cert: Annotated[str | None, InjectedToolArg] = None,
 ) -> dict[str, Any]:
-    """获取指定表的详细结构信息（列信息 + 索引信息）。
+    """前提条件：必须先调用 list_tables 获取该数据库中的表名清单。
 
-    同时调用适配器的 get_columns() 和 get_indexes()，
-    适用于 NL2SQL 获取 Schema 上下文和查询优化分析。
+    获取指定表的详细结构，包含列定义和索引信息。
+    适用于 NL2SQL 的 Schema 上下文补充，或查看某张表的具体列类型、索引设计。
 
     Args:
-        connection_id: 连接标识符。
-        db_type: 数据库类型。
-        host: 主机地址。
-        port: 端口号。
-        database: 数据库名。
-        user: 用户名。
-        password: 密码。
-        table_name: 目标表名。
-        user_role: 用户角色（readonly / standard / admin）。
-        ssl_enabled: 是否启用 SSL。
-        ssl_ca_cert: SSL CA 证书（可选）。
+        table_name: 目标表名（必须是当前数据库中已有的表，可通过 list_tables 获取）。
 
     Returns:
-        成功：{"columns": [...], "indexes": [...]}
-        失败：{"error": "describe_table 执行失败", "detail": "..."}
+        成功: {
+            "columns": [
+                {
+                    "name": str,          // 列名
+                    "type": str,          // 数据类型（如 "varchar(255)", "bigint"）
+                    "nullable": bool,     // 是否允许 NULL
+                    "is_primary": bool,   // 是否为主键
+                    "comment": str        // 列注释
+                }
+            ],
+            "indexes": [
+                {
+                    "name": str,          // 索引名
+                    "columns": [str],     // 索引包含的列名列表
+                    "is_unique": bool,    // 是否唯一索引
+                    "type": str           // 索引类型（如 "BTREE", "HASH"）
+                }
+            ],
+            "summary": str
+        }
+        失败: {"error": str, "detail": str}
     """
     # SAFETY: 使用参数化连接配置，不拼接连接串
     try:
@@ -267,34 +271,42 @@ async def execute_sql(
     ssl_enabled: Annotated[bool, InjectedToolArg] = False,
     ssl_ca_cert: Annotated[str | None, InjectedToolArg] = None,
 ) -> dict[str, Any]:
-    """执行 SQL 语句并返回结果。
+    """执行 SQL 语句并返回查询结果。
 
-    支持 SELECT / INSERT / UPDATE / DELETE / SHOW / DESCRIBE / EXPLAIN 等。
-    允许的操作范围由当前连接的用户角色（user_role）决定：
-      - admin：可执行 INSERT/UPDATE/DELETE 等写操作
-      - readonly：仅允许 SELECT/SHOW/DESCRIBE/EXPLAIN 等只读操作
-
-    执行流程：
-      1. 调用 sql_auditor.audit() 审计 SQL 安全性
-      2. 审计通过后调用适配器 execute() 执行查询
-      3. 对敏感列进行脱敏处理（T-4：列名正则匹配）
-
-    SAFETY: 所有 SQL 执行前必须经过审计（AGENTS.md §安全与合规红线）。
-    SAFETY: 写操作（INSERT/UPDATE/DELETE）仅在用户角色为 admin 时放行，
-            readonly 用户会被审计层拦截。
+    安全约束：
+      - 写操作（INSERT/UPDATE/DELETE）仅在当前用户角色为 admin 时允许
+      - readonly 角色仅可执行 SELECT/SHOW/DESC/EXPLAIN 等只读语句
+      - 所有 SQL 执行前自动经过安全审计，拦截 DROP/ALTER/TRUNCATE/CREATE/
+        GRANT/REVOKE 等危险操作及多语句注入
+      - 结果中的敏感列（password、token、phone 等）自动以 "***" 掩码
+      - 不支持多条语句批处理
 
     Args:
         sql: 要执行的 SQL 语句。
-        user_role: 当前用户角色（由系统自动检测注入，调用方无需手动指定）。
-            - "admin"：可执行所有非 DDL 操作
-            - "readonly"：仅限只读查询
 
     Returns:
-        成功：{"columns": [...], "rows": [...], "execution_time_ms": int,
-              "audit_status": "passed", "is_readonly": bool}
-        审计拦截：{"error": "SQL 审计未通过", "detail": "...", "violations": [...],
-                  "audit_status": "blocked"}
-        失败：{"error": "execute_sql 执行失败", "detail": "..."}
+        成功: {
+            "columns": [str],            // 结果集列名列表
+            "rows": [[any]],             // 结果集数据行
+            "total_rows": int,           // 总行数
+            "execution_time_ms": int,    // 执行耗时（毫秒）
+            "audit_status": "passed",    // 固定值
+            "is_readonly": bool,         // true=只读查询，false=写操作
+            "summary": str
+        }
+        审计拦截: {
+            "error": str,
+            "detail": str,
+            "violations": [{"type": str, "message": str}],
+            "audit_status": "blocked"
+        }
+        执行失败: {
+            "error": str,
+            "error_type": str,           // 错误类型（如 syntax_error, permission_denied）
+            "detail": str,
+            "suggestion": str | null,    // 修正建议
+            "audit_status": "execution_error"
+        }
     """
     # Step 1: SQL 安全审计（AGENTS.md §安全与合规红线）
     # SAFETY: 不跳过 SQL 审计直接执行用户/LLM 生成的 SQL
