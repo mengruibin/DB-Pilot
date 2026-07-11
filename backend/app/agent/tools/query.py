@@ -175,43 +175,57 @@ async def describe_table(
     database: Annotated[str, InjectedToolArg],
     user: Annotated[str, InjectedToolArg],
     password: Annotated[str, InjectedToolArg],
-    table_name: str,
+    table_names: list[str],
     user_role: Annotated[str, InjectedToolArg] = "standard",
     ssl_enabled: Annotated[bool, InjectedToolArg] = False,
     ssl_ca_cert: Annotated[str | None, InjectedToolArg] = None,
 ) -> dict[str, Any]:
-    """前提条件：必须先调用 list_tables 获取该数据库中的表名清单。
-
-    获取指定表的详细结构，包含列定义和索引信息。
+    """获取指定表的详细结构，包含列定义和索引信息。
+    支持批量查询多张表，建议将需要查询的多张表一并传入以减少工具调用次数。
     适用于 NL2SQL 的 Schema 上下文补充，或查看某张表的具体列类型、索引设计。
 
     Args:
-        table_name: 目标表名（必须是当前数据库中已有的表，可通过 list_tables 获取）。
+        table_names: 目标表名列表（必须是当前数据库中已有的表，可通过 list_tables 获取）。
 
     Returns:
         成功: {
-            "columns": [
+            "tables": [
                 {
-                    "name": str,          // 列名
-                    "type": str,          // 数据类型（如 "varchar(255)", "bigint"）
-                    "nullable": bool,     // 是否允许 NULL
-                    "is_primary": bool,   // 是否为主键
-                    "comment": str        // 列注释
+                    "table_name": str,      // 表名
+                    "columns": [
+                        {
+                            "name": str,          // 列名
+                            "type": str,          // 数据类型（如 "varchar(255)", "bigint"）
+                            "nullable": bool,     // 是否允许 NULL
+                            "is_primary": bool,   // 是否为主键
+                            "comment": str        // 列注释
+                        }
+                    ],
+                    "indexes": [
+                        {
+                            "name": str,          // 索引名
+                            "columns": [str],     // 索引包含的列名列表
+                            "is_unique": bool,    // 是否唯一索引
+                            "type": str           // 索引类型（如 "BTREE", "HASH"）
+                        }
+                    ],
+                    "summary": str
                 }
             ],
-            "indexes": [
-                {
-                    "name": str,          // 索引名
-                    "columns": [str],     // 索引包含的列名列表
-                    "is_unique": bool,    // 是否唯一索引
-                    "type": str           // 索引类型（如 "BTREE", "HASH"）
-                }
-            ],
-            "summary": str
+            "summary": str                      // 总览信息
         }
         失败: {"error": str, "detail": str}
     """
     # SAFETY: 使用参数化连接配置，不拼接连接串
+    # 参数校验：空列表直接返回错误
+    if not table_names:
+        return {
+            "error": "describe_table 参数错误",
+            "detail": "table_names 不能为空列表，请提供至少一个表名",
+        }
+    # 去重处理：LLM 可能传入重复表名
+    unique_tables = list(dict.fromkeys(table_names))
+
     try:
         config = _build_config(
             connection_id,
@@ -226,22 +240,54 @@ async def describe_table(
         )
         adapter = AdapterFactory.create(db_type, config)
         await adapter.connect(config, user_role=user_role)
-        columns = await adapter.get_columns(database, table_name)
-        indexes = await adapter.get_indexes(database, table_name)
+
+        # 逐表查询，每张表独立 try/except，单表失败不影响其他表
+        tables_data: list[dict[str, Any]] = []
+        for tbl in unique_tables:
+            try:
+                columns = await adapter.get_columns(database, tbl)
+                indexes = await adapter.get_indexes(database, tbl)
+                tables_data.append({
+                    "table_name": tbl,
+                    "columns": columns,
+                    "indexes": indexes,
+                    "summary": f"{tbl}：{len(columns)} 列, {len(indexes)} 个索引",
+                })
+            except Exception as tbl_exc:
+                # 单表失败已隔离，不影响其他表继续查询
+                logger.warning(
+                    "描述表结构失败（已隔离）",
+                    tool="describe_table",
+                    table_name=tbl,
+                    error=str(tbl_exc)[:200],
+                )
+                tables_data.append({
+                    "table_name": tbl,
+                    "columns": [],
+                    "indexes": [],
+                    "error": str(tbl_exc)[:200],
+                    "summary": f"{tbl}：查询失败 - {str(tbl_exc)[:100]}",
+                })
+
         await adapter.disconnect()
 
+        total_tables = len(tables_data)
+        successful = sum(
+            1 for t in tables_data if t.get("columns") or t.get("indexes")
+        )
         logger.info(
             "工具执行成功",
             tool="describe_table",
             connection_id=connection_id,
-            table_name=table_name,
-            column_count=len(columns),
-            index_count=len(indexes),
+            table_count=total_tables,
+            successful=successful,
         )
+
+        # 拼接总览：列出每张表的状态
+        table_summaries = "，".join(t["summary"] for t in tables_data)
         return {
-            "columns": columns,
-            "indexes": indexes,
-            "summary": f"{table_name}：{len(columns)} 列, {len(indexes)} 个索引",
+            "tables": tables_data,
+            "summary": f"共查询 {total_tables} 张表：{table_summaries}",
         }
     except Exception as exc:
         return _safe_tool_call(

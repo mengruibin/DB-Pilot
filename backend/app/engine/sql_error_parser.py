@@ -67,7 +67,7 @@ def _parse_mysql_error(error_msg: str) -> tuple[ErrorType, str, str] | None:
         return (
             ErrorType.TABLE_NOT_FOUND,
             f"表 '{table_name}' 在当前数据库中不存在",
-            "请使用 list_tables 查看所有可用的表名，然后用 describe_table 确认表结构",
+            "请使用 list_tables 查看所有可用的表名，然后用 describe_table 批量确认相关表结构",
         )
 
     # 1054: 字段不存在
@@ -77,7 +77,7 @@ def _parse_mysql_error(error_msg: str) -> tuple[ErrorType, str, str] | None:
         return (
             ErrorType.COLUMN_NOT_FOUND,
             f"字段 '{col_name}' 在表中不存在",
-            f"请使用 describe_table 查看相关表的完整字段列表，确认 '{col_name}' 的正确字段名",
+            f"请使用 describe_table 批量查看相关表的完整字段列表，确认 '{col_name}' 的正确字段名",
         )
 
     # 1064: 语法错误
@@ -115,7 +115,7 @@ def _parse_postgresql_error(error_msg: str) -> tuple[ErrorType, str, str] | None
         return (
             ErrorType.TABLE_NOT_FOUND,
             f"表/视图 '{table_name}' 在当前数据库中不存在",
-            "请使用 list_tables 查看所有可用的表名，然后用 describe_table 确认表结构",
+            "请使用 list_tables 查看所有可用的表名，然后用 describe_table 批量确认相关表结构",
         )
 
     # 字段不存在
@@ -125,7 +125,7 @@ def _parse_postgresql_error(error_msg: str) -> tuple[ErrorType, str, str] | None
         return (
             ErrorType.COLUMN_NOT_FOUND,
             f"字段 '{col_name}' 在表中不存在",
-            f"请使用 describe_table 查看相关表的完整字段列表，确认 '{col_name}' 的正确字段名",
+            f"请使用 describe_table 批量查看相关表的完整字段列表，确认 '{col_name}' 的正确字段名",
         )
 
     # 语法错误
@@ -165,7 +165,7 @@ def _parse_oracle_error(error_msg: str) -> tuple[ErrorType, str, str] | None:
         return (
             ErrorType.TABLE_NOT_FOUND,
             "表或视图在当前数据库中不存在",
-            "请使用 list_tables 查看所有可用的表名，然后用 describe_table 确认表结构",
+            "请使用 list_tables 查看所有可用的表名，然后用 describe_table 批量确认相关表结构",
         )
 
     # ORA-00904: 标识符无效（通常是字段名错误）
@@ -175,7 +175,7 @@ def _parse_oracle_error(error_msg: str) -> tuple[ErrorType, str, str] | None:
         return (
             ErrorType.COLUMN_NOT_FOUND,
             f"字段 '{col_name}' 在表中不存在或标识符无效",
-            f"请使用 describe_table 查看相关表的完整字段列表，确认 '{col_name}' 的正确字段名",
+            f"请使用 describe_table 批量查看相关表的完整字段列表，确认 '{col_name}' 的正确字段名",
         )
 
     # ORA-00900: 无效 SQL 语句
@@ -255,7 +255,7 @@ def parse_db_error(
         detail=f"数据库执行出错: {error_msg[:300]}",
         suggestion=(
             "请分析错误信息，确认 SQL 是否正确，"
-            "必要时使用 list_tables 和 describe_table 确认表名和字段名"
+            "必要时使用 list_tables 和 describe_table 批量确认表名和字段名"
         ),
         original=error_msg[:500],
     )

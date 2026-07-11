@@ -89,7 +89,7 @@ async def explain_query(
     ssl_ca_cert: Annotated[str | None, InjectedToolArg] = None,
 ) -> dict[str, Any]:
     """前提条件：先执行 execute_sql 确保 SQL 语法正确；
-    若查看特定表的执行计划，建议先调用 describe_table 了解表结构。
+    若查看特定表的执行计划，建议先调用 describe_table 批量了解相关表结构。
 
     获取指定 SQL 语句的执行计划（EXPLAIN），用于查询性能分析和索引优化建议。
     三种格式（tree/json/traditional）由目标数据库方言自动映射，实际支持的格式取决于数据库类型。
