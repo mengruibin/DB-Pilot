@@ -1,11 +1,19 @@
 <script setup lang="ts">
-import { darkTheme, zhCN, NNotificationProvider } from 'naive-ui'
+import { onMounted } from 'vue'
+import { zhCN, NNotificationProvider } from 'naive-ui'
 import AppLayout from '@/components/common/AppLayout.vue'
-import { themeOverrides } from '@/utils/theme'
+import { darkThemeOverrides, lightThemeOverrides } from '@/utils/theme'
+import { useThemeStore } from '@/stores/theme'
+
+const themeStore = useThemeStore()
+
+onMounted(() => {
+  themeStore.initTheme()
+})
 </script>
 
 <template>
-  <n-config-provider :theme="darkTheme" :theme-overrides="themeOverrides" :locale="zhCN">
+  <n-config-provider :theme="themeStore.naiveTheme" :theme-overrides="themeStore.isDark ? darkThemeOverrides : lightThemeOverrides" :locale="zhCN">
     <n-notification-provider>
       <AppLayout />
     </n-notification-provider>
@@ -91,6 +99,11 @@ import { themeOverrides } from '@/utils/theme'
   --chat-code-bg: #020617;
   --chat-code-text: #60A5FA;
 
+  /* 行内代码 — 深色主题用青绿透明底 */
+  --chat-code-inline-bg: rgba(45, 212, 191, 0.08);
+  --chat-code-inline-border: rgba(45, 212, 191, 0.12);
+  --chat-code-inline-text: #5EE4D0;
+
   /* 分割线 */
   --chat-divider: #2D3748;
 
@@ -99,14 +112,40 @@ import { themeOverrides } from '@/utils/theme'
   --chat-table-border: #334155;
   --chat-table-text: #E2E8F0;
   --chat-table-hover: rgba(59, 130, 246, 0.05);
+  --chat-table-even-bg: rgba(30, 41, 59, 0.25);
 
   /* 提示文本 */
   --chat-note-text: #64748B;
+
+  /* 背景网格点颜色（AppLayout 内容区背景使用） */
+  --grid-dot-color: rgba(30, 41, 59, 0.3);
+
+  /* 侧边栏品牌图标 — 深色主题下使用青绿 */
+  --brand-icon-color: var(--accent-teal);
+
+  /* 输入区模式标签选中色 */
+  --mode-tab-active-color: #FFFFFF;
+
+  /* 发送按钮 */
+  --submit-btn-bg: #000000;
+  --submit-btn-color: var(--accent-teal);
+
+  /* 强调色软透明变体 — 用于半透明背景/边框场景（青绿） */
+  --accent-soft-bg: rgba(45, 212, 191, 0.12);
+  --accent-soft-border: rgba(45, 212, 191, 0.2);
+  --accent-soft-border-hover: rgba(45, 212, 191, 0.4);
+
+  /* 交互反馈色 — 深色主题用品牌浅绿 */
+  --interactive-color: var(--accent-teal);
+
+  /* 连接卡片选中态 */
+  --conn-card-active-bg: rgba(45, 212, 191, 0.04);
+  --conn-card-active-border: rgba(45, 212, 191, 0.3);
 }
 
 /* ═══════════ 浅色主题变量 ═══════════ */
 [data-theme="light"] {
-  --bg-primary: #F9FBFC;
+  --bg-primary: #F8FAFC;
   --bg-surface: #FFFFFF;
   --bg-elevated: #FFFFFF;
   --bg-hover: #F1F5F9;
@@ -116,13 +155,21 @@ import { themeOverrides } from '@/utils/theme'
   --text-secondary: #64748B;
   --text-tertiary: #94A3B8;
 
-  --chat-bg: #F9FBFC;
+  /* ═══════════ 浅色主题：灰黑白简约配色（覆盖深色主题的绿色） ═══════════ */
+  /* 品牌主色：青绿 → 深石板灰 */
+  --accent-teal: #1E293B;
+  /* 成功状态色：翠绿 → 中深灰 */
+  --color-success: #334155;
+  /* Agent 回答标题色：深绿 → 浅蓝，契合交互层蓝色基调 */
+  --chat-answer-heading: #3B82F6;
+
+  --chat-bg: #F8FAFC;
   --chat-card-bg: #FFFFFF;
   --chat-card-border: #EDF2F7;
   --chat-card-shadow: 0 4px 20px -4px rgba(0, 0, 0, 0.05);
 
-  --chat-user-bg: #F1F3F5;
-  --chat-user-border: #E9ECEF;
+  --chat-user-bg: #E8EAEF;
+  --chat-user-border: #D1D5DB;
   --chat-user-text: #334155;
 
   --chat-thinking-bg: #FFFFFF;
@@ -132,7 +179,7 @@ import { themeOverrides } from '@/utils/theme'
   --chat-thinking-step-text: #3B82F6;
   --chat-thinking-divider: #F1F5F9;
 
-  --chat-tool-bg: rgba(191, 219, 254, 0.3);
+  --chat-tool-bg: rgba(191, 219, 254, 0.2);
   --chat-tool-border: #BFDBFE;
   --chat-tool-header-bg: rgba(191, 219, 254, 0.5);
   --chat-tool-text: #1E40AF;
@@ -140,17 +187,21 @@ import { themeOverrides } from '@/utils/theme'
   --chat-tool-duration: #6366F1;
   --chat-tool-args-text: #1E40AF;
 
-  --chat-result-bg: #F9FAFB;
-  --chat-result-border: #E5E7EB;
+  --chat-result-bg: #F8FAFC;
+  --chat-result-border: #E2E8F0;
   --chat-result-text: #64748B;
 
-  --chat-answer-bg: transparent;
+  --chat-answer-bg: #F1F5F9;
   --chat-answer-border: #E2E8F0;
   --chat-answer-text: #334155;
-  --chat-answer-heading: #10B981;
 
   --chat-code-bg: #0F172A;
   --chat-code-text: #60A5FA;
+
+  /* 行内代码 — 浅色主题用深灰透明底，契合灰黑白简约风 */
+  --chat-code-inline-bg: rgba(30, 41, 59, 0.06);
+  --chat-code-inline-border: rgba(30, 41, 59, 0.12);
+  --chat-code-inline-text: #1E293B;
 
   --chat-divider: #E2E8F0;
 
@@ -158,10 +209,35 @@ import { themeOverrides } from '@/utils/theme'
   --chat-table-border: #E2E8F0;
   --chat-table-text: #334155;
   --chat-table-hover: rgba(59, 130, 246, 0.04);
+  --chat-table-even-bg: #F1F5F9;
 
   --chat-note-text: #94A3B8;
-}
 
+  /* 浅色网格点颜色 */
+  --grid-dot-color: rgba(226, 232, 240, 0.5);
+
+  /* 侧边栏品牌图标 — 浅色主题下使用深色 */
+  --brand-icon-color: #1E293B;
+
+  /* 输入区模式标签选中色 — 浅色主题下使用黑色 */
+  --mode-tab-active-color: #000000;
+
+  /* 发送按钮 — 浅色主题下黑色背景白色图标 */
+  --submit-btn-bg: #1E293B;
+  --submit-btn-color: #FFFFFF;
+
+  /* 强调色软透明变体 — 浅色主题用深灰透明，契合灰黑白简约风 */
+  --accent-soft-bg: rgba(30, 41, 59, 0.10);
+  --accent-soft-border: rgba(30, 41, 59, 0.2);
+  --accent-soft-border-hover: rgba(30, 41, 59, 0.4);
+
+  /* 交互反馈色 — 浅色主题用浅蓝，增加交互层次感 */
+  --interactive-color: #3B82F6;
+
+  /* 连接卡片选中态 — 浅色主题下灰色 */
+  --conn-card-active-bg: #f3f4f6;
+  --conn-card-active-border: #d1d5db;
+}
 *,
 *::before,
 *::after {

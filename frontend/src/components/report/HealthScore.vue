@@ -86,6 +86,7 @@ onUnmounted(() => {
 const scoreConfig = computed(() => {
   const s = props.score
   if (s >= 80) {
+    // 优秀档：统一使用翠绿渐变
     return {
       start: '#34D399',
       end: '#10B981',

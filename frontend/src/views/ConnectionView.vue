@@ -7,14 +7,19 @@
  *
  * 依据 api-contract §三 ConnectionView 组件树
  */
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, computed } from 'vue'
 import { NButton } from 'naive-ui'
 import { useConnectionStore } from '@/stores/connection'
+import { useThemeStore } from '@/stores/theme'
 import ConnectionList from '@/components/connection/ConnectionList.vue'
 import ConnectionForm from '@/components/connection/ConnectionForm.vue'
 import type { ConnectionConfig } from '@/types/connection'
 
 const store = useConnectionStore()
+const themeStore = useThemeStore()
+
+/** 浅色主题下新建连接按钮用蓝色背景，深色主题用默认主题色 */
+const createBtnColor = computed(() => (themeStore.isDark ? undefined : '#2563EB'))
 
 type ViewMode = 'list' | 'form'
 
@@ -78,7 +83,7 @@ function handleCancel() {
         </span>
       </div>
       <div v-if="view === 'list'" class="header-actions">
-        <n-button type="primary" size="small" @click="handleCreate">
+        <n-button type="primary" size="small" :color="createBtnColor" @click="handleCreate">
           <template #icon>
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
               <line x1="12" y1="5" x2="12" y2="19"/>
@@ -173,3 +178,4 @@ function handleCancel() {
   font-size: 14px;
 }
 </style>
+

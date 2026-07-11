@@ -146,105 +146,105 @@ const placeholderText = !props.hasConnection
 
 <template>
   <div class="input-area">
-    <!-- 模式切换 + 连接标识 -->
-    <div class="area-topbar">
-      <div class="mode-tabs">
-        <button
-          class="mode-tab"
-          :class="{ active: inputMode === 'natural_language' }"
-          :disabled="isStreaming || !hasConnection"
-          @click="toggleMode('natural_language')"
-        >
-          <span class="tab-label">自然语言</span>
-        </button>
-        <button
-          class="mode-tab"
-          :class="{ active: inputMode === 'sql_editor' }"
-          :disabled="isStreaming || !hasConnection"
-          @click="toggleMode('sql_editor')"
-        >
-          <span class="tab-label">SQL</span>
-        </button>
+    <!-- 圆角卡片容器 -->
+    <div class="input-card">
+      <!-- 上层：模式切换 + 连接选择器 -->
+      <div class="area-topbar">
+        <div class="mode-tabs">
+          <button
+            class="mode-tab"
+            :class="{ active: inputMode === 'natural_language' }"
+            :disabled="isStreaming || !hasConnection"
+            @click="toggleMode('natural_language')"
+          >
+            <span class="tab-label">自然语言</span>
+          </button>
+          <button
+            class="mode-tab"
+            :class="{ active: inputMode === 'sql_editor' }"
+            :disabled="isStreaming || !hasConnection"
+            @click="toggleMode('sql_editor')"
+          >
+            <span class="tab-label">SQL</span>
+          </button>
+        </div>
+        <ConnectionSwitcher
+          :connections="connections"
+          :active-id="activeConnectionId"
+          @select-connection="(id: string) => emit('select-connection', id)"
+        />
       </div>
-      <ConnectionSwitcher
-        :connections="connections"
-        :active-id="activeConnectionId"
-        @select-connection="(id: string) => emit('select-connection', id)"
-      />
-    </div>
 
-    <!-- 编辑区 -->
-    <div class="area-editor">
-      <textarea
-        ref="textareaRef"
-        class="input-textarea"
-        :class="{ 'sql-mode': inputMode === 'sql_editor' }"
-        :value="modelValue"
-        :placeholder="placeholderText"
-        :disabled="!hasConnection || isStreaming"
-        rows="1"
-        @input="handleInput"
-        @keydown="handleKeydown"
-        @paste="handlePaste"
-      ></textarea>
-      <button
-        class="submit-btn"
-        :class="{ 'is-stop': isStreaming }"
-        :disabled="(!modelValue.trim() && !isStreaming) || !hasConnection"
-        @click="isStreaming ? handleStop() : submit()"
-      >
-        <template v-if="isStreaming">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
-            <rect x="6" y="6" width="5" height="12" rx="1"/>
-            <rect x="13" y="6" width="5" height="12" rx="1"/>
-          </svg>
-          <span>停止</span>
-        </template>
-        <template v-else>
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-            <line x1="22" y1="2" x2="11" y2="13"/>
-            <polygon points="22 2 15 22 11 13 2 9 22 2"/>
-          </svg>
-          <span>发送</span>
-        </template>
-      </button>
+      <!-- 下层：通栏文本输入框 + 右下角发送按钮 -->
+      <div class="area-editor">
+        <div class="textarea-wrapper">
+          <textarea
+            ref="textareaRef"
+            class="input-textarea"
+            :class="{ 'sql-mode': inputMode === 'sql_editor' }"
+            :value="modelValue"
+            :placeholder="placeholderText"
+            :disabled="!hasConnection || isStreaming"
+            rows="1"
+            @input="handleInput"
+            @keydown="handleKeydown"
+            @paste="handlePaste"
+          ></textarea>
+          <button
+            class="submit-btn"
+            :class="{ 'is-stop': isStreaming }"
+            :disabled="(!modelValue.trim() && !isStreaming) || !hasConnection"
+            @click="isStreaming ? handleStop() : submit()"
+          >
+            <template v-if="isStreaming">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+                <rect x="6" y="6" width="5" height="12" rx="1"/>
+                <rect x="13" y="6" width="5" height="12" rx="1"/>
+              </svg>
+            </template>
+            <template v-else>
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                <line x1="22" y1="2" x2="11" y2="13"/>
+                <polygon points="22 2 15 22 11 13 2 9 22 2"/>
+              </svg>
+            </template>
+          </button>
+        </div>
+      </div>
     </div>
-
-    <!-- 底部快捷键提示 -->
-    <!-- <p class="area-hint">
-      <template v-if="inputMode === 'natural_language'">
-        Enter 发送 · Shift+Enter 换行
-      </template>
-      <template v-else>
-        Ctrl+Enter 执行 · Shift+Enter 换行
-      </template>
-      <template v-if="isStreaming">
-        · 点击「停止」或按 Escape 取消
-      </template>
-    </p> -->
   </div>
 </template>
 
 <style scoped>
 .input-area {
   flex-shrink: 0;
-  padding: 8px 20px 12px;
-  border-top: 1px solid var(--border-color);
-  background: var(--bg-surface);
+  padding: 8px 0 12px;
 }
 
-/* ─── 顶栏 ─── */
+/* ─── 圆角卡片容器 ─── */
+.input-card {
+  background: var(--input-card-bg);
+  border: 1px solid var(--input-card-border);
+  border-radius: 8px;
+  box-shadow: var(--input-card-shadow);
+  transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
+}
+
+/* ─── 上区块：Tab + 连接选择器 ─── */
 .area-topbar {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: 6px;
+  padding: 10px 10px 9px;
+  border-bottom: 1px solid var(--input-card-divider);
+  background: var(--input-card-bg);
+  border-radius: 16px 16px 0 0;
 }
 
 .mode-tabs {
   display: flex;
   gap: 2px;
-  background: var(--bg-primary);
+  background: var(--input-tab-bg);
   border-radius: var(--radius-md);
   padding: 2px;
 }
@@ -253,9 +253,9 @@ const placeholderText = !props.hasConnection
   display: flex;
   align-items: center;
   gap: 4px;
-  padding: 3px 10px;
+  padding: 3px 12px;
   border: none;
-  border-radius: 4px;
+  border-radius: 5px;
   background: transparent;
   color: var(--text-tertiary);
   font-family: var(--font-body);
@@ -267,12 +267,11 @@ const placeholderText = !props.hasConnection
 
 .mode-tab:hover:not(:disabled) {
   color: var(--text-secondary);
-  background: var(--bg-hover);
 }
 
 .mode-tab.active {
-  background: var(--bg-elevated);
-  color: var(--accent-teal);
+  background: var(--input-tab-active-bg);
+  color: var(--mode-tab-active-color);
 }
 
 .mode-tab:disabled {
@@ -280,47 +279,54 @@ const placeholderText = !props.hasConnection
   cursor: not-allowed;
 }
 
-.tab-icon {
-  font-size: 13px;
-}
-
 .tab-label {
   font-weight: 450;
 }
 
-
-/* ─── 编辑区 ─── */
+/* ─── 下区块：通栏输入框 + 右下角发送按钮 ─── */
 .area-editor {
-  display: flex;
-  gap: 8px;
-  align-items: flex-end;
+  padding: 16px 10px 20px;
+  background: var(--input-textarea-bg);
+  border-radius: 0 0 16px 16px;
+  box-shadow: 0 6px 8px -6px rgba(0, 0, 0, 0.35);
+}
+
+.textarea-wrapper {
+  position: relative;
 }
 
 .input-textarea {
-  flex: 1;
-  background: var(--bg-primary);
-  border: 1px solid var(--border-color);
+  width: 100%;
+  background: var(--input-textarea-bg);
+  border: none;
   border-radius: var(--radius-md);
   color: var(--text-primary);
   font-family: var(--font-body);
-  font-size: 13px;
+  font-size: 16px;
   line-height: 20px;
-  padding: 7px 12px;
+  padding: 8px 44px 8px 12px;
   resize: none;
-  min-height: 36px;
+  min-height: 38px;
   max-height: 120px;
   outline: none;
   transition: border-color var(--transition-fast);
   overflow: hidden;
+  display: block;
+  box-sizing: border-box;
 }
 
 .input-textarea:focus {
   border-color: var(--accent-teal);
 }
 
+/* 浅色主题下 focus 边框用浅蓝，增加交互层次感 */
+[data-theme="light"] .input-textarea:focus {
+  border-color: var(--interactive-color);
+}
+
 .input-textarea.sql-mode {
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: 15px;
   line-height: 1.6;
 }
 
@@ -333,31 +339,31 @@ const placeholderText = !props.hasConnection
   cursor: not-allowed;
 }
 
-/* 提交按钮 */
+/* ─── 发送按钮（绝对定位右下角） ─── */
 .submit-btn {
+  position: absolute;
+  right: 5px;
+  bottom: -2px;
   display: flex;
   align-items: center;
-  gap: 4px;
-  padding: 6px 14px;
-  background: var(--accent-teal);
-  color: #0B0E14;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  padding: 0;
+  background: var(--submit-btn-bg);
+  color: var(--submit-btn-color);
   border: none;
-  border-radius: var(--radius-md);
-  font-family: var(--font-body);
-  font-size: 12px;
-  font-weight: 600;
+  border-radius: 8px;
   cursor: pointer;
   transition: all var(--transition-fast);
-  white-space: nowrap;
-  height: 36px;
 }
 
 .submit-btn:hover:not(:disabled) {
-  background: #5EE4D0;
+  opacity: 0.85;
 }
 
 .submit-btn:disabled {
-  opacity: 0.4;
+  opacity: 0.35;
   cursor: not-allowed;
 }
 
@@ -370,11 +376,31 @@ const placeholderText = !props.hasConnection
   background: #FCA5A5;
 }
 
-/* ─── 提示条 ─── */
-.area-hint {
-  font-size: 10px;
-  color: var(--text-tertiary);
-  margin-top: 4px;
-  letter-spacing: 0.2px;
+/* ─── 深色主题配色（:root 默认） ─── */
+.input-card {
+  --input-card-bg: #1e2936;
+  --input-card-border: #374151;
+  --input-card-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+  --input-card-divider: #374151;
+  --input-tab-bg: #0f172a;
+  --input-tab-active-bg: #273444;
+  --input-textarea-bg: #0f172a;
+  --input-textarea-border: #374151;
+}
+
+/* ─── 浅色主题配色 ─── */
+[data-theme="light"] .input-card {
+  --input-card-bg: #f8fafc;
+  --input-card-border: #e2e8f0;
+  --input-card-shadow: 0 4px 12px rgba(0, 0, 0, 0.05);
+  --input-card-divider: #e2e8f0;
+  --input-tab-bg: #f1f5f9;
+  --input-tab-active-bg: #ffffff;
+  --input-textarea-bg: #ffffff;
+  --input-textarea-border: #e2e8f0;
+}
+
+[data-theme="light"] .mode-tab.active {
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
 }
 </style>

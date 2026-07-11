@@ -17,7 +17,7 @@ import type { RuntimeStatus } from '@/stores/connection'
 const store = useConnectionStore()
 const notification = useNotification()
 
-/** 状态灯颜色映射 */
+/** 状态灯颜色映射 — healthy 统一使用绿色 */
 const DOT_COLORS: Record<RuntimeStatus, string> = {
   unknown: '#64748B',
   connecting: '#FBBF24',

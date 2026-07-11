@@ -37,7 +37,7 @@ const dbBadge: Record<DbType, { label: string; color: string }> = {
 }
 
 // ─── 状态灯配置（与 ConnectionList.vue 一致） ───
-
+// healthy 统一使用绿色
 const statusConfig: Record<string, { color: string; label: string; pulse: boolean }> = {
   healthy: { color: '#34D399', label: '已连接', pulse: false },
   connecting: { color: '#FBBF24', label: '连接中…', pulse: true },
@@ -232,11 +232,11 @@ onUnmounted(() => {
 
 .switcher-trigger.connected {
   color: var(--accent-teal);
-  border-color: rgba(45, 212, 191, 0.2);
+  border-color: var(--accent-soft-border);
 }
 
 .switcher-trigger.connected:hover {
-  border-color: rgba(45, 212, 191, 0.4);
+  border-color: var(--accent-soft-border-hover);
 }
 
 .trigger-text {
@@ -302,7 +302,7 @@ onUnmounted(() => {
 }
 
 .conn-item.active {
-  background: rgba(45, 212, 191, 0.06);
+  background: var(--conn-card-active-bg);
 }
 
 .item-active-bar {
@@ -311,7 +311,7 @@ onUnmounted(() => {
   top: 4px;
   bottom: 4px;
   width: 3px;
-  background: var(--accent-teal);
+  background: #34D399;
   border-radius: 0 2px 2px 0;
 }
 

@@ -149,7 +149,7 @@ function handleNewSession(): void {
 }
 
 .new-session-btn:hover {
-  color: var(--accent-teal) !important;
+  color: var(--interactive-color) !important;
 }
 
 /* 历史消息加载状态 */
@@ -176,7 +176,7 @@ function handleNewSession(): void {
 
 /* 消息列表内层：限制最大宽度并居中 */
 .message-list-inner {
-  max-width: 1000px;
+  max-width: 900px;
   width: 100%;
   margin: 0 auto;
   min-height: 100%;
@@ -187,7 +187,7 @@ function handleNewSession(): void {
 /* 输入区域容器：与消息列表同宽限宽居中 */
 .input-area-wrapper {
   flex-shrink: 0;
-  max-width: 1000px;
+  max-width: 900px;
   width: 100%;
   margin: 0 auto;
 }

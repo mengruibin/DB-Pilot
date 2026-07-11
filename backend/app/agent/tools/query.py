@@ -413,6 +413,5 @@ async def execute_sql(
             "error_type": parsed.error_type,
             "detail": parsed.detail,
             "suggestion": parsed.suggestion,
-            "sql": sql,
             "audit_status": "execution_error",
         }

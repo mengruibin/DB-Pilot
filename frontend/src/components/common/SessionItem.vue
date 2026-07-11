@@ -147,19 +147,7 @@ const displayTime = computed(() => formatRelativeTime(props.session.last_active_
 }
 
 .session-item.active {
-  background: rgba(45, 212, 191, 0.07);
-}
-
-.session-item.active::before {
-  content: '';
-  position: absolute;
-  left: -8px;
-  top: 50%;
-  transform: translateY(-50%);
-  width: 3px;
-  height: 14px;
-  background: var(--accent-teal);
-  border-radius: 0 2px 2px 0;
+  background: var(--bg-hover);
 }
 
 /* 内容区域 */

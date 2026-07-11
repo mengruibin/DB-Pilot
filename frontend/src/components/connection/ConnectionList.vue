@@ -25,7 +25,7 @@ const dbBadge: Record<DbType, { label: string; color: string }> = {
   oracle: { label: 'ORA', color: '#EF4444' },
 }
 
-/** 状态灯配置 */
+/** 状态灯配置 — healthy 统一使用绿色 */
 const statusConfig: Record<string, { color: string; label: string; pulse: boolean }> = {
   healthy: { color: '#34D399', label: '已连接', pulse: false },
   connecting: { color: '#FBBF24', label: '连接中…', pulse: true },
@@ -236,8 +236,8 @@ async function handleDelete(id: string): Promise<void> {
 }
 
 .conn-card.active {
-  border-color: rgba(45, 212, 191, 0.3);
-  background: rgba(45, 212, 191, 0.04);
+  border-color: var(--conn-card-active-border);
+  background: var(--conn-card-active-bg);
 }
 
 .active-bar {
@@ -246,7 +246,7 @@ async function handleDelete(id: string): Promise<void> {
   top: 8px;
   bottom: 8px;
   width: 3px;
-  background: var(--accent-teal);
+  background: #34D399;
   border-radius: 0 2px 2px 0;
 }
 

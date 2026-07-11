@@ -176,10 +176,7 @@ function handleDocClick(): void {
   flex: 1;
   overflow: hidden;
   position: relative;
-  background:
-    linear-gradient(rgba(30, 41, 59, 0.3) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(30, 41, 59, 0.3) 1px, transparent 1px);
-  background-size: 24px 24px;
+  background: var(--bg-primary);
 }
 
 .content-grid {

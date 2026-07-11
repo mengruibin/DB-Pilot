@@ -165,8 +165,8 @@ const renderedHtml = computed(() => {
   transition: border-color var(--transition-fast), color var(--transition-fast);
 }
 .markdown-body :deep(a:hover) {
-  color: #5EE4D0;
-  border-bottom-color: rgba(45, 212, 191, 0.4);
+  color: var(--accent-teal);
+  border-bottom-color: var(--chat-code-inline-border);
 }
 
 /* ─── 列表 ─── */
@@ -180,7 +180,9 @@ const renderedHtml = computed(() => {
   line-height: 1.65;
 }
 .markdown-body :deep(li::marker) {
-  color: var(--accent-teal);
+  /* color: var(--accent-teal); */
+  color: #747575;
+
 }
 
 /* ─── 任务列表 — GFM 复选框 ─── */
@@ -222,10 +224,10 @@ const renderedHtml = computed(() => {
   font-family: var(--font-mono, 'JetBrains Mono', monospace);
   font-size: 0.88em;
   padding: 2px 7px;
-  background: rgba(45, 212, 191, 0.08);
-  border: 1px solid rgba(45, 212, 191, 0.12);
+  background: var(--chat-code-inline-bg);
+  border: 1px solid var(--chat-code-inline-border);
   border-radius: 4px;
-  color: #5EE4D0;
+  color: var(--chat-code-inline-text);
   white-space: nowrap;
 }
 
@@ -337,7 +339,7 @@ const renderedHtml = computed(() => {
   border-bottom: none;
 }
 .markdown-body :deep(tr:nth-child(even) td) {
-  background: rgba(20, 25, 34, 0.4);
+  background: var(--chat-table-even-bg);
 }
 .markdown-body :deep(tr:hover td) {
   background: rgba(45, 212, 191, 0.03);

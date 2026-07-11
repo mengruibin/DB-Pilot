@@ -17,6 +17,7 @@ import {
   NSwitch,
 } from 'naive-ui'
 import { useConnection } from '@/composables/useConnection'
+import { useThemeStore } from '@/stores/theme'
 import type { ConnectionConfig, DbType } from '@/types/connection'
 
 const props = defineProps<{
@@ -28,6 +29,11 @@ const emit = defineEmits<{
   saved: [config: ConnectionConfig]
   cancel: []
 }>()
+
+const themeStore = useThemeStore()
+
+/** 浅色主题下提交按钮用蓝色背景，深色主题用默认主题色 */
+const submitBtnColor = computed(() => (themeStore.isDark ? undefined : '#2563EB'))
 
 const {
   form,
@@ -258,6 +264,7 @@ function onCancel() {
             type="primary"
             :loading="submitting"
             :disabled="submitting"
+            :color="submitBtnColor"
             size="small"
             @click="onSave"
           >

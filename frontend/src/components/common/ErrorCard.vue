@@ -254,7 +254,7 @@ function handleRetry(): void {
 }
 
 .error-category-tag.user {
-  background: rgba(45, 212, 191, 0.12);
+  background: var(--accent-soft-bg);
   color: var(--accent-teal);
 }
 
@@ -290,7 +290,7 @@ function handleRetry(): void {
 }
 
 .retry-btn:hover {
-  color: var(--accent-blue) !important;
+  color: var(--interactive-color) !important;
 }
 
 /* 关闭按钮 */

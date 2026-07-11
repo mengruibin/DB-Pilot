@@ -2,10 +2,12 @@
 import { computed } from 'vue'
 import { useRoute } from 'vue-router'
 import { useConnectionStore } from '@/stores/connection'
+import { useThemeStore } from '@/stores/theme'
 import SessionList from './SessionList.vue'
 
 const route = useRoute()
 const connectionStore = useConnectionStore()
+const themeStore = useThemeStore()
 
 interface NavItem {
   path: string
@@ -37,6 +39,8 @@ const iconMap: Record<string, string> = {
   plug: `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>`,
   chart: `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>`,
   settings: `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>`,
+  sun: `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>`,
+  moon: `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>`,
 }
 </script>
 
@@ -45,7 +49,7 @@ const iconMap: Record<string, string> = {
     <!-- 应用标识 -->
     <div class="sidebar-brand">
       <div class="brand-icon">
-        <svg width="22" height="22" viewBox="0 0 32 32" fill="none">
+        <svg width="29" height="29" viewBox="0 0 32 32" fill="none">
           <rect width="32" height="32" rx="6" fill="currentColor" opacity="0.15"/>
           <path d="M16 8c-4 0-7 1.6-7 3.5v9c0 1.9 3 3.5 7 3.5s7-1.6 7-3.5v-9c0-1.9-3-3.5-7-3.5z" stroke="currentColor" stroke-width="1.5" fill="none"/>
           <path d="M9 14c0 1.9 3 3.5 7 3.5s7-1.6 7-3.5" stroke="currentColor" stroke-width="1.5" fill="none"/>
@@ -73,6 +77,10 @@ const iconMap: Record<string, string> = {
 
     <!-- 底部设置 -->
     <div class="sidebar-footer">
+      <button class="nav-item theme-toggle-btn" @click="themeStore.toggleTheme()">
+        <span class="nav-icon" v-html="themeStore.isDark ? iconMap['sun'] : iconMap['moon']"></span>
+        <span class="nav-label">{{ themeStore.isDark ? '浅色模式' : '深色模式' }}</span>
+      </button>
       <router-link to="/settings" class="nav-item settings-btn">
         <span class="nav-icon" v-html="iconMap['settings']"></span>
         <span class="nav-label">设置</span>
@@ -102,10 +110,19 @@ const iconMap: Record<string, string> = {
 }
 
 .brand-icon {
-  color: var(--accent-teal);
+  color: var(--brand-icon-color);
   display: flex;
   align-items: center;
   flex-shrink: 0;
+}
+
+/* 浅色主题下品牌图标：黑色背景 + 白色线条 */
+[data-theme="light"] .brand-icon rect {
+  fill: #000000;
+  opacity: 1;
+}
+[data-theme="light"] .brand-icon path {
+  stroke: #FFFFFF;
 }
 
 .brand-text {
@@ -147,20 +164,8 @@ const iconMap: Record<string, string> = {
 }
 
 .nav-item.active {
-  background: rgba(45, 212, 191, 0.08);
-  color: var(--accent-teal);
-}
-
-.nav-item.active::before {
-  content: '';
-  position: absolute;
-  left: -8px;
-  top: 50%;
-  transform: translateY(-50%);
-  width: 3px;
-  height: 18px;
-  background: var(--accent-teal);
-  border-radius: 0 2px 2px 0;
+  background: var(--bg-hover);
+  color: var(--text-primary);
 }
 
 .nav-icon {
@@ -186,5 +191,14 @@ const iconMap: Record<string, string> = {
 
 .settings-btn {
   font-size: 13px;
+}
+
+/* 主题切换按钮 — 与 nav-item 样式一致，覆盖默认 button 样式 */
+.theme-toggle-btn {
+  width: 100%;
+  background: none;
+  border: none;
+  font-family: inherit;
+  cursor: pointer;
 }
 </style>

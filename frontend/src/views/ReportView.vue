@@ -8,16 +8,22 @@
  * 依据 api-contract §1.4 健康巡检 SSE + §2.5 HealthReport
  *     frontend AGENTS.md §1（巡检进度逐项更新）
  */
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, computed } from 'vue'
 import { useRouter } from 'vue-router'
 import { useConnectionStore } from '@/stores/connection'
 import { useReportStore } from '@/stores/report'
+import { useThemeStore } from '@/stores/theme'
 import HealthScore from '@/components/report/HealthScore.vue'
 import CheckItemList from '@/components/report/CheckItemList.vue'
 import { NButton, NSpin } from 'naive-ui'
 
 const router = useRouter()
 const connStore = useConnectionStore()
+const themeStore = useThemeStore()
+
+/** 浅色主题下 ghost 按钮用浅蓝，深色主题用默认主题色 */
+const ghostBtnColor = computed(() => (themeStore.isDark ? undefined : '#3B82F6'))
+
 const reportStore = useReportStore()
 
 // ─── 视图状态 ───
@@ -123,6 +129,7 @@ onMounted(() => {
         <n-button
           v-if="connStore.activeId"
           :disabled="reportStore.isRunning"
+          :color="ghostBtnColor"
           size="small"
           ghost
           class="check-btn"
@@ -297,7 +304,7 @@ onMounted(() => {
             <p class="idle-desc">
               点击「开始巡检」对当前数据库进行全面的健康评估。
             </p>
-            <n-button type="primary" ghost class="start-btn" @click="handleStartCheck">
+            <n-button type="primary" ghost :color="ghostBtnColor" class="start-btn" @click="handleStartCheck">
               <template #icon>
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
                   <polygon points="5 3 19 12 5 21 5 3"/>
@@ -385,9 +392,9 @@ onMounted(() => {
 
 .header-connection {
   font-size: 12px;
-  color: var(--accent-teal);
+  color: var(--interactive-color);
   padding: 2px 8px;
-  border: 1px solid rgba(45, 212, 191, 0.2);
+  border: 1px solid var(--accent-soft-border);
   border-radius: 4px;
   font-family: var(--font-mono);
 }
@@ -396,11 +403,6 @@ onMounted(() => {
   display: flex;
   align-items: center;
   gap: 8px;
-}
-
-.check-btn {
-  --n-ghost-color: var(--accent-teal);
-  --n-ghost-color-hover: var(--accent-teal);
 }
 
 .history-toggle {
@@ -504,7 +506,7 @@ onMounted(() => {
 
 .progress-fill {
   height: 100%;
-  background: linear-gradient(90deg, var(--accent-teal), #2DD4BF);
+  background: var(--interactive-color);
   border-radius: 4px;
   transition: width 0.3s ease;
 }
@@ -523,7 +525,7 @@ onMounted(() => {
 
 .progress-pct {
   font-family: var(--font-mono);
-  color: var(--accent-teal);
+  color: var(--interactive-color);
 }
 
 .progress-current {
@@ -663,7 +665,7 @@ onMounted(() => {
   line-height: 1.2;
 }
 
-.stat-block.pass  .stat-count { color: var(--color-success); }
+.stat-block.pass  .stat-count { color: #10B981; }
 .stat-block.warn  .stat-count { color: var(--color-warning); }
 .stat-block.error .stat-count { color: var(--color-error); }
 .stat-block.skip  .stat-count { color: var(--text-tertiary); }
@@ -799,7 +801,7 @@ onMounted(() => {
   text-align: center;
 }
 
-.sc-excellent { color: var(--color-success); }
+.sc-excellent { color: #10B981; }
 .sc-fair { color: var(--color-warning); }
 .sc-poor { color: var(--color-error); }
 

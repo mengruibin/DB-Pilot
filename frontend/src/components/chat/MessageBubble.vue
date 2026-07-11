@@ -67,8 +67,7 @@ function formatDuration(ms: number): string {
   return `${Math.floor(ms / 60000)}m${Math.floor((ms % 60000) / 1000)}s`
 }
 
-// ─── 用户头像首字符 ───
-const userInitial = computed(() => props.message.content.charAt(0).toUpperCase())
+// ─── 用户头像首字符（预留给头像组件使用，暂未启用） ───
 
 // ─── ResultTable 数据 ───
 const resultColumns = computed(() => {

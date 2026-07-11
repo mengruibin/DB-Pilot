@@ -585,7 +585,7 @@ const thinkingExpanded = ref(true)  // 默认展开
 
 /* ═══════════ 独立思考容器（降权） ═══════════ */
 .thinking-process-container {
-  max-width: 85%;
+  max-width: 100%;
   border: 1px solid var(--chat-thinking-border);
   background: var(--chat-card-bg);
   border-radius: var(--radius-lg);
