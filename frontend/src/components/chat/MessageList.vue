@@ -255,11 +255,11 @@ const thinkingExpanded = ref(true)  // 默认展开
               <details class="thinking-details" :open="thinkingExpanded">
                 <summary class="thinking-summary">
                   <div class="thinking-summary-left">
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="thinking-brain-icon">
-                      <path d="M12 2a2 2 0 0 1 2 2c0 1.1-.9 2-2 2a2 2 0 0 1-2-2c0-1.1.9-2 2-2z"/>
-                      <path d="M16.7 8.3A5.3 5.3 0 0 0 12 7c-2.5 0-4.6 1.7-5.2 4"/>
-                      <path d="M18 12a6 6 0 0 0-12 0"/>
-                      <path d="M8 14v.1M16 14v.1"/>
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="thinking-head-icon">
+                      <!-- 脑袋轮廓 -->
+                      <path d="M12 3C7 3 5 6 5 10.5c0 2.5 1 4.5 2 5.8.5.7 1 1.3 1 2.7a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1c0-1.4.5-2 1-2.7 1-1.3 2-3.3 2-5.8C19 6 17 3 12 3z"/>
+                      <!-- 思考脑波 -->
+                      <path d="M9 9 11 11l2-3 1.5 1.5"/>
                     </svg>
                     <span class="thinking-summary-title">思考过程</span>
                     <span
@@ -477,7 +477,7 @@ const thinkingExpanded = ref(true)  // 默认展开
   gap: 8px;
 }
 
-.thinking-brain-icon {
+.thinking-head-icon {
   color: var(--text-tertiary);
   flex-shrink: 0;
 }

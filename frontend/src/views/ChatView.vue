@@ -44,7 +44,7 @@ watch(() => connectionStore.activeId, () => {
         <!-- 品牌标志 -->
         <div class="welcome-icon">
           <svg width="56" height="56" viewBox="0 0 32 32" fill="none">
-            <rect width="32" height="32" rx="6" fill="currentColor" opacity="0.08"/>
+            <rect width="32" height="32" rx="6" fill="currentColor" opacity="0.15"/>
             <path d="M16 8c-4 0-7 1.6-7 3.5v9c0 1.9 3 3.5 7 3.5s7-1.6 7-3.5v-9c0-1.9-3-3.5-7-3.5z" stroke="currentColor" stroke-width="1.5" fill="none"/>
             <path d="M9 14c0 1.9 3 3.5 7 3.5s7-1.6 7-3.5" stroke="currentColor" stroke-width="1.5" fill="none"/>
           </svg>
@@ -111,6 +111,15 @@ watch(() => connectionStore.activeId, () => {
   color: var(--accent-teal);
   margin-bottom: 16px;
   opacity: 0.6;
+}
+
+/* 浅色主题下：纯黑背景 + 白色线条，与 Sidebar 品牌图标一致 */
+[data-theme="light"] .welcome-icon rect {
+  fill: #000000;
+  opacity: 1;
+}
+[data-theme="light"] .welcome-icon path {
+  stroke: #FFFFFF;
 }
 
 .welcome-title {
