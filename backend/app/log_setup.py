@@ -28,8 +28,15 @@ from app.config import settings
 # =============================================================================
 
 _SENSITIVE_KEYS: set[str] = {
-    "password", "token", "secret", "api_key", "api-key",
-    "authorization", "auth", "credential", "private_key",
+    "password",
+    "token",
+    "secret",
+    "api_key",
+    "api-key",
+    "authorization",
+    "auth",
+    "credential",
+    "private_key",
 }
 
 
@@ -43,6 +50,7 @@ def _mask_sensitive_keys(
     对键名匹配 _SENSITIVE_KEYS 的字段，将值替换为 "***"。
     递归处理嵌套字典。
     """
+
     def _mask(value: Any, depth: int = 0) -> Any:
         if depth > 5:
             return value
@@ -62,6 +70,7 @@ def _mask_sensitive_keys(
 # structlog 处理器链
 # =============================================================================
 
+
 def _add_timestamp(
     logger: structlog.typing.WrappedLogger,  # noqa: ARG001
     method_name: str,  # noqa: ARG001
@@ -69,6 +78,7 @@ def _add_timestamp(
 ) -> EventDict:
     """添加 ISO 8601 时间戳。"""
     from datetime import UTC, datetime
+
     event_dict["timestamp"] = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
     return event_dict
 
@@ -123,7 +133,8 @@ def configure_logging() -> None:
     # 注意：不包含渲染器！渲染交给 handler 级别的 formatter。
     # wrap_for_formatter 将事件字典传递给 handler 的 ProcessorFormatter。
     structlog.configure(
-        processors=shared_processors + [
+        processors=shared_processors
+        + [
             structlog.stdlib.ProcessorFormatter.wrap_for_formatter,
         ],
         wrapper_class=structlog.stdlib.BoundLogger,
@@ -184,9 +195,23 @@ def configure_logging() -> None:
     file_handler.setFormatter(file_formatter)
     root_logger.addHandler(file_handler)
 
-    # 减少第三方库的日志噪音
-    for noisy in ("httpx", "httpcore", "urllib3", "aiosqlite", "aiomysql"):
-        logging.getLogger(noisy).setLevel(max(log_level, logging.WARNING))
+    # 减少第三方库的日志噪音——强制 WARNING，即使 LOG_LEVEL=DEBUG 也不输出
+    for noisy in (
+        "httpx",
+        "httpx._client",
+        "httpx._config",
+        "httpcore",
+        "httpcore._async",
+        "httpcore._sync",
+        "openai",
+        "openai._base_client",
+        "urllib3",
+        "aiosqlite",
+        "aiomysql",
+    ):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
+        # 禁止传播到根日志器，避免被 structlog foreign_pre_chain 格式化输出
+        logging.getLogger(noisy).propagate = False
 
     # 记录启动日志
     logger = structlog.get_logger("app.log_setup")

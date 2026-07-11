@@ -31,11 +31,12 @@ LLM 自主决定调用哪些工具、以什么顺序调用、何时停止并给�
 
 from __future__ import annotations
 
+import logging
 import time
 from typing import Any, Literal
 
 import structlog
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langgraph.graph import END, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
@@ -145,10 +146,35 @@ async def agent_node(state: AgentState) -> dict[str, Any]:
     # ── 构建 LangChain Chat 模型 + bind_tools ──
     model = build_chat_model(max_tokens=2048, timeout=60)
 
+    # 抑制 httpx/openai 调试日志（避免全量消息体重复打印）
+    for _noisy in ("httpx", "httpx._client", "httpx._config", "httpcore", "openai"):
+        logging.getLogger(_noisy).setLevel(logging.WARNING)
+
     from app.agent.tools.registry import AGENT_TOOLS  # noqa: I001
 
     # ── 构建消息列表：SystemMessage + 对话历史 ──
     llm_messages = _build_llm_messages(state)
+
+    # ── 记录本轮输入增量（避免重复打印全量历史） ──
+    if settings.AGENT_DEBUG:
+        existing = state.get("messages", [])
+        if existing:
+            # iteration > 1：取最后 2 条（上轮 AIMessage + ToolMessage）
+            delta = existing[-2:]
+            logger.debug(
+                "Agent 本轮输入增量",
+                run_id=run_id,
+                iteration=iteration,
+                delta=[_fmt_delta_msg(m) for m in delta],
+            )
+        else:
+            # iteration == 1：首次调用，记录用户消息
+            logger.debug(
+                "Agent 首次输入",
+                run_id=run_id,
+                iteration=iteration,
+                user_message=state.get("user_message", "")[:200],
+            )
 
     node_start = time.monotonic()
 
@@ -429,3 +455,60 @@ def _build_llm_messages(state: AgentState) -> list:
         existing = [HumanMessage(content=user_text)]
 
     return [SystemMessage(content=system_text)] + existing
+
+
+def _content_preview(content: str | list | dict | None, max_len: int = 200) -> str:
+    """安全提取消息内容的字符串预览。
+
+    LangChain 消息的 content 类型为 str | list[str | dict]，在 Python 层面
+    str + "..." 在 list 类型时运行时会报错，因此统一转为 str 再截取。
+    """
+    if isinstance(content, str):
+        text = content
+    elif isinstance(content, list):
+        # 拼接文本块，处理多模态内容列表
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict):
+                parts.append(item.get("text", str(item)))
+        text = " ".join(parts) if parts else str(content)
+    else:
+        text = str(content or "")
+    return (text[:max_len] + "...") if len(text) > max_len else text
+
+
+def _fmt_delta_msg(msg: Any) -> dict[str, Any]:
+    """格式化增量消息为简洁的日志结构。
+
+    将 LangChain 消息转为可用于 structlog 的字典，
+    仅保留关键信息（工具名、参数摘要、结果预览）。
+    """
+    if isinstance(msg, AIMessage):
+        if msg.tool_calls:
+            return {
+                "role": "assistant",
+                "tool_calls": [{"name": tc["name"], "args": tc["args"]} for tc in msg.tool_calls],
+            }
+        return {
+            "role": "assistant",
+            "content_preview": _content_preview(msg.content),
+        }
+    if isinstance(msg, ToolMessage):
+        return {
+            "role": "tool",
+            "tool_call_id": msg.tool_call_id,
+            "content_preview": _content_preview(msg.content),
+        }
+    if isinstance(msg, HumanMessage):
+        return {
+            "role": "user",
+            "content_preview": _content_preview(msg.content),
+        }
+    if isinstance(msg, SystemMessage):
+        return {
+            "role": "system",
+            "content_preview": _content_preview(msg.content),
+        }
+    return {"role": type(msg).__name__, "preview": str(msg)[:200]}
