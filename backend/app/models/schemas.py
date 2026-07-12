@@ -7,6 +7,7 @@ Pydantic 请求/响应 Schema 定义。
 
 from __future__ import annotations
 
+import json
 from datetime import datetime
 from enum import StrEnum
 from typing import Any, Literal
@@ -17,8 +18,10 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 # 数据库类型枚举
 # =============================================================================
 
+
 class DBType(StrEnum):
     """支持的数据库类型（api-contract §2.1）。"""
+
     MYSQL = "mysql"
     POSTGRESQL = "postgresql"
     ORACLE = "oracle"
@@ -28,8 +31,10 @@ class DBType(StrEnum):
 # 连接状态枚举
 # =============================================================================
 
+
 class ConnectionStatus(StrEnum):
     """连接状态枚举（api-contract §2.1）。"""
+
     UNKNOWN = "unknown"
     HEALTHY = "healthy"
     UNREACHABLE = "unreachable"
@@ -50,6 +55,7 @@ DB_DEFAULT_PORTS: dict[str, int] = {
 # =============================================================================
 # 请求 Schema
 # =============================================================================
+
 
 class ConnectionCreateRequest(BaseModel):
     """创建连接请求体。
@@ -143,6 +149,7 @@ class ConnectionCreateRequest(BaseModel):
 
 class ConnectionUpdateRequest(BaseModel):
     """更新连接请求体（所有字段可选，仅更新传入的字段）。"""
+
     name: str | None = Field(default=None, min_length=1, max_length=64)
     db_type: DBType | None = None
     host: str | None = Field(default=None, min_length=1, max_length=255)
@@ -157,11 +164,15 @@ class ConnectionUpdateRequest(BaseModel):
 
 class ChatRequest(BaseModel):
     """SSE 对话流请求体（api-contract §1.2 POST /api/chat/stream）。"""
+
     connection_id: str = Field(
-        ..., description="目标数据库连接 ID",
+        ...,
+        description="目标数据库连接 ID",
     )
     message: str = Field(
-        ..., min_length=1, max_length=4096,
+        ...,
+        min_length=1,
+        max_length=4096,
         description="用户消息",
         examples=["最近一小时慢查询有哪些？"],
     )
@@ -187,6 +198,7 @@ class ChatRequest(BaseModel):
 # =============================================================================
 # 响应 Schema
 # =============================================================================
+
 
 class ConnectionResponse(BaseModel):
     """连接响应体。
@@ -222,11 +234,13 @@ class ConnectionListResponse(BaseModel):
     注意：序列化时 page_size → pageSize（camelCase 约定），
     Python 代码统一使用 snake_case。
     """
+
     items: list[ConnectionResponse] = Field(..., description="连接列表")
     total: int = Field(..., description="总数")
     page: int = Field(..., description="当前页码")
     page_size: int = Field(
-        default=20, serialization_alias="pageSize",
+        default=20,
+        serialization_alias="pageSize",
         description="每页条数",
     )
 
@@ -235,8 +249,10 @@ class ConnectionListResponse(BaseModel):
 # 会话 & 消息 Schema（api-contract §2.2）
 # =============================================================================
 
+
 class SessionResponse(BaseModel):
     """会话响应体，对应 api-contract §2.2 Session 实体。"""
+
     id: str = Field(..., description="会话唯一标识")
     connection_id: str | None = Field(default=None, description="关联的连接 ID")
     title: str = Field(..., description="会话标题")
@@ -251,33 +267,54 @@ class SessionResponse(BaseModel):
 
 class MessageResponse(BaseModel):
     """消息响应体，对应 api-contract §2.2 Message 实体。"""
+
     id: str = Field(..., description="消息唯一标识")
     session_id: str = Field(..., description="所属会话 ID")
     role: str = Field(..., description="消息角色：user / assistant / system")
     content: str = Field(..., description="消息内容")
     message_type: str = Field(
         ...,
-        description="消息类型：natural_language / sql / diagnosis / "
-        "troubleshoot / health_check",
+        description="消息类型：natural_language / sql / diagnosis / troubleshoot / health_check",
     )
     sql_generated: str | None = Field(default=None, description="LLM 生成的原始 SQL")
     sql_executed: str | None = Field(default=None, description="实际执行的 SQL")
     result_preview: dict[str, Any] | None = Field(
-        default=None, description="查询结果预览（最多 20 行）",
+        default=None,
+        description="查询结果预览（最多 20 行）",
     )
     error_info: dict[str, Any] | None = Field(
-        default=None, description="错误信息",
+        default=None,
+        description="错误信息",
     )
     created_at: datetime = Field(..., description="创建时间")
     tokens_used: int = Field(..., description="本条消息 token 消耗")
+    reasoning_content: str | None = Field(
+        default=None,
+        description="LLM 推理/思考过程全文",
+    )
+    thinking_steps: list[dict[str, Any]] | None = Field(
+        default=None,
+        description="思考步骤（tool_call, tool_result, sql）",
+    )
 
     model_config = {"from_attributes": True}
+
+    @field_validator("thinking_steps", mode="before")
+    @classmethod
+    def parse_thinking_steps(cls, v: Any) -> Any:
+        """将数据库中的 JSON 字符串解析为 Python 列表。"""
+        if isinstance(v, str):
+            return json.loads(v) if v else None
+        return v
 
 
 class SessionRenameRequest(BaseModel):
     """重命名会话请求体（B1）。"""
+
     title: str = Field(
-        ..., min_length=1, max_length=128,
+        ...,
+        min_length=1,
+        max_length=128,
         description="新的会话标题，1-128 字符",
         examples=["分析 orders 表性能"],
     )
@@ -285,22 +322,26 @@ class SessionRenameRequest(BaseModel):
 
 class SessionListResponse(BaseModel):
     """分页会话列表响应。"""
+
     items: list[SessionResponse] = Field(..., description="会话列表")
     total: int = Field(..., description="总数")
     page: int = Field(..., description="当前页码")
     page_size: int = Field(
-        default=20, serialization_alias="pageSize",
+        default=20,
+        serialization_alias="pageSize",
         description="每页条数",
     )
 
 
 class MessageListResponse(BaseModel):
     """分页消息列表响应。"""
+
     items: list[MessageResponse] = Field(..., description="消息列表")
     total: int = Field(..., description="总数")
     page: int = Field(..., description="当前页码")
     page_size: int = Field(
-        default=50, serialization_alias="pageSize",
+        default=50,
+        serialization_alias="pageSize",
         description="每页条数",
     )
 
@@ -318,7 +359,9 @@ class QueryRequest(BaseModel):
     """
 
     sql: str = Field(
-        ..., min_length=1, max_length=65535,
+        ...,
+        min_length=1,
+        max_length=65535,
         description="要执行的 SQL 语句（只读查询）",
         examples=["SELECT COUNT(*) FROM users"],
     )
@@ -327,7 +370,9 @@ class QueryRequest(BaseModel):
         description="参数化查询值，键为参数名，值为参数值",
     )
     max_execution_ms: int = Field(
-        default=30000, ge=1000, le=120000,
+        default=30000,
+        ge=1000,
+        le=120000,
         description="最大执行时间（毫秒），默认 30s",
     )
     password: str | None = Field(
@@ -341,7 +386,9 @@ class ExplainRequest(BaseModel):
     """执行计划分析请求体（api-contract §1.3 POST /api/connections/{id}/explain）。"""
 
     sql: str = Field(
-        ..., min_length=1, max_length=65535,
+        ...,
+        min_length=1,
+        max_length=65535,
         description="要分析执行计划的 SQL 语句",
         examples=["SELECT * FROM orders WHERE user_id = 123"],
     )
@@ -359,22 +406,28 @@ class SlowQueryItem(BaseModel):
     """慢查询记录项（api-contract §2.4 SlowQuery）。"""
 
     sql_text: str = Field(
-        ..., description="慢查询 SQL 文本",
+        ...,
+        description="慢查询 SQL 文本",
     )
     query_time_sec: float = Field(
-        ..., description="查询耗时（秒）",
+        ...,
+        description="查询耗时（秒）",
     )
     lock_time_sec: float | None = Field(
-        default=None, description="锁等待时间（秒）",
+        default=None,
+        description="锁等待时间（秒）",
     )
     rows_examined: int = Field(
-        default=0, description="扫描行数",
+        default=0,
+        description="扫描行数",
     )
     rows_sent: int = Field(
-        default=0, description="返回行数",
+        default=0,
+        description="返回行数",
     )
     executed_at: str | None = Field(
-        default=None, description="执行时间（ISO 8601 格式）",
+        default=None,
+        description="执行时间（ISO 8601 格式）",
     )
 
 
@@ -385,16 +438,20 @@ class SlowQueryListResponse(BaseModel):
     """
 
     items: list[SlowQueryItem] = Field(
-        ..., description="慢查询列表",
+        ...,
+        description="慢查询列表",
     )
     total: int = Field(
-        ..., description="总数",
+        ...,
+        description="总数",
     )
     page: int = Field(
-        default=1, description="当前页码",
+        default=1,
+        description="当前页码",
     )
     page_size: int = Field(
-        default=20, serialization_alias="pageSize",
+        default=20,
+        serialization_alias="pageSize",
         description="每页条数",
     )
     warning: str | None = Field(
@@ -438,16 +495,19 @@ class HealthReportResponse(BaseModel):
     id: str = Field(..., description="报告唯一标识")
     connection_id: str = Field(..., description="关联的连接 ID")
     status: str = Field(
-        ..., description="报告状态：completed / cancelled / partial",
+        ...,
+        description="报告状态：completed / cancelled / partial",
     )
     score: int = Field(..., description="健康评分 0-100")
     generated_at: datetime = Field(..., description="报告生成时间")
     duration_sec: float = Field(..., description="巡检总耗时（秒）")
     severity_counts: dict[str, int] = Field(
-        ..., description="严重级别计数 {error, warning, pass, skipped}",
+        ...,
+        description="严重级别计数 {error, warning, pass, skipped}",
     )
     categories: list[HealthReportCategory] = Field(
-        ..., description="检查项分类列表",
+        ...,
+        description="检查项分类列表",
     )
 
     model_config = {"from_attributes": True}
@@ -460,7 +520,8 @@ class HealthReportListResponse(BaseModel):
     total: int = Field(..., description="总数")
     page: int = Field(..., description="当前页码")
     page_size: int = Field(
-        default=20, serialization_alias="pageSize",
+        default=20,
+        serialization_alias="pageSize",
         description="每页条数",
     )
 
@@ -479,7 +540,7 @@ class TroubleshootRequest(BaseModel):
     issue_type: str = Field(
         default="auto",
         description="排查类型：auto（自动检测）/ deadlock / connection_flood "
-                    "/ replication_lag / slow_performance / disk_full",
+        "/ replication_lag / slow_performance / disk_full",
     )
     context: str = Field(
         default="",
@@ -488,8 +549,7 @@ class TroubleshootRequest(BaseModel):
     )
     password: str | None = Field(
         default=None,
-        description="连接密码。由前端 localStorage 持有，每次请求传入。"
-                    "密码仅存于内存，不落盘。",
+        description="连接密码。由前端 localStorage 持有，每次请求传入。密码仅存于内存，不落盘。",
     )
     session_id: str | None = Field(
         default=None,

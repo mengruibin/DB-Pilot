@@ -32,41 +32,57 @@ class SessionModel(Base):
 
     # 主键：sess_<8hex> 格式
     id: Mapped[str] = mapped_column(
-        String(36), primary_key=True,
+        String(36),
+        primary_key=True,
         default=lambda: f"sess_{uuid.uuid4().hex[:8]}",
     )
     # 关联的目标数据库连接 ID
     connection_id: Mapped[str | None] = mapped_column(
-        String(36), nullable=True, default=None,
+        String(36),
+        nullable=True,
+        default=None,
     )
     # 会话标题，由首条用户消息自动截取前 30 字符
     title: Mapped[str] = mapped_column(
-        String(128), nullable=False, default="新会话",
+        String(128),
+        nullable=False,
+        default="新会话",
     )
     # 会话创建时间
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), nullable=False,
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
     )
     # 最后活跃时间
     last_active_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), nullable=False,
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
     )
     # 会话状态：active / idle / closed
     status: Mapped[str] = mapped_column(
-        String(16), nullable=False, default="active",
+        String(16),
+        nullable=False,
+        default="active",
     )
     # 消息总数（冗余字段，避免 COUNT 查询）
     message_count: Mapped[int] = mapped_column(
-        Integer, nullable=False, default=0,
+        Integer,
+        nullable=False,
+        default=0,
     )
     # 累计 token 消耗
     tokens_used_total: Mapped[int] = mapped_column(
-        Integer, nullable=False, default=0,
+        Integer,
+        nullable=False,
+        default=0,
     )
 
     # ORM 关系（不映射为列）
     messages: Mapped[list[MessageModel]] = relationship(
-        back_populates="session", cascade="all, delete-orphan",
+        back_populates="session",
+        cascade="all, delete-orphan",
     )
 
     def __repr__(self) -> str:
@@ -84,7 +100,8 @@ class MessageModel(Base):
 
     # 主键：msg_<8hex> 格式
     id: Mapped[str] = mapped_column(
-        String(36), primary_key=True,
+        String(36),
+        primary_key=True,
         default=lambda: f"msg_{uuid.uuid4().hex[:8]}",
     )
     # 关联的会话 ID（外键，级联删除）
@@ -92,50 +109,85 @@ class MessageModel(Base):
     session_id: Mapped[str] = mapped_column(
         String(36),
         ForeignKey("sessions.id", ondelete="CASCADE"),
-        nullable=False, index=True,
+        nullable=False,
+        index=True,
     )
     # 消息角色：user / assistant / system
     role: Mapped[str] = mapped_column(
-        String(16), nullable=False,
+        String(16),
+        nullable=False,
     )
     # 消息内容（纯文本）
     content: Mapped[str] = mapped_column(
-        Text, nullable=False, default="",
+        Text,
+        nullable=False,
+        default="",
     )
     # 消息类型：natural_language / sql / diagnosis / troubleshoot / health_check
     message_type: Mapped[str] = mapped_column(
-        String(32), nullable=False, default="natural_language",
+        String(32),
+        nullable=False,
+        default="natural_language",
     )
     # LLM 生成的原始 SQL
     sql_generated: Mapped[str | None] = mapped_column(
-        Text, nullable=True, default=None,
+        Text,
+        nullable=True,
+        default=None,
     )
     # 实际执行的 SQL（可能经改写）
     sql_executed: Mapped[str | None] = mapped_column(
-        Text, nullable=True, default=None,
+        Text,
+        nullable=True,
+        default=None,
     )
     # 查询结果预览（JSON，最多 20 行），AGENTS.md §数据隐私
     result_preview: Mapped[dict | None] = mapped_column(
-        JSON, nullable=True, default=None,
+        JSON,
+        nullable=True,
+        default=None,
     )
     # 错误信息：{"error_code": "...", "user_message": "..."}
     error_info: Mapped[dict | None] = mapped_column(
-        JSON, nullable=True, default=None,
+        JSON,
+        nullable=True,
+        default=None,
     )
     # 消息创建时间
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), nullable=False,
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
     )
     # 本条消息的 token 消耗
     tokens_used: Mapped[int] = mapped_column(
-        Integer, nullable=False, default=0,
+        Integer,
+        nullable=False,
+        default=0,
     )
     # Agent 决策轨迹（JSON 字符串，仅 assistant 消息）
     # 记录每轮 ReAct 迭代的 reasoning/tool_calls/results/safety_checks
     # 格式：{"run_id":"run_xxx","total_iterations":3,"iterations":[...]}
     # 存储为 Text 类型（数据库不支持原生 JSON），应用层负责序列化/反序列化
     agent_trace: Mapped[str | None] = mapped_column(
-        Text, nullable=True, default=None,
+        Text,
+        nullable=True,
+        default=None,
+    )
+    # LLM 推理/思考过程全文（仅 assistant 消息）
+    # 由 SSE 流式 reasoning_content 块拼接而成，会话切换后仍保留
+    reasoning_content: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+        default=None,
+    )
+    # 思考步骤 JSON 数组（仅 assistant 消息）
+    # 记录 tool_call、tool_result、sql 等 SSE 事件的完整字段，
+    # 用于会话切换后重建思考面板
+    thinking_steps: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+        default=None,
     )
 
     # ORM 关系
@@ -220,8 +272,7 @@ class SessionManager:
 
                 if sessions:
                     # AC-6：可观测性——记录清理数量和 session ID 列表
-                    logger.info("空闲会话已清理", count=len(sessions),
-                                ids=[s.id for s in sessions])
+                    logger.info("空闲会话已清理", count=len(sessions), ids=[s.id for s in sessions])
                 else:
                     logger.debug("空闲会话扫描完毕，无超时会话")
             except Exception:

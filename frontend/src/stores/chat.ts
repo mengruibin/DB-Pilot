@@ -768,12 +768,12 @@ export const useChatStore = defineStore('chat', () => {
   // ═══════════════════════════════════════════════════
 
   /**
-   * 将 API 返回的 MessageResponse 转换为 Store 内部 StoreMessage
+   * 将 API 返回的 MessageResponse 转换为 Store 内部 StoreMessage 列表
    *
-   * 历史消息不含 thinking/tool_call/tool_result 等 ReAct 过程细节，
-   * 仅展示最终结果（text/sql/result/error/diagnosis）。
+   * 当 reasoning_content 存在时，返回 [reasoning_msg, main_msg] 两条消息，
+   * 确保历史消息也能展示思考面板中的推理内容。
    */
-  function messageResponseToStoreMessage(msg: Message): StoreMessage {
+  function messageResponseToStoreMessage(msg: Message): StoreMessage[] {
     const base = {
       id: msg.id,
       sessionId: msg.session_id,
@@ -784,56 +784,133 @@ export const useChatStore = defineStore('chat', () => {
 
     // 用户消息始终为 text 类型
     if (msg.role === 'user') {
-      return { ...base, type: 'text' as const }
+      return [{ ...base, type: 'text' as const }]
     }
 
-    // 根据消息类型映射
+    // 1) 按原有逻辑构建主体消息
+    let main: StoreMessage
     switch (msg.message_type) {
       case 'sql':
-        return {
+        main = {
           ...base,
           type: 'sql' as const,
           sqlContent: msg.sql_generated ?? undefined,
         }
-      case 'diagnosis':
-        return { ...base, type: 'diagnosis' as const }
-      default:
         break
-    }
-
-    // 根据内容特征推断
-    if (msg.error_info) {
-      return {
-        ...base,
-        type: 'error' as const,
-        errorCode: msg.error_info.error_code ?? undefined,
-        userMessage: msg.error_info.user_message ?? undefined,
+      case 'diagnosis':
+        // 历史数据不含 findings 结构化字段，降级为纯文本渲染，
+        // 确保诊断结论内容（msg.content）正常展示
+        main = { ...base, type: 'text' as const }
+        break
+      default: {
+        if (msg.error_info) {
+          main = {
+            ...base,
+            type: 'error' as const,
+            errorCode: msg.error_info.error_code ?? undefined,
+            userMessage: msg.error_info.user_message ?? undefined,
+          }
+        } else if (msg.result_preview) {
+          const preview = msg.result_preview as {
+            columns?: string[]
+            rows?: string[][]
+            total_rows?: number
+          } | null
+          main = {
+            ...base,
+            type: 'result' as const,
+            summary: msg.content,
+            dataPreview: preview
+              ? {
+                  columns: preview.columns ?? [],
+                  rows: preview.rows ?? [],
+                  total_rows: preview.total_rows ?? 0,
+                }
+              : null,
+            totalRows: preview?.total_rows ?? 0,
+          }
+        } else {
+          // 默认视为纯文本
+          main = { ...base, type: 'text' as const }
+        }
       }
     }
 
-    if (msg.result_preview) {
-      const preview = msg.result_preview as {
-        columns?: string[]
-        rows?: string[][]
-        total_rows?: number
-      } | null
-      return {
+    const result: StoreMessage[] = []
+
+    // 2) 有推理内容时在主体消息前插入一条 reasoning 消息
+    // 当 thinking_steps 中已包含 reasoning 条目时，跳过整体消息，
+    // 由 thinking_steps 中的独立 reasoning 步骤按正确顺序渲染
+    const hasReasoningSteps = msg.thinking_steps?.some(
+      (s) => s.type === 'reasoning'
+    )
+    if (msg.reasoning_content && !hasReasoningSteps) {
+      result.push({
         ...base,
-        type: 'result' as const,
-        summary: msg.content,
-        dataPreview: preview
-          ? {
-              columns: preview.columns ?? [],
-              rows: preview.rows ?? [],
-              total_rows: preview.total_rows ?? 0,
-            }
-          : null,
-        totalRows: preview?.total_rows ?? 0,
-      }
+        type: 'reasoning' as const,
+        content: msg.reasoning_content,
+      })
     }
 
-    // 默认视为纯文本
-    return { ...base, type: 'text' as const }
+    // 3) 重建思考步骤（reasoning / tool_call / tool_result / sql）
+    // 使用 `${msg.id}-step-${i}` 唯一 ID，防止 pairToolSteps 的 Set 误去重
+    if (msg.thinking_steps?.length) {
+      msg.thinking_steps.forEach((step, i) => {
+        const stepId = `${msg.id}-step-${i}`
+        if (step.type === 'tool_call') {
+          result.push({
+            ...base,
+            id: stepId,
+            type: 'tool_call' as const,
+            content: step.display || step.tool,
+            tool: step.tool,
+            toolCallId: step.tool_call_id,
+            toolArgs: step.args,
+            displayText: step.display,
+            stepStatus: 'done' as const,
+            agentRunId: step.agent_run_id,
+            iteration: step.iteration,
+          })
+        } else if (step.type === 'tool_result') {
+          result.push({
+            ...base,
+            id: stepId,
+            type: 'tool_result' as const,
+            content: step.summary,
+            tool: step.tool,
+            toolCallId: step.tool_call_id,
+            durationMs: step.duration_ms,
+            safetyChecksPassed: step.safety_checks_passed,
+            agentRunId: step.agent_run_id,
+            iteration: step.iteration,
+          })
+        } else if (step.type === 'reasoning') {
+          result.push({
+            ...base,
+            id: stepId,
+            type: 'reasoning' as const,
+            content: step.content,
+            agentRunId: step.agent_run_id,
+            iteration: step.iteration,
+          })
+        } else if (step.type === 'sql') {
+          result.push({
+            ...base,
+            id: stepId,
+            type: 'sql' as const,
+            content: step.content,
+            sqlContent: step.content,
+            auditStatus: step.audit_status,
+            isReadonly: step.is_readonly,
+          })
+        }
+      })
+    }
+
+    // 4) 主体消息（text/sql/result/error/diagnosis）
+    result.push(main)
+
+    return result
   }
 
   /**
@@ -877,7 +954,7 @@ export const useChatStore = defineStore('chat', () => {
       // API 按 created_at DESC 排序，反转后为 ASC
       const reversed = [...response.items].reverse()
       currentSessionId.value = sessionId
-      messages.value = reversed.map(messageResponseToStoreMessage)
+      messages.value = reversed.flatMap(messageResponseToStoreMessage)
       // 切换会话时重置双区渲染状态，防止影响后续流式
       turnStartIndex.value = -1
       currentStage.value = 'thinking'

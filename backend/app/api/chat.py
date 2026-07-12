@@ -174,6 +174,8 @@ async def _save_message(
     error_info: dict | None = None,
     tokens_used: int = 0,
     agent_trace: str | None = None,
+    reasoning_content: str | None = None,
+    thinking_steps: str | None = None,
 ) -> MessageModel:
     """保存消息到数据库。
 
@@ -188,6 +190,9 @@ async def _save_message(
         result_preview: 结果预览（JSON，最多 20 行）。
         error_info: 错误信息。
         tokens_used: token 消耗。
+        agent_trace: Agent 决策轨迹 JSON。
+        reasoning_content: LLM 推理/思考过程全文。
+        thinking_steps: 思考步骤 JSON 数组（tool_call/tool_result/sql）。
 
     Returns:
         MessageModel 实例。
@@ -203,6 +208,8 @@ async def _save_message(
         error_info=error_info,
         tokens_used=tokens_used,
         agent_trace=agent_trace,
+        reasoning_content=reasoning_content,
+        thinking_steps=thinking_steps,
     )
     db.add(msg)
 
@@ -593,6 +600,16 @@ async def _stream_events(
             # True  → 确认工具调用迭代，content 保持 thinking 无需变更
             # is_complete 时仍为 False → 最终回答，发送 stage_change("answer") 触发前端收编
             seen_tool_calls = False
+            # reasoning_content 累积器：逐 chunk 收集 LLM 深度推理文本，
+            # 流结束后统一保存到数据库（持久化思考过程）
+            reasoning_content_parts: list[str] = []
+            # 当前 iteration 的 reasoning block 累积器，
+            # 在 tool_call_chunks 或 agent node 完成时 flush 到 thinking_steps，
+            # 确保每段 reasoning 出现在正确的时间位置
+            current_reasoning_block: list[str] = []
+            # thinking_steps 累积器：收集 tool_call / tool_result / sql 事件，
+            # 保留所有字段用于会话切换后重建思考面板
+            thinking_steps_accumulator: list[dict[str, Any]] = []
 
             # 使用 stream_mode=["updates", "messages"] 双通道流式：
             # "updates" → 每个节点执行后的状态增量 {node_name: state_delta}
@@ -625,28 +642,43 @@ async def _stream_events(
                                 else ""
                             )
                             if reasoning.strip():
-                                yield format_sse({
-                                    "type": "reasoning",
-                                    "content": reasoning,
-                                    "agent_run_id": run_id,
-                                })
+                                yield format_sse(
+                                    {
+                                        "type": "reasoning",
+                                        "content": reasoning,
+                                        "agent_run_id": run_id,
+                                    }
+                                )
+                                # 累积 reasoning_content 用于持久化
+                                reasoning_content_parts.append(reasoning)
+                                # 同时累积到当前 iteration block，用于按边界切分
+                                current_reasoning_block.append(reasoning)
 
                             # 2) tool_call_chunks → 确认工具调用迭代
-                            tool_call_chunks = (
-                                getattr(chunk, "tool_call_chunks", None) or []
-                            )
-                            if tool_call_chunks:
+                            #    触发点 A：首次出现时刷入 pre-tool reasoning block
+                            tool_call_chunks = getattr(chunk, "tool_call_chunks", None) or []
+                            if tool_call_chunks and not seen_tool_calls:
                                 seen_tool_calls = True
+                                if current_reasoning_block:
+                                    thinking_steps_accumulator.append(
+                                        {
+                                            "type": "reasoning",
+                                            "content": "".join(current_reasoning_block),
+                                        }
+                                    )
+                                    current_reasoning_block = []
 
                             # 3) content → 乐观渲染为 stage="thinking"
                             content = str(getattr(chunk, "content", "") or "")
                             if content.strip():
-                                yield format_sse({
-                                    "type": "token",
-                                    "stage": "thinking",
-                                    "content": content,
-                                    "agent_run_id": run_id,
-                                })
+                                yield format_sse(
+                                    {
+                                        "type": "token",
+                                        "stage": "thinking",
+                                        "content": content,
+                                        "agent_run_id": run_id,
+                                    }
+                                )
                     continue
 
                 # ── mode == "updates"：处理节点状态增量 ──
@@ -681,6 +713,9 @@ async def _stream_events(
                     for msg in sse_events[emitted_count:]:
                         if msg:
                             yield format_sse(msg)
+                            # 累积 tool_call / tool_result / sql 用于持久化重建思考面板
+                            if msg.get("type") in ("tool_call", "tool_result", "sql"):
+                                thinking_steps_accumulator.append(msg)
                     emitted_count = len(sse_events)
 
                     # 累积状态增量（跳过 messages 和 sse_events：
@@ -700,7 +735,19 @@ async def _stream_events(
                     )
 
                     # 重置每个 agent 迭代的标志位
+                    # 触发点 B：agent node 完成时 flush 剩余的 reasoning block
+                    # 处理两种情况：
+                    #   - 无工具调用迭代（纯推理或最终回答）
+                    #   - 工具调用迭代中 pre-tool flush 后的残余 reasoning
                     if node_name == "agent":
+                        if current_reasoning_block:
+                            thinking_steps_accumulator.append(
+                                {
+                                    "type": "reasoning",
+                                    "content": "".join(current_reasoning_block),
+                                }
+                            )
+                            current_reasoning_block = []
                         seen_tool_calls = False
 
                     # agent_node 最终回答/超上限/工具绑定失败时设置 is_complete
@@ -740,6 +787,14 @@ async def _stream_events(
                 if trace_iterations
                 else None
             )
+            # 拼接完整的 reasoning_content 用于持久化
+            full_reasoning = "".join(reasoning_content_parts) if reasoning_content_parts else None
+            # 序列化 thinking_steps 用于持久化重建思考面板
+            thinking_steps_json = (
+                json.dumps(thinking_steps_accumulator, ensure_ascii=False)
+                if thinking_steps_accumulator
+                else None
+            )
 
             await _save_message(
                 db,
@@ -748,6 +803,8 @@ async def _stream_events(
                 assistant_content,
                 message_type=_infer_message_type(accumulated_state),
                 agent_trace=agent_trace,
+                reasoning_content=full_reasoning,
+                thinking_steps=thinking_steps_json,
             )
 
             # ========== Step 5: done 事件 ==========

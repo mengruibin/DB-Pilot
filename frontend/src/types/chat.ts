@@ -48,6 +48,42 @@ export interface Message {
   error_info: MessageErrorInfo | null
   created_at: string
   tokens_used: number
+  /** LLM 推理/思考过程全文（回溯历史时使用），流式过程中由 reasoning SSE 事件实时累加 */
+  reasoning_content: string | null
+  /** 思考步骤（tool_call / tool_result / sql），用于刷新后重建思考面板 */
+  thinking_steps?: ThinkingStep[]
+}
+
+/** 思考步骤类型：reasoning / tool_call / tool_result / sql 的完整字段 */
+export type ThinkingStep = {
+  type: 'reasoning'
+  content: string
+  agent_run_id?: string
+  iteration?: number
+} | {
+  type: 'tool_call'
+  tool: string
+  args: Record<string, unknown>
+  display: string
+  tool_call_id: string
+  agent_run_id?: string
+  iteration?: number
+} | {
+  type: 'tool_result'
+  tool: string
+  summary: string
+  duration_ms: number
+  tool_call_id: string
+  safety_checks_passed?: boolean
+  agent_run_id?: string
+  iteration?: number
+} | {
+  type: 'sql'
+  content: string
+  audit_status: string
+  is_readonly: boolean
+  agent_run_id?: string
+  iteration?: number
 }
 
 // ─── 分页列表响应（F1） ───
