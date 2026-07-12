@@ -376,7 +376,7 @@ class TestSafeToolsNodeParallel:
 | 5 | LLM 提示词更新 | `graph.py` | ✅ 已完成 |
 | 6 | 配置项（可选） | `config.py` | ✅ 已完成 |
 | 7 | 单元测试 | `tests/test_tool_node.py` | ✅ 已完成 |
-| — | 调测验收 | — | ⏳ 待执行 |
+| — | 调测验收 | — | ✅ 已完成 |
 
 状态标记：✅ 已完成 / 🔄 进行中 / ⏳ 待执行 / 🚫 阻塞 / ❌ 已取消
 

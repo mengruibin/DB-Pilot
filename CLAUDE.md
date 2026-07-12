@@ -69,7 +69,7 @@ npx vue-tsc --noEmit
   → (api/chat.py) 解析连接、构建 AgentState (scoped to connection)
   → (agent/graph.py) LangGraph StateGraph (双通道流式):
       agent_node (LLM bind_tools → 决策工具调用或最终回答)
-        → tools_node (安全护栏 → 连接注入 → 工具执行 → 脱敏) → agent_node (ReAct 循环, ≤10 轮)
+        → tools_node (安全护栏 → 连接注入 → 工具并行执行 → 脱敏，最多 5 个并发) → agent_node (ReAct 循环, ≤10 轮)
         → END (is_complete=True)
   → SSE 流式返回 11 种事件类型 (messages/updates 双通道)
       ┌─ messages: reasoning / token / tool_call_chunks (逐 token)
@@ -123,11 +123,13 @@ frontend/
 
 4. **Security** — 工具执行前经 SafeToolNode：连接配置注入 → 安全护栏链（sqlglot SQL 审计拦截 DROP/ALTER/TRUNCATE 等）→ 执行 → 结果脱敏。
 
-5. **SSE 事件协议** — 11 种事件类型通过 SSE `event: message` + `data: JSON` 传输：`thinking` / `reasoning` / `token(stage=thinking|answer)` / `tool_call` / `tool_result` / `sql` / `result` / `text` / `error` / `done` / `stage_change`。前端 `useSSE` composable 统一解析分发到 Pinia store 回调。
+5. **并行工具执行** — 当 LLM 在同一轮返回多个 `tool_calls` 时，SafeToolNode 用 `asyncio.gather(return_exceptions=True)` 并发执行它们。总耗时 ≈ 最慢工具而非耗时之和。通过 `asyncio.Semaphore` 限制最大并发数（默认 5），防止 DB 连接池耗尽。前端的 `onToolResult` 匹配从 `findLastRunningToolCall()` 改为 `tool_call_id` 精确匹配，支持并行安全的结果关联。SSE 事件中的 `tool_call` 和 `tool_result` 均携带 `tool_call_id` 字段用于前后端关联。
 
-6. **Database Adapters** — BaseAdapter ABC 定义统一接口（execute/explain/get_slow_queries/等），lazy-loaded 驱动（aiomysql/asyncpg/oracledb），`AdapterFactory.create()` 创建实例。连接密码仅存于请求内存 state，不持久化。
+6. **SSE 事件协议** — 11+ 种事件类型通过 SSE `event: message` + `data: JSON` 传输：`thinking` / `reasoning` / `token(stage=thinking|answer)` / `tool_call`（含 `tool_call_id`） / `tool_result`（含 `tool_call_id`） / `sql` / `result` / `text` / `error` / `done` / `stage_change`。前端 `useSSE` composable 统一解析分发到 Pinia store 回调。
 
-7. **Observability** — structlog 结构化日志 + X-Request-ID 全链路追踪 + trace_iterations 记录每轮 ReAct 决策轨迹。
+7. **Database Adapters** — BaseAdapter ABC 定义统一接口（execute/explain/get_slow_queries/等），lazy-loaded 驱动（aiomysql/asyncpg/oracledb），`AdapterFactory.create()` 创建实例。连接密码仅存于请求内存 state，不持久化。
+
+8. **Observability** — structlog 结构化日志 + X-Request-ID 全链路追踪 + trace_iterations 记录每轮 ReAct 决策轨迹。
 
 ### Frontend 设计系统
 
@@ -170,3 +172,5 @@ frontend/
 - 所有 `@tool` 函数返回 Python 原生类型（dict/list/str），禁止返回 ORM 实例
 - 连接密码仅存于内存 state，不持久化到数据库
 - SQL 审计默认拦截 DROP/ALTER/TRUNCATE/CREATE/GRANT/REVOKE，多语句直接拦截
+- **并行工具执行**：SafeToolNode 用 `asyncio.gather()` 并发执行同轮 `tool_calls`，受 `AGENT_MAX_CONCURRENT_TOOLS`（默认 5）限制。SSE 事件的 `tool_call` / `tool_result` 均携带 `tool_call_id` 供前端精确匹配
+- 前端 `onToolResult` 匹配策略：优先用 `tool_call_id` 从 `Map` O(1) 查找，回退到 `tool` 名匹配。`MessageList.vue` 的 `pairToolSteps()` 将 `tool_call` 与对应 `tool_result` 配对渲染
