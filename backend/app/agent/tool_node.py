@@ -25,7 +25,7 @@ from typing import Any
 import structlog
 from langchain_core.messages import AIMessage, ToolMessage
 
-from app.agent.safety import run_safety_checks
+from app.agent.safety import SQLAuditCheck, PerformanceCheck, run_safety_checks
 from app.agent.state import AgentState
 from app.config import settings
 
@@ -33,6 +33,28 @@ logger = structlog.get_logger(__name__)
 
 # 每轮 ReAct 迭代中最大并行工具数（从配置读取，默认 5）
 _MAX_CONCURRENT_TOOLS = max(1, settings.AGENT_MAX_CONCURRENT_TOOLS)
+
+
+def _resolve_checks(tool_fn: Any) -> list:
+    """根据工具元数据解析需要执行的安全检查列表。
+
+    工具通过 @tool(extras={...}) 声明安全需求，
+    此函数将其映射为具体的 SafetyCheck 实例列表。
+    未声明需求的工具返回空列表（跳过安全检查）。
+
+    Args:
+        tool_fn: BaseTool 实例（from TOOL_REGISTRY）。
+
+    Returns:
+        需要执行的 SafetyCheck 列表（可能为空）。
+    """
+    extras = getattr(tool_fn, "extras", None) or {}
+    checks: list = []
+    if extras.get("needs_sql_audit"):
+        checks.append(SQLAuditCheck())
+    if extras.get("needs_performance_check"):
+        checks.append(PerformanceCheck())
+    return checks
 
 
 async def _run_one_tool(
@@ -81,8 +103,41 @@ async def _run_one_tool(
         if "user_role" not in tool_args:
             tool_args["user_role"] = conn_config.get("user_role", "readonly")
 
-        # ── 2. 安全护栏检查 ──
-        safety_result = await run_safety_checks(tool_name, tool_args, conn_config)
+        # ── 2. 查找工具（提前到安全检查之前，用于解析安全元数据） ──
+        tool_fn = TOOL_REGISTRY.get(tool_name)
+        if tool_fn is None:
+            logger.error(
+                "工具未注册",
+                run_id=run_id,
+                tool=tool_name,
+                available=list(TOOL_REGISTRY.keys()),
+            )
+            return {
+                "tool_message": ToolMessage(
+                    content=f"工具 '{tool_name}' 未注册，请联系管理员",
+                    tool_call_id=tc["id"],
+                    name=tool_name,
+                ),
+                "sse_events": [
+                    {
+                        "type": "tool_result",
+                        "tool": tool_name,
+                        "summary": f"工具 '{tool_name}' 未注册",
+                        "tool_call_id": tc["id"],
+                        "agent_run_id": run_id,
+                        "iteration": iteration,
+                        "safety_checks_passed": False,
+                    }
+                ],
+            }
+
+        # ── 3. 根据元数据解析安全检查列表 ──
+        applicable_checks = _resolve_checks(tool_fn)
+
+        # ── 4. 安全护栏检查 ──
+        safety_result = await run_safety_checks(
+            tool_name, tool_args, conn_config, checks=applicable_checks,
+        )
         if safety_result.blocked:
             logger.warning(
                 "工具被安全护栏拦截",
@@ -118,35 +173,7 @@ async def _run_one_tool(
                 warning_count=len(safety_warnings),
             )
 
-        # ── 3. 查找工具 ──
-        tool_fn = TOOL_REGISTRY.get(tool_name)
-        if tool_fn is None:
-            logger.error(
-                "工具未注册",
-                run_id=run_id,
-                tool=tool_name,
-                available=list(TOOL_REGISTRY.keys()),
-            )
-            return {
-                "tool_message": ToolMessage(
-                    content=f"工具 '{tool_name}' 未注册，请联系管理员",
-                    tool_call_id=tc["id"],
-                    name=tool_name,
-                ),
-                "sse_events": [
-                    {
-                        "type": "tool_result",
-                        "tool": tool_name,
-                        "summary": f"工具 '{tool_name}' 未注册",
-                        "tool_call_id": tc["id"],
-                        "agent_run_id": run_id,
-                        "iteration": iteration,
-                        "safety_checks_passed": False,
-                    }
-                ],
-            }
-
-        # ── 4. 执行工具 ──
+        # ── 5. 执行工具 ──
         try:
             result = await tool_fn.ainvoke(tool_args)
         except Exception as exc:

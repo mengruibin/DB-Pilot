@@ -91,8 +91,18 @@ async def _run_one_tool(tc: dict, conn_config: dict, run_id: str,
         if "user_role" not in tool_args:
             tool_args["user_role"] = conn_config.get("user_role", "readonly")
 
-        # ── 2. 安全护栏 ──
-        safety_result = await run_safety_checks(tool_name, tool_args, conn_config)
+        # ── 2. 工具查找（提前到安全检查之前） ──
+        tool_fn = TOOL_REGISTRY.get(tool_name)
+        if tool_fn is None:
+            # ... 返回未注册错误 ...
+
+        # ── 3. 根据元数据解析安全检查列表 ──
+        applicable_checks = _resolve_checks(tool_fn)
+
+        # ── 4. 安全护栏（仅执行工具声明需要的检查） ──
+        safety_result = await run_safety_checks(
+            tool_name, tool_args, conn_config, checks=applicable_checks,
+        )
         if safety_result.blocked:
             # ... 构造拦截 ToolMessage + SSE，直接 return ...
 

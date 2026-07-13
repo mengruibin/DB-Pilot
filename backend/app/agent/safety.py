@@ -77,10 +77,11 @@ class SQLAuditCheck(SafetyCheck):
         tool_args: dict[str, Any],
         conn_config: dict[str, Any],
     ) -> SafetyResult:
-        """对 SQL 类工具进行审计检查。"""
-        if tool_name not in ("execute_sql", "explain_query"):
-            return SafetyResult(blocked=False)
+        """对 SQL 类工具进行审计检查。
 
+        由调用方（tool_node._resolve_checks）根据工具元数据决定是否传入此检查，
+        因此不再需要按 tool_name 硬编码过滤。
+        """
         sql = tool_args.get("sql", "")
         if not sql:
             return SafetyResult(blocked=False)
@@ -244,6 +245,9 @@ class PerformanceCheck(SafetyCheck):
     ) -> SafetyResult:
         """对 SQL 进行静态性能分析，返回非阻断性警告。
 
+        由调用方（tool_node._resolve_checks）根据工具元数据决定是否传入此检查，
+        因此不再需要按 tool_name 硬编码过滤。
+
         Args:
             tool_name: 工具名称。
             tool_args: 工具参数。
@@ -252,9 +256,6 @@ class PerformanceCheck(SafetyCheck):
         Returns:
             SafetyResult(blocked=False, warnings=[...])
         """
-        if tool_name not in ("execute_sql",):
-            return SafetyResult(blocked=False)
-
         sql = tool_args.get("sql", "")
         if not sql:
             return SafetyResult(blocked=False)

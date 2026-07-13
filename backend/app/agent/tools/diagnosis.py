@@ -19,7 +19,6 @@ import structlog
 from langchain_core.tools import InjectedToolArg, tool
 
 from app.db.factory import AdapterFactory
-from app.engine.sql_auditor import audit
 from app.models.schemas import ConnectionCreateRequest
 
 logger = structlog.get_logger(__name__)
@@ -73,7 +72,7 @@ def _safe_tool_call(fn_name: str, exc: Exception) -> dict[str, Any]:
 # =============================================================================
 
 
-@tool
+@tool(extras={"needs_sql_audit": True})
 async def explain_query(
     connection_id: Annotated[str, InjectedToolArg],
     db_type: Annotated[str, InjectedToolArg],
@@ -105,21 +104,11 @@ async def explain_query(
             "summary": str
         }
         不支持: {"error": str, "detail": str}
-        审计拦截: {"error": str, "detail": str, "violations": [{"type": str, "message": str}]}
         失败: {"error": str, "detail": str}
     """
-    # Step 1: SQL 安全审计（AGENTS.md §安全与合规红线）
-    # SAFETY: 不跳过 SQL 审计直接执行用户/LLM 生成的 SQL (AGENTS.md §安全与合规红线)
-    audit_result = audit(sql, db_type=db_type, user_role=user_role)
-    if not audit_result.passed:
-        logger.warning(
-            "工具审计拦截", tool="explain_query", sql=sql[:200], connection_id=connection_id
-        )
-        return {
-            "error": "SQL 审计未通过",
-            "detail": "语句包含危险操作，已被拦截",
-            "violations": [{"type": v.type, "message": v.message} for v in audit_result.violations],
-        }
+    # Step 1: SQL 安全审计由上游 tool_node._run_one_tool 中的
+    # SQLAuditCheck 在工具执行前统一拦截，此处不再重复审计。
+    # SAFETY: 参数化连接配置，不拼接连接串（AGENTS.md §数据库操作原则）
 
     # Step 2: 建立连接并检查适配器能力
     try:

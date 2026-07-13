@@ -123,9 +123,11 @@
   │  │  SafeToolNode（任务 5：安全 + 注入 + 脱敏）               │    │
   │  │                                                          │    │
   │  │  ① 连接配置注入 ──── conn_config → tool_args              │    │
-  │  │  ② 安全护栏检查 ──── SQL 审计 / 只读检查                  │    │
-  │  │  ③ 工具执行 ──────── TOOL_REGISTRY → tool_fn.ainvoke()   │    │
-  │  │  ④ 结果脱敏 ──────── 敏感列自动掩码                      │    │
+  │  │  ② 工具查找 ──────── TOOL_REGISTRY 查找 + extras 元数据   │    │
+  │  │     解析安全检查列表                                       │    │
+  │  │  ③ 安全护栏检查 ──── 仅执行声明需要的安全检查              │    │
+  │  │  ④ 工具执行 ──────── tool_fn.ainvoke()                   │    │
+  │  │  ⑤ 结果脱敏 ──────── 敏感列自动掩码                      │    │
   │  │                                                          │    │
   │  │  输出: ToolMessage 列表                                   │    │
   │  └──────────────────────────┬──────────────────────────────┘    │
@@ -289,16 +291,25 @@
   │    conn_config (host/port/user/password) → tool_args │
   │    LLM 不可见这些参数，SafeToolNode 运行时注入        │
   ├─────────────────────────────────────────────────────┤
-  │ ② 安全护栏检查                                      │
-  │    run_safety_checks(tool_name, tool_args)           │
-  │    ├─ SQL 审计（sqlglot 解析 → 拦截危险操作）         │
-  │    ├─ 只读检查（非 SELECT 需管理员确认）              │
-  │    └─ 连接限额（限制并发连接数）                     │
+  │ ② 工具查找（提前到安全检查之前）                     │
+  │    TOOL_REGISTRY[tool_name] → 检查是否存在           │
+  │    不存在 → 返回 ToolMessage(error)                  │
+  ├─────────────────────────────────────────────────────┤
+  │ ③ 解析安全检查列表                                  │
+  │    _resolve_checks(tool_fn)                          │
+  │    读取 tool_fn.extras → 决定运行哪些检查            │
+  │    未声明 → 空列表（跳过安全检查）                   │
+  ├─────────────────────────────────────────────────────┤
+  │ ④ 安全护栏检查（仅执行声明需要的检查）               │
+  │    run_safety_checks(tool_name, tool_args, checks)   │
+  │    ├─ SQLAuditCheck（若声明 needs_sql_audit）         │
+  │    ├─ PerformanceCheck（若声明 needs_performance）    │
+  │    └─ 连接限额（全局，始终执行）                     │
   │                                                    │
   │    如果 blocked → 返回 ToolMessage(error)            │
   ├─────────────────────────────────────────────────────┤
-  │ ③ 工具执行                                          │
-  │    TOOL_REGISTRY[tool_name].ainvoke(tool_args)       │
+  │ ⑤ 工具执行                                          │
+  │    tool_fn.ainvoke(tool_args)                       │
   │    异常捕获 → ToolMessage(error)                     │
   ├─────────────────────────────────────────────────────┤
   │ ④ 结果脱敏                                          │

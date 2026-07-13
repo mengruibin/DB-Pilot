@@ -20,7 +20,6 @@ import structlog
 from langchain_core.tools import InjectedToolArg, tool
 
 from app.db.factory import AdapterFactory
-from app.engine.sql_auditor import audit
 from app.engine.sql_error_parser import parse_db_error
 from app.models.schemas import ConnectionCreateRequest
 
@@ -303,7 +302,7 @@ async def describe_table(
 # =============================================================================
 
 
-@tool
+@tool(extras={"needs_sql_audit": True, "needs_performance_check": True})
 async def execute_sql(
     connection_id: Annotated[str, InjectedToolArg],
     db_type: Annotated[str, InjectedToolArg],
@@ -322,8 +321,7 @@ async def execute_sql(
     安全约束：
       - 写操作（INSERT/UPDATE/DELETE）仅在当前用户角色为 admin 时允许
       - readonly 角色仅可执行 SELECT/SHOW/DESC/EXPLAIN 等只读语句
-      - 所有 SQL 执行前自动经过安全审计，拦截 DROP/ALTER/TRUNCATE/CREATE/
-        GRANT/REVOKE 等危险操作及多语句注入
+      - SQL 安全审计由上游 tool_node 安全护栏层统一负责，工具内部不再重复审计
       - 结果中的敏感列（password、token、phone 等）自动以 "***" 掩码
       - 不支持多条语句批处理
 
@@ -340,12 +338,6 @@ async def execute_sql(
             "is_readonly": bool,         // true=只读查询，false=写操作
             "summary": str
         }
-        审计拦截: {
-            "error": str,
-            "detail": str,
-            "violations": [{"type": str, "message": str}],
-            "audit_status": "blocked"
-        }
         执行失败: {
             "error": str,
             "error_type": str,           // 错误类型（如 syntax_error, permission_denied）
@@ -354,25 +346,9 @@ async def execute_sql(
             "audit_status": "execution_error"
         }
     """
-    # Step 1: SQL 安全审计（AGENTS.md §安全与合规红线）
-    # SAFETY: 不跳过 SQL 审计直接执行用户/LLM 生成的 SQL
-    audit_result = audit(sql, db_type=db_type, user_role=user_role)
-    if not audit_result.passed:
-        logger.warning(
-            "工具审计拦截",
-            tool="execute_sql",
-            sql=sql[:200],
-            connection_id=connection_id,
-            user_role=user_role,
-        )
-        return {
-            "error": "SQL 审计未通过",
-            "detail": "语句包含危险操作，已被拦截",
-            "violations": [{"type": v.type, "message": v.message} for v in audit_result.violations],
-            "audit_status": "blocked",
-        }
-
-    # 判断本次 SQL 是否为只读（用于返回值和日志）
+    # Step 1: 判断本次 SQL 是否为只读（用于返回值和日志）
+    # SAFETY: SQL 安全审计由上游 tool_node._run_one_tool 中的
+    # SQLAuditCheck 在工具执行前统一拦截，此处不再重复审计。
     is_readonly = bool(_IS_READONLY_SQL.match(sql))
 
     # Step 2: 执行查询

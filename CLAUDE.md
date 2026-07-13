@@ -121,7 +121,7 @@ frontend/
 
 3. **推理与回答分离** — 模型原生 `reasoning_content` 字段（DeepSeek/GLM 等支持）→ 作为独立 SSE `reasoning` 事件推送。普通 content 采用"乐观渲染+收编"模式：一律以 `stage="thinking"` 发射，`is_complete` 时若未检测到工具调用则发送 `stage_change("answer")` 触发前端收编。
 
-4. **Security** — 工具执行前经 SafeToolNode：连接配置注入 → 安全护栏链（sqlglot SQL 审计拦截 DROP/ALTER/TRUNCATE 等）→ 执行 → 结果脱敏。
+4. **Security** — 工具执行前经 SafeToolNode：连接配置注入 → 工具查找（读取 `extras` 元数据决定安全检查项）→ 安全护栏链（sqlglot SQL 审计拦截 DROP/ALTER/TRUNCATE 等）→ 执行 → 结果脱敏。
 
 5. **并行工具执行** — 当 LLM 在同一轮返回多个 `tool_calls` 时，SafeToolNode 用 `asyncio.gather(return_exceptions=True)` 并发执行它们。总耗时 ≈ 最慢工具而非耗时之和。通过 `asyncio.Semaphore` 限制最大并发数（默认 5），防止 DB 连接池耗尽。前端的 `onToolResult` 匹配从 `findLastRunningToolCall()` 改为 `tool_call_id` 精确匹配，支持并行安全的结果关联。SSE 事件中的 `tool_call` 和 `tool_result` 均携带 `tool_call_id` 字段用于前后端关联。
 

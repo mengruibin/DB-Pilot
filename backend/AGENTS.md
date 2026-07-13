@@ -120,7 +120,7 @@ backend/
 - [ ] MUST 所有 `@tool` 装饰的函数返回 Python 原生类型（dict/list/str），禁止返回 SQLAlchemy ORM 实例
 - [ ] MUST 工具函数内部捕获异常后返回 `{"error": "<可读描述>", "detail": "<原始异常类型>"}` 字典，MUST NOT 向上抛出未处理异常
 - [ ] MUST 连接配置参数（`connection_id`/`db_type`/`host`/`port`/`database`/`user`/`password`/`ssl_enabled`/`ssl_ca_cert`）使用 `Annotated[str, InjectedToolArg]` 标注，由 `SafeToolNode` 在运行时自动注入，LLM 通过 `bind_tools()` 不可见这些参数
-- [ ] MUST `SafeToolNode`（`app/agent/tool_node.py`）在工具执行前依次执行：连接配置注入 → 安全护栏检查 → 工具调用 → 结果脱敏，返回标准 `ToolMessage` 对象
+- [ ] MUST `SafeToolNode`（`app/agent/tool_node.py`）在工具执行前依次执行：连接配置注入 → 工具查找（读取 `extras` 元数据）→ 安全护栏检查（仅执行声明需要的检查）→ 工具调用 → 结果脱敏，返回标准 `ToolMessage` 对象
 
 ---
 
