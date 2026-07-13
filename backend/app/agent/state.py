@@ -55,7 +55,7 @@ class AgentState(TypedDict, total=False):
         connection_id: 目标数据库连接 ID。
         session_id: 当前会话 ID。
         password: 连接密码（仅存于内存 state，不持久化）。
-        user_role: 用户角色（readonly / standard / admin）。
+        user_role: 用户角色（readonly / admin；未检测到明确角色时安全兜底为 readonly）。
         conversation_history: 格式化的会话历史文本。
 
         # ── 中间结果（图节点执行过程中填充） ──

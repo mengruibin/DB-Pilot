@@ -89,7 +89,7 @@ class SQLAuditCheck(SafetyCheck):
             from app.engine.sql_auditor import audit
 
             db_type = conn_config.get("db_type", "mysql")
-            user_role = conn_config.get("user_role", "standard")
+            user_role = conn_config.get("user_role", "readonly")
 
             result = audit(sql, db_type, user_role=user_role)
 

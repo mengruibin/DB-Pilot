@@ -1,6 +1,6 @@
 # user_role 权限检测 — 企业级实现任务清单（✅ 全部完成）
 
-> 目标：基于 MySQL `SHOW GRANTS` 自动检测数据库用户权限，映射为应用层 `user_role`，替代当前硬编码 `"standard"`。
+> 目标：基于 MySQL `SHOW GRANTS` 自动检测数据库用户权限，映射为应用层 `user_role`，并将未显式提供时的兜底值统一为 `"readonly"`。
 
 ---
 
@@ -34,7 +34,7 @@
 - [x] 首次请求：执行预检连接 → 检测角色 → 缓存 → conn_config 含 user_role
 - [x] 后续请求：命中缓存 → 不再执行预检连接（缓存移至 `grant_detector._role_cache`，`chat.py` 和 `troubleshoot.py` 共享）
 - [x] 预检失败 → 缓存不写入 → 下次请求重试
-- [x] conn_config["user_role"] 正确传递到 AgentState（移除所有硬编码 `"standard"`）
+- [x] conn_config["user_role"] 正确传递到 AgentState（移除所有默认使用 `"standard"` 的兜底逻辑）
 - [x] 现有 `/api/chat/stream` SSE 流程不受影响
 
 ---
@@ -47,7 +47,7 @@
 
 **验收结果**:
 - [x] admin 角色连接 → 不设置只读事务 → INSERT/UPDATE/DELETE 可在 MySQL 层执行
-- [x] readonly/standard 角色连接 → 设置只读事务 → 写操作被 MySQL ERROR 1792 拦截
+- [x] readonly 角色连接 → 设置只读事务 → 写操作被 MySQL ERROR 1792 拦截
 - [x] 连接日志包含 user_role 和 readonly_session 标记
 
 ---
@@ -56,7 +56,7 @@
 
 **文件**: `backend/app/db/base.py`, `backend/app/db/postgresql.py`, `backend/app/db/oracle.py`
 
-**描述**: `BaseAdapter.connect()` 签名增加 `user_role: str = "standard"`，所有三个适配器签名一致。
+**描述**: `BaseAdapter.connect()` 签名增加 `user_role: str = "readonly"`，所有三个适配器签名一致。
 
 **验收结果**:
 - [x] 三个适配器签名一致——基类抽象 + MySQL（实现逻辑） + PostgreSQL（暂忽略） + Oracle（暂忽略）
@@ -113,10 +113,10 @@ POST /api/chat/stream  (或 /api/troubleshoot/stream)
   │     ├─→ audit(sql, user_role=...) ← 工具内二次审计
   │     ├─→ adapter.connect(config, user_role=...)
   │     │     ├─→ admin → 跳过 READ ONLY
-  │     │     └─→ standard/readonly → SET SESSION READ ONLY
+  │     │     └─→ readonly → SET SESSION READ ONLY
   │     └─→ adapter.execute(sql)
   │           ├─→ admin + INSERT 通过审计 → 执行成功
-  │           └─→ standard + INSERT 未通过审计 → 返回拦截信息
+  │           └─→ readonly + INSERT 未通过审计 → 返回拦截信息
   │
   └─→ SSE 事件流返回
 ```

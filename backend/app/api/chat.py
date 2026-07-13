@@ -270,7 +270,7 @@ async def _resolve_connection_config(
         "extra_params": conn.extra_params,
     }
 
-    # ── 用户角色检测（仅 MySQL，其他数据库暂默认 standard） ──
+    # ── 用户角色检测（仅 MySQL，其他数据库默认安全兜底为 readonly） ──
     # 通过 SHOW GRANTS 自动判定数据库用户实际拥有多少权限
     if conn.db_type == "mysql":
         from app.engine.grant_detector import (
@@ -302,7 +302,7 @@ async def _resolve_connection_config(
                 "角色来自实时检测", connection_id=connection_id, role=role, trace_id=trace_id
             )
     else:
-        config["user_role"] = "standard"
+        config["user_role"] = "readonly"
 
     return config
 

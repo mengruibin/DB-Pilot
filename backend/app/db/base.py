@@ -62,15 +62,15 @@ class BaseAdapter(ABC):
     async def connect(
         self,
         config: ConnectionCreateRequest,
-        user_role: str = "standard",
+        user_role: str = "readonly",
     ) -> bool:
         """建立到目标数据库的连接。
 
         Args:
             config: 包含密码在内的完整连接配置。
-            user_role: 用户角色（readonly / standard / admin），
+            user_role: 用户角色（readonly / admin），
                 用于控制是否设置只读事务。仅 MySQL 适配器按角色动态处理，
-                PostgreSQL/Oracle 暂默认 standard。
+                PostgreSQL/Oracle 默认安全兜底为 readonly。
 
         Returns:
             True 表示连接成功。

@@ -35,8 +35,8 @@ class TestSqlAuditorBaseline:
         assert any("DROP" in v.type for v in result.violations)
 
     def test_delete_blocked_without_admin(self):
-        """基线 3：DELETE FROM 应被拒绝（standard 角色）。"""
-        result = audit("DELETE FROM users WHERE id = 1", db_type="mysql", user_role="standard")
+        """基线 3：DELETE FROM 应被拒绝（非 admin / 只读兜底角色）。"""
+        result = audit("DELETE FROM users WHERE id = 1", db_type="mysql", user_role="readonly")
         assert result.passed is False
         assert result.is_readonly is False
         assert any("DELETE" in v.type for v in result.violations)
@@ -93,7 +93,7 @@ class TestSqlAuditorExtended:
         result = audit(
             "UPDATE users SET name = 'test' WHERE id = 1",
             db_type="mysql",
-            user_role="standard",
+            user_role="readonly",
         )
         assert result.passed is False
         assert any("UPDATE" in v.type for v in result.violations)

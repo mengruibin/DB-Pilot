@@ -194,6 +194,26 @@ class TestParallelExecution:
         )
 
 
+class TestDefaultRoleFallback:
+    """验证缺省角色兜底为只读。"""
+
+    @pytest.mark.asyncio
+    async def test_missing_user_role_defaults_to_readonly(self):
+        """当连接配置未显式提供 user_role 时，工具应收到 readonly。"""
+
+        async def _capture_tool(**kwargs):
+            assert kwargs["user_role"] == "readonly"
+            return {"summary": "captured", "result": "ok"}
+
+        mock_registry = {"capture_tool": _MockTool(_capture_tool)}
+        with patch("app.agent.tools.registry.TOOL_REGISTRY", mock_registry):
+            state = _make_state([_make_tool_call("capture_tool")])
+            result = await safe_tools_node(state)
+
+        assert len(result["messages"]) == 1
+        assert result["messages"][0].name == "capture_tool"
+
+
 class TestErrorIsolation:
     """验证单工具失败不阻塞其他工具。"""
 

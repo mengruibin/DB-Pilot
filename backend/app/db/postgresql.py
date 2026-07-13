@@ -46,7 +46,7 @@ class PostgresAdapter(BaseAdapter):
     async def connect(
         self,
         config: ConnectionCreateRequest,
-        user_role: str = "standard",
+        user_role: str = "readonly",
     ) -> bool:
         """建立到 PostgreSQL 的连接池。
 

@@ -107,7 +107,7 @@ async def list_tables(
     database: Annotated[str, InjectedToolArg],
     user: Annotated[str, InjectedToolArg],
     password: Annotated[str, InjectedToolArg],
-    user_role: Annotated[str, InjectedToolArg] = "standard",
+    user_role: Annotated[str, InjectedToolArg] = "readonly",  # 未显式传入时采用更保守的只读兜底
     ssl_enabled: Annotated[bool, InjectedToolArg] = False,
     ssl_ca_cert: Annotated[str | None, InjectedToolArg] = None,
 ) -> dict[str, Any]:
@@ -176,7 +176,7 @@ async def describe_table(
     user: Annotated[str, InjectedToolArg],
     password: Annotated[str, InjectedToolArg],
     table_names: list[str],
-    user_role: Annotated[str, InjectedToolArg] = "standard",
+    user_role: Annotated[str, InjectedToolArg] = "readonly",  # 未显式传入时采用更保守的只读兜底
     ssl_enabled: Annotated[bool, InjectedToolArg] = False,
     ssl_ca_cert: Annotated[str | None, InjectedToolArg] = None,
 ) -> dict[str, Any]:
@@ -313,7 +313,7 @@ async def execute_sql(
     user: Annotated[str, InjectedToolArg],
     password: Annotated[str, InjectedToolArg],
     sql: str,
-    user_role: Annotated[str, InjectedToolArg] = "standard",
+    user_role: Annotated[str, InjectedToolArg] = "readonly",  # 未显式传入时采用更保守的只读兜底
     ssl_enabled: Annotated[bool, InjectedToolArg] = False,
     ssl_ca_cert: Annotated[str | None, InjectedToolArg] = None,
 ) -> dict[str, Any]:

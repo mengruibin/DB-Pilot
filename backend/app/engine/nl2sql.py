@@ -266,7 +266,7 @@ async def generate_sql(
 
         # Step 4: SQL 安全审计
         # SAFETY: 不跳过 SQL 审计（AGENTS.md §安全与合规红线）
-        audit_result = audit(sql, db_type=db_type, user_role="standard")
+        audit_result = audit(sql, db_type=db_type, user_role="readonly")
 
         if not audit_result.passed:
             logger.warning("NL2SQL 审计拦截", connection_id=connection_id,

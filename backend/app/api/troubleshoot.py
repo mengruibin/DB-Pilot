@@ -117,7 +117,7 @@ async def _resolve_conn_config(
                         connection_id=connection_id, role=role,
                         trace_id=trace_id)
     else:
-        config["user_role"] = "standard"
+        config["user_role"] = "readonly"
 
     return config
 

@@ -145,7 +145,7 @@
   "session_id": null,                          // null=新会话，非空=续接已有会话
   "context": {                                 // 可选：前端附加上下文
     "selected_table": "orders",                // 用户当前关注的表（NL2SQL 优先用此表）
-    "user_role": "standard"                    // 依据 PRD §8.3: "readonly" | "standard" | "admin"
+    "user_role": "readonly"                   // 未显式提供时默认降级为只读，避免误写；可用值为 "readonly" | "admin"
   }
 }
 ```

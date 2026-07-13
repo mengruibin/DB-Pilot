@@ -84,7 +84,7 @@ async def explain_query(
     password: Annotated[str, InjectedToolArg],
     sql: str,
     format: Literal["tree", "json", "traditional"] = "tree",
-    user_role: Annotated[str, InjectedToolArg] = "standard",
+    user_role: Annotated[str, InjectedToolArg] = "readonly",  # 未显式传入时采用更保守的只读兜底
     ssl_enabled: Annotated[bool, InjectedToolArg] = False,
     ssl_ca_cert: Annotated[str | None, InjectedToolArg] = None,
 ) -> dict[str, Any]:
@@ -181,7 +181,7 @@ async def get_slow_queries(
     password: Annotated[str, InjectedToolArg],
     time_range: Literal["1h", "6h", "24h", "7d"] = "1h",
     limit: int = 20,
-    user_role: Annotated[str, InjectedToolArg] = "standard",
+    user_role: Annotated[str, InjectedToolArg] = "readonly",  # 未显式传入时采用更保守的只读兜底
     ssl_enabled: Annotated[bool, InjectedToolArg] = False,
     ssl_ca_cert: Annotated[str | None, InjectedToolArg] = None,
 ) -> dict[str, Any]:

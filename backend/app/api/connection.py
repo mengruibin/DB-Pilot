@@ -292,7 +292,7 @@ async def test_connection(
 
         # ── 检测用户角色（仅 MySQL）并传入适配器 ──
         # 此时做检测可提前填充 _role_cache，后续 SSE 聊天直接命中
-        user_role = "standard"
+        user_role = "readonly"
         if test_config.db_type == "mysql":
             from app.engine.grant_detector import detect_mysql_role, set_cached_role
 

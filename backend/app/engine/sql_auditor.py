@@ -90,7 +90,7 @@ _DIALECT_MAP: dict[str, str] = {
 def audit(
     sql: str,
     db_type: str = "mysql",
-    user_role: str = "standard",
+    user_role: str = "readonly",
 ) -> AuditResult:
     """审计 SQL 语句的安全性。
 
@@ -100,7 +100,7 @@ def audit(
     Args:
         sql: 要审计的 SQL 语句。
         db_type: 数据库类型（mysql / postgresql / oracle），影响解析方言。
-        user_role: 用户角色（readonly / standard / admin），影响权限判断。
+        user_role: 用户角色（readonly / admin），影响权限判断；未显式传入时默认按只读兜底。
 
     Returns:
         AuditResult: 审计结果，含 passed 标志、violations 列表、is_readonly 标记。

@@ -79,7 +79,7 @@ async def _run_one_tool(
             if key in conn_config and key not in tool_args:
                 tool_args[key] = conn_config[key]
         if "user_role" not in tool_args:
-            tool_args["user_role"] = conn_config.get("user_role", "standard")
+            tool_args["user_role"] = conn_config.get("user_role", "readonly")
 
         # ── 2. 安全护栏检查 ──
         safety_result = await run_safety_checks(tool_name, tool_args, conn_config)

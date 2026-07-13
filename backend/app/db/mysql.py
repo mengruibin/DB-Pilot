@@ -47,7 +47,7 @@ class MySQLAdapter(BaseAdapter):
     async def connect(
         self,
         config: ConnectionCreateRequest,
-        user_role: str = "standard",
+        user_role: str = "readonly",
     ) -> bool:
         """建立到 MySQL 的连接池。
 
