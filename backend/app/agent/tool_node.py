@@ -177,9 +177,6 @@ async def _run_one_tool(
 
         elapsed = int((time.monotonic() - tool_start) * 1000)
 
-        # ── 5. 敏感数据脱敏 ──
-        result = _sanitize_sensitive_data(result)
-
         logger.info(
             "工具执行完成",
             run_id=run_id,
@@ -332,62 +329,3 @@ async def safe_tools_node(state: AgentState) -> dict[str, Any]:
         "messages": tool_messages,
         "sse_events": sse_events,
     }
-
-
-# =============================================================================
-# 敏感数据脱敏（从 graph.py 迁移，任务 5 后用此版本）
-# =============================================================================
-
-
-def _sanitize_sensitive_data(result: Any) -> Any:
-    """对工具返回结果中的敏感列进行脱敏。
-
-    检查结果中的 columns 字段，对匹配敏感模式的列进行掩码处理。
-    敏感模式：password, passwd, pwd, secret, token, api_key,
-             phone, mobile, email, id_card, ssn。
-
-    Args:
-        result: 工具返回的原始结果 dict。
-
-    Returns:
-        脱敏后的结果 dict。
-    """
-    if not isinstance(result, dict):
-        return result
-
-    columns = result.get("columns", [])
-    rows = result.get("rows", [])
-    if not columns or not rows:
-        return result
-
-    sensitive_patterns = [
-        "password",
-        "passwd",
-        "pwd",
-        "secret",
-        "token",
-        "api_key",
-        "phone",
-        "mobile",
-        "email",
-        "id_card",
-        "ssn",
-    ]
-    sensitive_indices: list[int] = []
-    for i, col_name in enumerate(columns):
-        col_lower = col_name.lower() if isinstance(col_name, str) else ""
-        if any(pattern in col_lower for pattern in sensitive_patterns):
-            sensitive_indices.append(i)
-
-    if not sensitive_indices:
-        return result
-
-    sanitized_rows = []
-    for row in rows:
-        new_row = list(row)
-        for idx in sensitive_indices:
-            if idx < len(new_row):
-                new_row[idx] = "***"
-        sanitized_rows.append(new_row)
-
-    return {**result, "rows": sanitized_rows}

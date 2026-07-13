@@ -94,14 +94,6 @@ def _patch_safety_checks():
         yield
 
 
-@pytest.fixture(autouse=True)
-def _patch_sanitize():
-    """绕过脱敏（测试中不需要）。"""
-    with patch("app.agent.tool_node._sanitize_sensitive_data") as mock_sanitize:
-        mock_sanitize.side_effect = lambda x: x
-        yield
-
-
 # =============================================================================
 # 辅助函数
 # =============================================================================
@@ -196,6 +188,26 @@ class TestParallelExecution:
 
 class TestDefaultRoleFallback:
     """验证缺省角色兜底为只读。"""
+
+    @pytest.mark.asyncio
+    async def test_tool_node_does_not_sanitize_result_rows(self):
+        """工具节点不应改写其他工具返回的结果集。"""
+
+        async def _return_result_with_sensitive_columns(**kwargs):
+            return {
+                "summary": "返回结果集",
+                "columns": ["username", "password"],
+                "rows": [["alice", "secret"]],
+            }
+
+        mock_registry = {"result_tool": _MockTool(_return_result_with_sensitive_columns)}
+        with patch("app.agent.tools.registry.TOOL_REGISTRY", mock_registry):
+            state = _make_state([_make_tool_call("result_tool")])
+            result = await safe_tools_node(state)
+
+        tool_content = result["messages"][0].content
+        assert '"password"' in tool_content
+        assert '"secret"' in tool_content
 
     @pytest.mark.asyncio
     async def test_missing_user_role_defaults_to_readonly(self):
