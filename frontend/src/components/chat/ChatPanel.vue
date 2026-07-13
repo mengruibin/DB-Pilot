@@ -10,7 +10,7 @@
  * 扩展（F4）：支持历史会话标题显示和消息加载状态。
  */
 import { computed, ref } from 'vue'
-import { NButton, NPopconfirm, NSpin } from 'naive-ui'
+import { NButton, NSpin } from 'naive-ui'
 import { useChatStore } from '@/stores/chat'
 import { useConnectionStore } from '@/stores/connection'
 import MessageList from './MessageList.vue'
@@ -61,12 +61,7 @@ function handleNewSession(): void {
         </span>
       </div>
       <div class="header-actions">
-        <n-popconfirm @positive-click="handleNewSession">
-          <template #trigger>
-            <n-button text size="tiny" class="header-btn new-session-btn">新对话</n-button>
-          </template>
-          当前对话将保留在侧边栏中，确定开始新会话？
-        </n-popconfirm>
+        <n-button text size="tiny" class="header-btn new-session-btn" @click="handleNewSession">新对话</n-button>
       </div>
     </div>
 
