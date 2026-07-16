@@ -182,6 +182,39 @@ def audit(
 
 
 # =============================================================================
+# 快速判断函数（供 confirm_node 使用）
+# =============================================================================
+
+
+def is_write_dml(sql: str, db_type: str = "mysql") -> bool:
+    """快速判断 SQL 是否为写 DML（INSERT/UPDATE/DELETE/MERGE）。
+
+    用于 confirm_node 预检，避免对只读 SQL 发起确认。
+    复用 sqlglot AST 解析和 _get_statement_type() 分类逻辑。
+
+    解析失败时保守返回 False（由 SQLAuditCheck 兜底拦截），而非中断流程。
+
+    Args:
+        sql: 待检查的 SQL 语句。
+        db_type: 数据库方言，默认 mysql。
+
+    Returns:
+        True 如果 SQL 是写 DML 操作（INSERT/UPDATE/DELETE），
+        False 表示只读或无法解析。
+    """
+    try:
+        dialect = _DIALECT_MAP.get(db_type, "mysql")
+        parsed = sqlglot.parse_one(sql, dialect=dialect)
+        if parsed is None:
+            return False
+        stmt_type = _get_statement_type(parsed)
+        return stmt_type in _ADMIN_ONLY_STATEMENTS
+    except Exception:
+        # 解析失败时保守处理：不视为写操作
+        return False
+
+
+# =============================================================================
 # 内部检测函数
 # =============================================================================
 

@@ -71,9 +71,9 @@ npx vue-tsc --noEmit
       agent_node (LLM bind_tools → 决策工具调用或最终回答)
         → tools_node (安全护栏 → 连接注入 → 工具并行执行 → 脱敏，最多 5 个并发) → agent_node (ReAct 循环, ≤10 轮)
         → END (is_complete=True)
-  → SSE 流式返回 11 种事件类型 (messages/updates 双通道)
+  → SSE 流式返回 12+ 种事件类型 (messages/updates 双通道)
       ┌─ messages: reasoning / token / tool_call_chunks (逐 token)
-      └─ updates: tool_call / tool_result / sql / error / stage_change / done
+      └─ updates: tool_call / tool_result / sql / error / stage_change / done / confirm_required
 ```
 
 ### Key Directories
@@ -125,7 +125,7 @@ frontend/
 
 5. **并行工具执行** — 当 LLM 在同一轮返回多个 `tool_calls` 时，SafeToolNode 用 `asyncio.gather(return_exceptions=True)` 并发执行它们。总耗时 ≈ 最慢工具而非耗时之和。通过 `asyncio.Semaphore` 限制最大并发数（默认 5），防止 DB 连接池耗尽。前端的 `onToolResult` 匹配从 `findLastRunningToolCall()` 改为 `tool_call_id` 精确匹配，支持并行安全的结果关联。SSE 事件中的 `tool_call` 和 `tool_result` 均携带 `tool_call_id` 字段用于前后端关联。
 
-6. **SSE 事件协议** — 11+ 种事件类型通过 SSE `event: message` + `data: JSON` 传输：`thinking` / `reasoning` / `token(stage=thinking|answer)` / `tool_call`（含 `tool_call_id`） / `tool_result`（含 `tool_call_id`） / `sql` / `result` / `text` / `error` / `done` / `stage_change`。前端 `useSSE` composable 统一解析分发到 Pinia store 回调。
+6. **SSE 事件协议** — 12+ 种事件类型通过 SSE `event: message` + `data: JSON` 传输：`thinking` / `reasoning` / `token(stage=thinking|answer)` / `tool_call`（含 `tool_call_id`） / `tool_result`（含 `tool_call_id`） / `sql` / `result` / `text` / `error` / `done` / `stage_change` / `confirm_required`。前端 `useSSE` composable 统一解析分发到 Pinia store 回调。
 
 7. **Database Adapters** — BaseAdapter ABC 定义统一接口（execute/explain/get_slow_queries/等），lazy-loaded 驱动（aiomysql/asyncpg/oracledb），`AdapterFactory.create()` 创建实例。连接密码仅存于请求内存 state，不持久化。
 
@@ -140,12 +140,37 @@ frontend/
   → AI 响应卡片（思考面板 + 最终回答）
     ┌─ 思考面板（details/summary 折叠）
     │   ├─ reasoning（深度推理文本）
-    │   ├─ tool_call 卡片（蓝色调，spinner/check + 参数 JSON）
+    │   ├─ tool_call 卡片（蓝色调，spinner/check/clock + 参数 JSON）
+    │   │   - running: 旋转图标 + "正在调用工具"
+    │   │   - waiting_approval: 时钟图标 + "等待用户审批"（由 pendingConfirm 驱动）
+    │   │   - done: 勾选图标 + "已完成调用"
     │   └─ tool_result 折叠块
     └─ 最终回答（绿调，Markdown 渲染 + 打字光标）
 ```
 
-设计 token 在 `App.vue` CSS 变量中定义，支持 **深色/浅色** 双主题（通过 `[data-theme="light"]` 切换）。核心变量以 `--chat-*` 前缀命名。字体：Satoshi（正文）+ JetBrains Mono（代码）。
+#### 写操作确认卡片（内联设计）
+
+写操作确认采用**内联卡片**而非模态弹窗，自然嵌入消息流中，不遮挡界面：
+
+```
+消息列表
+  → ... 工具调用卡片（显示"等待用户审批"）
+  → ┌───────────────────────────────────────┐
+    │ ✎ 需要确认执行写操作                   │
+    │ ┌─ SQL 代码块 ──────────────────────┐  │
+    │ │ INSERT INTO users ...              │  │
+    │ └────────────────────────────────────┘  │
+    │          [取消]   [确认执行 (1.5s)]      │
+    └───────────────────────────────────────┘
+```
+
+- 深色主题强调色：浅绿 `#4ADE80`
+- 浅色主题强调色：浅蓝 `#60A5FA`
+- 左侧 3px 强调色边框，与 AI 响应卡片同宽同风格
+- 响应式：由 `chatStore.pendingConfirm` 驱动，`isWaitingApproval` computed 自动判断
+- 1.5s 冷却按钮防误触，冷却中为描边样式，结束后填充强调色
+
+设计 token 在 `App.vue` CSS 变量中定义，支持 **深色/浅色** 双主题（通过 `[data-theme="light"]` 切换）。核心变量以 `--chat-*` 和 `--confirm-*` 前缀命名。字体：Satoshi（正文）+ JetBrains Mono（代码）。
 
 ### Tools Registry
 
@@ -174,3 +199,4 @@ frontend/
 - SQL 审计默认拦截 DROP/ALTER/TRUNCATE/CREATE/GRANT/REVOKE，多语句直接拦截
 - **并行工具执行**：SafeToolNode 用 `asyncio.gather()` 并发执行同轮 `tool_calls`，受 `AGENT_MAX_CONCURRENT_TOOLS`（默认 5）限制。SSE 事件的 `tool_call` / `tool_result` 均携带 `tool_call_id` 供前端精确匹配
 - 前端 `onToolResult` 匹配策略：优先用 `tool_call_id` 从 `Map` O(1) 查找，回退到 `tool` 名匹配。`MessageList.vue` 的 `pairToolSteps()` 将 `tool_call` 与对应 `tool_result` 配对渲染
+- **写操作确认 UI**：采用内联卡片非模态弹窗，`WriteConfirmation.vue` 组件根据 `chatStore.pendingConfirm` 渲染。tool_call 卡片通过 `isWaitingApproval` computed 响应式判断是否等待审批，显示时钟图标 + "等待用户审批"（由 `pendingConfirm.writes` 驱动，无需手动同步 `stepStatus`）。深色主题强调色浅绿 `#4ADE80`，浅色主题浅蓝 `#60A5FA`，变量定义在 `App.vue` 的 `--confirm-*` CSS 变量中

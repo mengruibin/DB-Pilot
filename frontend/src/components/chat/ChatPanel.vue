@@ -6,8 +6,8 @@
  * 中部：MessageList（消息列表）
  * 底部：InputArea（双模式输入组件）
  *
- * 依据 api-contract §三 ChatPanel 组件树
- * 扩展（F4）：支持历史会话标题显示和消息加载状态。
+ * 写操作确认卡片以内联方式展示在消息流中（非模态弹窗），
+ * 设计参考 Claude Code / Codex 等产品的轻量确认模式。
  */
 import { computed, ref } from 'vue'
 import { NButton, NSpin } from 'naive-ui'
@@ -15,6 +15,7 @@ import { useChatStore } from '@/stores/chat'
 import { useConnectionStore } from '@/stores/connection'
 import MessageList from './MessageList.vue'
 import InputArea from './InputArea.vue'
+import WriteConfirmation from './WriteConfirmation.vue'
 
 const chatStore = useChatStore()
 const connectionStore = useConnectionStore()
@@ -80,6 +81,9 @@ function handleNewSession(): void {
           :messages="chatStore.messages"
           :is-streaming="chatStore.isStreaming"
         />
+
+        <!-- 写操作确认内联卡片（作为消息流的一部分自然展示） -->
+        <WriteConfirmation />
       </div>
     </div>
 

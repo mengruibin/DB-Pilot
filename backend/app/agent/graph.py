@@ -5,7 +5,7 @@ Agent StateGraph 定义（2026-07 重构：移除了意图分类节点）。
 LLM 自主决定调用哪些工具、以什么顺序调用、何时停止并给出最终回答。
 
 图结构：
-  agent_node ↔ safe_tools_node（ReAct 循环）
+  agent_node → confirm_node → safe_tools_node（ReAct 循环）
         │
         ▼
        END
@@ -23,10 +23,11 @@ LLM 自主决定调用哪些工具、以什么顺序调用、何时停止并给�
   - agent_node 直接设置 is_complete: True 结束图，无需中间节点
   - thinking/result SSE 事件已移除，用户通过 token 通道看到打字机效果
 
-未来扩展（人机交互）：
-  safe_tools_node 中检测危险操作 → interrupt() 暂停
-    → 前端展示确认对话框 → 用户审批
-    → Command(resume=approved) → 继续执行
+变更说明（2026-07-14）：
+  移除了旧版 TODO 注释（interrupt() 占位），正式实现写操作确认功能：
+  - agent_node 后插入 confirm_node，检测写 DML 并通过 interrupt() 暂停
+  - 用户决策后恢复，拒绝的 tool_calls 替换为 ToolMessage
+  - graph 实例改为模块级单例（get_agent_graph），支持跨请求恢复
 """
 
 from __future__ import annotations
@@ -39,6 +40,7 @@ import structlog
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langgraph.graph import END, StateGraph
 from langgraph.graph.state import CompiledStateGraph
+from langgraph.types import interrupt
 
 from app.agent.models import build_chat_model
 from app.agent.state import AgentState
@@ -88,6 +90,30 @@ def route_after_agent(
         total_iterations=len(state.get("trace_iterations", [])),
     )
     return "__end__"
+
+
+def route_after_confirm(
+    state: AgentState,
+) -> Literal["tools", "agent"]:
+    """确认后路由：仍有待执行工具 → tools，全部拒绝 → agent 回应。
+
+    从消息列表末尾向前查找最后一个 AIMessage，检查其 tool_calls 是否非空
+    来决定路由目标。
+
+    Args:
+        state: 当前 AgentState。
+
+    Returns:
+        "tools" — 仍有 tool_calls，继续执行 safe_tools_node。
+        "agent" — 无 tool_calls（全部拒绝），由 LLM 回应。
+    """
+    messages = state.get("messages", [])
+    for msg in reversed(messages):
+        if isinstance(msg, AIMessage):
+            if msg.tool_calls:
+                return "tools"
+            break
+    return "agent"
 
 
 # =============================================================================
@@ -321,6 +347,195 @@ async def agent_node(state: AgentState) -> dict[str, Any]:
 
 
 # =============================================================================
+# 写操作确认节点
+# =============================================================================
+
+
+async def confirm_node(state: AgentState) -> dict[str, Any]:
+    """写操作确认节点——在 safe_tools_node 之前检测写 SQL，必要时 interrupt() 暂停。
+
+    图结构位置：agent_node → confirm_node → safe_tools_node
+
+    逻辑：
+    1. 读取最后一条 AIMessage.tool_calls
+    2. 通过 TOOL_REGISTRY.extras 判断哪些工具需要写确认
+    3. 通过 is_write_dml() 判断 SQL 是否为写 DML
+    4. 如有写操作 → interrupt() 暂停图，等待用户决策
+    5. 用户决策后（interrupt() 返回）：
+       - 拒绝的 tool_calls → 从 AIMessage 移除 + 生成 ToolMessage
+       - 批准的 tool_calls → 保留（含所有只读工具）
+    6. 如无写操作 → 直接透传 return {}
+
+    幂等性保证：
+      - 第一次执行：interrupt() 暂停，等待决策
+      - 第二次执行（resume）：interrupt() 返回决策值，继续处理
+      - 无写操作时：return {} 直接透传，无副作用
+
+    Returns:
+        包含 messages（替换后的 AIMessage + ToolMessage 列表）和 sse_events 的更新 dict。
+        无写操作时返回 {}（无修改）。
+    """
+    from app.agent.tools.registry import TOOL_REGISTRY  # noqa: I001
+    from app.engine.sql_auditor import is_write_dml
+
+    run_id = state.get("run_id", "")
+    messages = state.get("messages", [])
+    last_msg = messages[-1] if messages else None
+
+    if not isinstance(last_msg, AIMessage) or not last_msg.tool_calls:
+        return {}
+
+    tool_calls = last_msg.tool_calls
+
+    # ── 分类：需要确认的写操作 vs 安全的工具调用 ──
+    writes: list[dict[str, Any]] = []
+    safe: list[Any] = []
+    for tc in tool_calls:
+        tool_fn = TOOL_REGISTRY.get(tc["name"])
+        extras = getattr(tool_fn, "extras", None) or {}
+        if extras.get("needs_write_confirmation"):
+            sql = tc["args"].get("sql", "")
+            if sql and is_write_dml(sql):
+                writes.append({
+                    "tool_call_id": tc["id"],
+                    "tool": tc["name"],
+                    "sql": sql,
+                })
+                continue
+        safe.append(tc)
+
+    if not writes:
+        logger.info("confirm_node: 无写操作，直接透传", run_id=run_id)
+        return {}
+
+    # ====== 有写操作，需要用户确认 ======
+    # ── 审计日志：逐条打印每条写操作详情 ──
+    logger.warning(
+        "【安全审计】检测到写操作，等待用户确认",
+        run_id=run_id,
+        write_count=len(writes),
+        safe_count=len(safe),
+    )
+    for w in writes:
+        logger.warning(
+            "【安全审计】写操作详情",
+            run_id=run_id,
+            tool_call_id=w["tool_call_id"],
+            tool=w["tool"],
+            sql=w["sql"],
+        )
+    # 控制台打印（运维审计追踪）
+    print(f"\n{'='*60}")
+    print(f"[SECURITY AUDIT] 检测到 {len(writes)} 条写操作 | 同时携带 {len(safe)} 条只读工具")
+    for w in writes:
+        print(f"  ├─ [{w['tool']}] {w['sql'][:120]}")
+    if safe:
+        print(f"  └─ 只读工具 {len(safe)} 个: {[s['name'] for s in safe]}")
+    else:
+        print(f"  └─ 无只读工具")
+    print(f"{'='*60}\n")
+
+    # interrupt() 第一次执行：暂停图，将 payload 返回给调用方
+    # interrupt() 第二次执行（resume）：返回 Command(resume=...) 中的值
+    decision = interrupt({
+        "type": "confirm_required",
+        "writes": writes,
+        "safe_tool_count": len(safe),
+        "session_id": state.get("session_id", ""),  # 供前端恢复请求时使用
+    })
+
+    # ====== 处理用户决策（interrupt() 恢复后执行） ======
+    approved_ids: set[str] = set(decision.get("approved_tool_call_ids", []))
+    denied_ids: set[str] = set(decision.get("denied_tool_call_ids", []))
+
+    # ── 审计日志：用户决策结果 ──
+    logger.warning(
+        "【安全审计】用户决策已处理",
+        run_id=run_id,
+        approved_count=len(approved_ids),
+        denied_count=len(denied_ids),
+    )
+    for w in writes:
+        tool_call_id = w["tool_call_id"]
+        if tool_call_id in approved_ids:
+            logger.warning(
+                "【安全审计】写操作已批准",
+                run_id=run_id,
+                tool_call_id=tool_call_id,
+                tool=w["tool"],
+                sql=w["sql"],
+            )
+        elif tool_call_id in denied_ids:
+            logger.warning(
+                "【安全审计】写操作已拒绝",
+                run_id=run_id,
+                tool_call_id=tool_call_id,
+                tool=w["tool"],
+                sql=w["sql"],
+            )
+    # 控制台打印
+    print(f"\n{'='*60}")
+    print(f"[SECURITY AUDIT] 用户决策结果: 批准 {len(approved_ids)} / 拒绝 {len(denied_ids)}")
+    for w in writes:
+        tid = w["tool_call_id"]
+        status = "✅ 已批准" if tid in approved_ids else ("❌ 已拒绝" if tid in denied_ids else "⏭️ 未处理")
+        print(f"  {status} [{w['tool']}] {w['sql'][:120]}")
+    print(f"{'='*60}\n")
+
+    # 保留批准的写 + 所有只读工具
+    kept_calls = [
+        tc for tc in tool_calls
+        if tc["id"] in approved_ids or tc in safe
+    ]
+
+    # 为被拒绝的工具生成 ToolMessage 和 SSE 事件
+    denied_msgs: list[ToolMessage] = []
+    sse_events: list[dict] = []
+    iteration = len(state.get("trace_iterations", []))
+
+    for tc in tool_calls:
+        if tc["id"] in denied_ids:
+            sql_preview = tc["args"].get("sql", "")[:100]
+            denied_msgs.append(ToolMessage(
+                content=f"写操作已被用户取消: {sql_preview}",
+                tool_call_id=tc["id"],
+                name=tc["name"],
+            ))
+            sse_events.append({
+                "type": "tool_result",
+                "tool": tc["name"],
+                "summary": "用户取消了写操作",
+                "tool_call_id": tc["id"],
+                "agent_run_id": run_id,
+                "iteration": iteration,
+                "safety_checks_passed": False,
+            })
+
+    # 替换原始 AIMessage（相同 id → add_messages reducer 进行替换而非追加）
+    modified_aimsg = AIMessage(
+        content=last_msg.content or "",
+        tool_calls=kept_calls,
+        id=last_msg.id,
+    )
+
+    # trace 记录
+    trace_iterations = list(state.get("trace_iterations", []))
+    trace_iterations.append({
+        "iteration": len(trace_iterations) + 1,
+        "node": "confirm",
+        "writes_detected": len(writes),
+        "approved": len(approved_ids),
+        "denied": len(denied_ids),
+    })
+
+    return {
+        "messages": [modified_aimsg] + denied_msgs,
+        "sse_events": sse_events,
+        "trace_iterations": trace_iterations,
+    }
+
+
+# =============================================================================
 # 构建 StateGraph
 # =============================================================================
 
@@ -330,7 +545,9 @@ def build_agent_graph() -> CompiledStateGraph:
 
     图结构：
       agent → route_after_agent（条件边）
-        ├── "tools" → safe_tools_node → agent（ReAct 循环）
+        ├── "tools" → confirm_node（写操作确认）
+        │     ├── "tools" → safe_tools_node → agent（ReAct 循环）
+        │     └── "agent" → agent（全部拒绝后 LLM 回应）
         └── "__end__" → END（agent_node 直接设置 is_complete: True）
 
     外部通过 graph.astream(initial_state, stream_mode=["updates", "messages"]) 执行，
@@ -350,6 +567,10 @@ def build_agent_graph() -> CompiledStateGraph:
       agent_node 在最终回答和超上限时直接设置 is_complete: True，
       图编译时传入 MemorySaver checkpointer 用于状态快照。
 
+    变更（2026-07-14）：
+      新增 confirm_node（写操作确认），位于 agent_node 和 safe_tools_node 之间。
+      agent → route → confirm → route → tools/agent
+
     Returns:
         编译后的 LangGraph 图，可直接执行。
     """
@@ -361,6 +582,7 @@ def build_agent_graph() -> CompiledStateGraph:
 
     # ── 注册节点 ──
     workflow.add_node("agent", agent_node)
+    workflow.add_node("confirm", confirm_node)
     workflow.add_node("tools", safe_tools_node)
 
     # ── 入口：直接进入 Agent ──
@@ -371,8 +593,18 @@ def build_agent_graph() -> CompiledStateGraph:
         "agent",
         route_after_agent,
         {
-            "tools": "tools",
+            "tools": "confirm",  # agent → confirm（写操作检查）
             "__end__": END,
+        },
+    )
+
+    # ── confirm → tools 或 agent ──
+    workflow.add_conditional_edges(
+        "confirm",
+        route_after_confirm,
+        {
+            "tools": "tools",  # 有工具 → 执行
+            "agent": "agent",  # 全部拒绝 → LLM 回应
         },
     )
 
@@ -382,6 +614,28 @@ def build_agent_graph() -> CompiledStateGraph:
     # ── 编译图（MemorySaver 自动保存 checkpoint 快照） ──
     checkpointer = MemorySaver()
     return workflow.compile(checkpointer=checkpointer)
+
+
+# =============================================================================
+# 模块级图实例单例（含 MemorySaver checkpointer）
+# =============================================================================
+
+_agent_graph: CompiledStateGraph | None = None
+
+
+def get_agent_graph() -> CompiledStateGraph:
+    """返回模块级单例 Agent 图（含 checkpointer）。
+
+    必须复用同一个实例才能跨 HTTP 请求恢复 interrupt() 暂停的图。
+    MemorySaver 在内存中保存 checkpoint 快照，供中断后恢复使用。
+
+    Returns:
+        编译后的 LangGraph 图实例（模块级缓存）。
+    """
+    global _agent_graph
+    if _agent_graph is None:
+        _agent_graph = build_agent_graph()
+    return _agent_graph
 
 
 # =============================================================================
@@ -429,8 +683,8 @@ def _build_system_prompt(state: AgentState) -> str:
         "8. 最终用中文给出清晰完整的总结回答\n"
         "9. 如果工具返回错误，分析原因并尝试换一种方式解决\n"
         "10. 如果用户要求插入、更新或删除数据，使用 execute_sql 工具执行写操作。"
-        "写操作仅在当前连接用户具有 admin 权限时才能执行成功，"
-        "如被安全策略拦截请告知用户权限不足\n"
+        "写操作执行前系统会请求用户确认，如被用户拒绝请告知用户操作已取消。"
+        "如被安全策略拦截（权限不足），请告知用户当前角色的限制。\n"
         "## 对话历史\n"
         f"{conversation_history}"
     )

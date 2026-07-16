@@ -10,6 +10,7 @@
  */
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import type { StoreMessage } from '@/stores/chat'
+import { useChatStore } from '@/stores/chat'
 import SqlBlock from '@/components/sql/SqlBlock.vue'
 import ResultTable from '@/components/sql/ResultTable.vue'
 import ErrorCard from '@/components/common/ErrorCard.vue'
@@ -33,6 +34,14 @@ const props = withDefaults(
     isInCard: false,
   },
 )
+
+const chatStore = useChatStore()
+
+/** 判断当前 tool_call 是否正在等待用户审批 */
+const isWaitingApproval = computed(() => {
+  if (!chatStore.pendingConfirm || props.message.type !== 'tool_call' || !props.message.toolCallId) return false
+  return chatStore.pendingConfirm.writes.some(w => w.tool_call_id === props.message.toolCallId)
+})
 
 // ─── thinking 计时器 ───
 const thinkingElapsed = ref(0)
@@ -148,9 +157,20 @@ const showCursor = computed(() => {
         <div class="tool-call-card">
           <div class="tool-call-header">
             <div class="tool-call-left">
+              <!-- 等待审批图标（时钟）— 优先于 running 状态显示 -->
+              <svg
+                v-if="isWaitingApproval"
+                class="tool-call-icon waiting"
+                width="14" height="14" viewBox="0 0 24 24" fill="none"
+                stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                stroke-linejoin="round"
+              >
+                <circle cx="12" cy="12" r="10"/>
+                <polyline points="12 6 12 12 16 14"/>
+              </svg>
               <!-- 加载中旋转图标 -->
               <svg
-                v-if="message.stepStatus === 'running'"
+                v-else-if="message.stepStatus === 'running'"
                 class="tool-call-spinner"
                 width="14" height="14" viewBox="0 0 24 24" fill="none"
                 stroke="currentColor" stroke-width="2.5"
@@ -179,7 +199,8 @@ const showCursor = computed(() => {
                 <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z" />
               </svg>
               <span class="tool-call-name">
-                <template v-if="message.stepStatus === 'running'">正在调用工具：</template>
+                <template v-if="isWaitingApproval">等待用户审批：</template>
+                <template v-else-if="message.stepStatus === 'running'">正在调用工具：</template>
                 <template v-else-if="message.stepStatus === 'done'">已完成调用：</template>
                 <template v-else>调用工具：</template>
                 <strong>{{ message.tool }}</strong>
@@ -465,6 +486,10 @@ const showCursor = computed(() => {
   color: var(--color-success);
 }
 
+.tool-call-icon.waiting {
+  color: var(--confirm-accent);
+}
+
 .tool-call-name {
   font-size: 13px;
   color: var(--chat-tool-text);
@@ -474,6 +499,18 @@ const showCursor = computed(() => {
 .tool-call-name strong {
   font-weight: 600;
   color: var(--chat-tool-label);
+}
+
+.tool-call-stage {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 500;
+  color: var(--text-tertiary);
+  background: var(--bg-surface);
+  padding: 1px 7px;
+  border-radius: 10px;
+  margin-left: 6px;
+  white-space: nowrap;
 }
 
 .tool-call-duration {

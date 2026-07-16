@@ -30,6 +30,7 @@ import structlog
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
 from fastapi.responses import StreamingResponse
 from langchain_core.messages import HumanMessage
+from langchain_core.runnables import RunnableConfig
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -62,6 +63,9 @@ _running_tasks: dict[str, asyncio.Task] = {}
 # 活跃会话的目标数据库适配器连接信息（session_id → dict）
 # 用于取消时执行 KILL QUERY 和回滚
 _session_adapter_info: dict[str, dict[str, Any]] = {}
+# 中断会话的思考过程缓存（session_id → {reasoning_parts, thinking_steps}）
+# confirm_node interrupt() 时由初始流保存，恢复流读取后清除
+_interrupted_thinking: dict[str, dict[str, Any]] = {}
 
 
 # =============================================================================
@@ -524,14 +528,15 @@ async def _stream_events(
             )
             set_connection_id(body.connection_id)
 
-            # 持久化用户消息
-            await _save_message(
-                db,
-                session.id,
-                "user",
-                body.message,
-                message_type=body.mode,
-            )
+            # 持久化用户消息（恢复请求不创建新消息，已在第一段流中保存）
+            if not body.resume:
+                await _save_message(
+                    db,
+                    session.id,
+                    "user",
+                    body.message,
+                    message_type=body.mode,
+                )
 
             # ── 获取会话历史（最近 10 条，用于记忆上下文） ──
             conversation_history = await _build_conversation_history(
@@ -569,25 +574,53 @@ async def _stream_events(
                     "ssl_ca_cert": conn_config.get("ssl_ca_cert"),
                 }
 
-            # ========== Step 3: 构建 AgentState + 执行 LangGraph 图 ==========
-            # 引入图构建
-            from app.agent.graph import build_agent_graph
+            # ========== Step 3: 构建/恢复 AgentState + 执行 LangGraph 图 ==========
+            from app.agent.graph import get_agent_graph
+            from langgraph.types import Command
 
-            run_id = f"run_{uuid4().hex[:12]}"
-            initial_state: AgentState = {
-                "messages": [HumanMessage(content=body.message)],
-                "sse_events": [],
-                "user_message": body.message,
-                "connection_id": body.connection_id,
-                "session_id": session.id,
-                "password": body.password,
-                "conversation_history": conversation_history,
-                "conn_config": conn_config,
-                "run_id": run_id,
-                "trace_iterations": [],
-            }
+            graph = get_agent_graph()
+            config: RunnableConfig = {"configurable": {"thread_id": session.id}}
 
-            graph = build_agent_graph()
+            if body.resume:
+                # ── 恢复请求 ──
+                # 用户已对写操作做出确认/拒绝决策，通过 Command(resume=...) 恢复图
+                run_id = f"run_{uuid4().hex[:12]}"
+                resume_value = {
+                    "approved_tool_call_ids": body.resume.approved_tool_call_ids,
+                    "denied_tool_call_ids": body.resume.denied_tool_call_ids,
+                }
+                logger.info(
+                    "恢复已中断的图",
+                    session_id=session.id,
+                    approved=len(resume_value["approved_tool_call_ids"]),
+                    denied=len(resume_value["denied_tool_call_ids"]),
+                )
+                _stream = graph.astream(
+                    Command(resume=resume_value),
+                    config=config,
+                    stream_mode=["updates", "messages"],
+                )
+            else:
+                # ── 初始请求 ──
+                run_id = f"run_{uuid4().hex[:12]}"
+                initial_state: AgentState = {
+                    "messages": [HumanMessage(content=body.message)],
+                    "sse_events": [],
+                    "user_message": body.message,
+                    "connection_id": body.connection_id,
+                    "session_id": session.id,
+                    "password": body.password,
+                    "conversation_history": conversation_history,
+                    "conn_config": conn_config,
+                    "run_id": run_id,
+                    "trace_iterations": [],
+                }
+                _stream = graph.astream(
+                    initial_state,
+                    config=config,
+                    stream_mode=["updates", "messages"],
+                )
+
             # accumulated_state：累积各节点状态增量（final_answer、trace_iterations 等）
             # 不同于 "values" 模式的完整状态，"updates" 模式仅返回每个节点的增量
             accumulated_state: dict[str, Any] = {}
@@ -611,17 +644,27 @@ async def _stream_events(
             # 保留所有字段用于会话切换后重建思考面板
             thinking_steps_accumulator: list[dict[str, Any]] = []
 
+            # 恢复请求时：从中断缓存恢复思考过程（优先）或 checkpoint 兜底
+            if body.resume:
+                pre = _interrupted_thinking.pop(session.id, None)
+                if pre:
+                    reasoning_content_parts = pre["reasoning_parts"]
+                    thinking_steps_accumulator = pre["thinking_steps"]
+                else:
+                    # 兜底：缓存丢失时从 checkpoint 恢复
+                    pre_state = await graph.aget_state(config)
+                    if pre_state and pre_state.values:
+                        for ev in pre_state.values.get("sse_events", []):
+                            if ev.get("type") in ("tool_call", "tool_result", "sql"):
+                                thinking_steps_accumulator.append(ev)
+
             # 使用 stream_mode=["updates", "messages"] 双通道流式：
             # "updates" → 每个节点执行后的状态增量 {node_name: state_delta}
             # "messages" → (AIMessageChunk, metadata) 逐 token 流
             # config 传入 thread_id 用于 MemorySaver checkpoint 追踪
             # 注意：LangGraph astream 在联合 stream_mode 时可能返回 2 元组 (mode, data)
             # 或 3 元组 (namespace, mode, data)，取决于是否有子图
-            async for stream_item in graph.astream(
-                initial_state,
-                stream_mode=["updates", "messages"],
-                config={"configurable": {"thread_id": session.id}},
-            ):
+            async for stream_item in _stream:
                 # ── 解析 astream 输出（兼容 2 元组和 3 元组） ──
                 if len(stream_item) == 3:
                     _namespace, mode, data = stream_item
@@ -688,6 +731,14 @@ async def _stream_events(
                 updates: dict[str, dict[str, Any]] = data  # type: ignore[assignment]
                 completed = False
                 for node_name, node_output in updates.items():
+                    # 防御：node_output 可能为 None（LangGraph 内部节点如 __start__）
+                    if node_output is None:
+                        continue
+                    # 防御：interrupt() 后 LangGraph yield {"__interrupt__": (Interrupt,)}
+                    # 值为 tuple，不能当 dict 处理，通过 post-loop get_state 检测中断
+                    if node_name == "__interrupt__":
+                        continue
+
                     # 检查取消信号（在每个节点增量处理后检查）
                     if cancel_event.is_set():
                         logger.info(
@@ -716,7 +767,9 @@ async def _stream_events(
                             # 累积 tool_call / tool_result / sql 用于持久化重建思考面板
                             if msg.get("type") in ("tool_call", "tool_result", "sql"):
                                 thinking_steps_accumulator.append(msg)
-                    emitted_count = len(sse_events)
+                    # 节点可能返回空 dict（如 confirm_node 透传），此时不重置 emitted_count
+                    if sse_events:
+                        emitted_count = len(sse_events)
 
                     # 累积状态增量（跳过 messages 和 sse_events：
                     # messages 由 LangGraph add_messages reducer 管理，
@@ -768,6 +821,33 @@ async def _stream_events(
 
                 if completed:
                     break
+
+            # ========== Step 3b: 中断检测（仅初始请求） ==========
+            # 当 confirm_node 调用 interrupt() 后，astream 正常结束，图被暂停。
+            # 检查 graph state 中的 interrupts 列表，如有则发射 confirm_required 事件。
+            graph_interrupted = False
+            if not body.resume:
+                state_snapshot = graph.get_state(config)
+                if state_snapshot and state_snapshot.interrupts:
+                    graph_interrupted = True
+                    # 缓存中断前的思考过程，供恢复流完整持久化
+                    _interrupted_thinking[session.id] = {
+                        "reasoning_parts": list(reasoning_content_parts),
+                        "thinking_steps": list(thinking_steps_accumulator),
+                    }
+                    for interrupt_data in state_snapshot.interrupts:
+                        payload = interrupt_data.value
+                        logger.info(
+                            "图被中断，发送确认请求",
+                            session_id=session.id,
+                            writes=len(payload.get("writes", [])),
+                        )
+                        yield format_sse(payload)
+
+            if graph_interrupted:
+                # 图被中断：不保存助手消息、不发 done 事件
+                # 等待前端通过 resume 请求恢复
+                return
 
             # ========== Step 4: 保存助手消息 ==========
             # 不再拼接 result 事件摘要（result 事件已移除），
@@ -861,6 +941,9 @@ async def _stream_events(
             _active_streams.pop(body.session_id, None)
             _running_tasks.pop(body.session_id, None)
             _session_adapter_info.pop(body.session_id, None)
+            # 恢复流结束时清理中断缓存（初始流中断时不清理，留给恢复流读取）
+            if body.resume:
+                _interrupted_thinking.pop(body.session_id, None)
         if db:
             await db.close()
         logger.info("SSE 流结束", session_id=session.id if session else None)
@@ -991,6 +1074,7 @@ async def cancel_chat(
     # 清理可能残留的追踪数据
     _active_streams.pop(session_id, None)
     _session_adapter_info.pop(session_id, None)
+    _interrupted_thinking.pop(session_id, None)
 
     logger.info("====== 操作取消：完成 ======", session_id=session_id)
     # AC-1: 返回 204 No Content（无响应体）

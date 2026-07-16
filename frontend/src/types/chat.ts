@@ -289,6 +289,21 @@ export type SSEEvent =
   | DoneEvent
   | StageChangeEvent
 
+/** 写操作确认请求事件（来自 confirm_node interrupt） */
+export interface ConfirmRequiredEvent {
+  type: 'confirm_required'
+  /** 需要用户确认的写操作列表 */
+  writes: Array<{
+    tool_call_id: string
+    tool: string
+    sql: string
+  }>
+  /** 同批次中无需确认的只读工具数量 */
+  safe_tool_count: number
+  /** 当前会话 ID（供恢复请求使用） */
+  session_id: string
+}
+
 /** SSE 事件回调映射 */
 export interface SSEEventCallbacks {
   onThinking?: (event: ThinkingEvent) => void
@@ -302,6 +317,7 @@ export interface SSEEventCallbacks {
   onError?: (event: ErrorEvent) => void
   onStageChange?: (event: StageChangeEvent) => void
   onDone?: (event: DoneEvent) => void
+  onConfirmRequired?: (event: ConfirmRequiredEvent) => void
   onDisconnect?: (reason: string) => void
   onTimeout?: () => void
 }
@@ -316,6 +332,11 @@ export interface StreamChatRequest {
   context?: {
     selected_table?: string
     user_role?: string
+  }
+  /** 中断恢复请求（写操作确认后恢复已暂停的图） */
+  resume?: {
+    approved_tool_call_ids: string[]
+    denied_tool_call_ids: string[]
   }
 }
 

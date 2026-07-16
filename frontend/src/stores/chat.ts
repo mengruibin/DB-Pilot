@@ -16,7 +16,7 @@ import { useConnectionStore } from '@/stores/connection'
 import { getSessions, getSessionMessages, renameSession as apiRenameSession, deleteSession as apiDeleteSession } from '@/api/session'
 import type { Session, Message } from '@/types/chat'
 import type { FindingSeverity } from '@/types/report'
-import type { ThinkingEvent, ReasoningEvent, TokenEvent, ToolCallEvent, ToolResultEvent, SqlEvent, ResultEvent, TextEvent, ErrorEvent, DoneEvent, StageChangeEvent } from '@/types/chat'
+import type { ThinkingEvent, ReasoningEvent, TokenEvent, ToolCallEvent, ToolResultEvent, SqlEvent, ResultEvent, TextEvent, ErrorEvent, DoneEvent, StageChangeEvent, ConfirmRequiredEvent } from '@/types/chat'
 
 // ─── 内部消息类型（Store 展示用） ───
 
@@ -79,7 +79,7 @@ export interface StoreMessage {
   toolArgs?: Record<string, unknown>
   displayText?: string
   durationMs?: number
-  stepStatus?: 'running' | 'done' | 'error'
+  stepStatus?: 'running' | 'done' | 'error' | 'waiting_approval'
   /** 安全护栏检查结果（Agent 架构升级后新增） */
   safetyChecksPassed?: boolean
 
@@ -196,6 +196,16 @@ export const useChatStore = defineStore('chat', () => {
   let msgCounter = 0
   // 内部：tool_call_id → tool_call message 快速查找表（并行安全匹配用）
   const toolCallMap = new Map<string, StoreMessage>()
+  /** 当前待用户确认的写操作（非空时显示确认对话框） */
+  const pendingConfirm = ref<{
+    writes: Array<{ tool_call_id: string; tool: string; sql: string }>
+  } | null>(null)
+
+  /** SSE 流是否因写操作确认而中断（等待用户决策） */
+  const isAwaitingConfirmation = computed(() => pendingConfirm.value !== null)
+
+  // 内部：写操作确认超时计时器
+  let confirmTimeoutId: ReturnType<typeof setTimeout> | null = null
   // 内部：SSE composable 实例
   const sse = useSSE()
 
@@ -426,39 +436,50 @@ export const useChatStore = defineStore('chat', () => {
   // ═══════════════════════════════════════════════════
 
   /**
-   * 发送消息并启动 SSE 流
+   * 发送消息并启动 SSE 流。
    *
    * @param connectionId 目标连接 ID
    * @param text         用户消息文本
    * @param mode         输入模式
+   * @param resume       中断恢复请求（可选，非空时 text 可为空）
    */
-  function sendMessage(connectionId: string, text: string, mode: InputMode): void {
+  function sendMessage(connectionId: string, text: string, mode: InputMode, resume?: { approved_tool_call_ids: string[]; denied_tool_call_ids: string[] }): void {
     if (isStreaming.value) return
     if (!connectionId) return
 
-    // 1. 添加用户消息
-    addUserMessage(text)
+    // 恢复请求时跳过消息管理（不添加用户消息、不重置状态、不加 waiting 占位）
+    if (resume) {
+      isStreaming.value = true
+      sseError.value = null
+    } else {
+      // 1. 添加用户消息
+      addUserMessage(text)
 
-    // 重置双区渲染状态，记录 turn 起始索引供 postProcessTurn 分组使用
-    currentStage.value = 'thinking'
-    turnStartIndex.value = messages.value.length - 1
-    // 清空上一轮的 tool_call 快速查找表
-    toolCallMap.clear()
+      // 重置双区渲染状态，记录 turn 起始索引供 postProcessTurn 分组使用
+      currentStage.value = 'thinking'
+      turnStartIndex.value = messages.value.length - 1
+      // 清空上一轮的 tool_call 快速查找表
+      toolCallMap.clear()
 
-    // 2. 重置流式状态 + 插入 waiting 占位消息
-    streamingText.value = ''
-    streamingMessageId.value = null
-    streamingReasoningText.value = ''
-    streamingReasoningMessageId.value = null
-    hasReceivedFirstEvent.value = false
-    messages.value.push({
-      id: nextMsgId(),
-      sessionId: currentSessionId.value ?? '',
-      role: 'assistant',
-      type: 'waiting',
-      content: '',
-      createdAt: new Date().toISOString(),
-    })
+      // 2. 重置流式状态 + 插入 waiting 占位消息
+      streamingText.value = ''
+      streamingMessageId.value = null
+      streamingReasoningText.value = ''
+      streamingReasoningMessageId.value = null
+      hasReceivedFirstEvent.value = false
+      messages.value.push({
+        id: nextMsgId(),
+        sessionId: currentSessionId.value ?? '',
+        role: 'assistant',
+        type: 'waiting',
+        content: '',
+        createdAt: new Date().toISOString(),
+      })
+
+      // 3. 设置流式状态
+      isStreaming.value = true
+      sseError.value = null
+    }
 
     // 3. 设置流式状态
     isStreaming.value = true
@@ -476,6 +497,7 @@ export const useChatStore = defineStore('chat', () => {
         mode,
         session_id: currentSessionId.value,
         password,  // AGENTS.md §安全与合规红线：密码仅存于内存，每次请求传入
+        ...(resume ? { resume } : {}),
       },
       {
         // ── token（优化方案：LLM 逐 token 流式输出） ──
@@ -721,8 +743,46 @@ export const useChatStore = defineStore('chat', () => {
           isStreaming.value = false
           sseError.value = '响应超时（120s 无消息）'
         },
+
+        // ── confirm_required（写操作确认） ──
+        onConfirmRequired: (event: ConfirmRequiredEvent) => {
+          pendingConfirm.value = { writes: event.writes }
+          // 保存会话 ID 供恢复请求使用（中断时不触发 onDone，session_id 无法更新）
+          currentSessionId.value = event.session_id
+
+          // 60s 超时自动拒绝
+          confirmTimeoutId = setTimeout(() => {
+            if (pendingConfirm.value) {
+              const allDenied = pendingConfirm.value.writes.map(w => w.tool_call_id)
+              respondToConfirm({
+                approved_tool_call_ids: [],
+                denied_tool_call_ids: allDenied,
+              })
+            }
+          }, 60_000)
+        },
       }
     )
+  }
+
+  /**
+   * 响应用户对写操作的确认/拒绝决策，发起恢复请求
+   */
+  async function respondToConfirm(decision: {
+    approved_tool_call_ids: string[]
+    denied_tool_call_ids: string[]
+  }): Promise<void> {
+    if (!pendingConfirm.value) return
+    pendingConfirm.value = null
+    if (confirmTimeoutId) {
+      clearTimeout(confirmTimeoutId)
+      confirmTimeoutId = null
+    }
+
+    // 临时放行 isStreaming 检查，通过 sendMessage 发起恢复 SSE 流
+    const connectionStore = useConnectionStore()
+    isStreaming.value = false
+    sendMessage(connectionStore.activeId ?? '', '', inputMode.value, decision)
   }
 
   /**
@@ -730,6 +790,16 @@ export const useChatStore = defineStore('chat', () => {
    * 发送 POST /api/chat/cancel 并关闭 SSE 连接
    */
   async function cancelStreaming(): Promise<void> {
+    // 如果正在等待用户确认写操作，先自动拒绝
+    if (pendingConfirm.value) {
+      const allDenied = pendingConfirm.value.writes.map(w => w.tool_call_id)
+      await respondToConfirm({
+        approved_tool_call_ids: [],
+        denied_tool_call_ids: allDenied,
+      })
+      return
+    }
+
     if (!isStreaming.value) return
 
     // 清理 waiting 占位和流式累加状态
@@ -1055,12 +1125,17 @@ export const useChatStore = defineStore('chat', () => {
     messagesLoading,
     sessionFetchError,
 
+    // 写操作确认状态
+    pendingConfirm,
+    isAwaitingConfirmation,
+
     // getters
     currentSession,
     lastAssistantMessage,
 
     // actions
     sendMessage,
+    respondToConfirm,
     cancelStreaming,
     clearMessages,
     setInputMode,

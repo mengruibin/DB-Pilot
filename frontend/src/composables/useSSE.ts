@@ -132,6 +132,9 @@ export function useSSE() {
       case 'stage_change':
         userCallbacks?.onStageChange?.(payload as any)
         break
+      case 'confirm_required':
+        userCallbacks?.onConfirmRequired?.(payload as any)
+        break
       default:
         console.warn('[SSE] 未注册的事件类型:', type)
     }

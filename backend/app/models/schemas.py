@@ -162,6 +162,22 @@ class ConnectionUpdateRequest(BaseModel):
     extra_params: dict[str, Any] | None = None
 
 
+class ResumeRequest(BaseModel):
+    """LangGraph 中断恢复请求体。
+
+    用户对写操作确认/拒绝后，前端通过此结构恢复已中断的图执行。
+    """
+
+    approved_tool_call_ids: list[str] = Field(
+        default_factory=list,
+        description="用户批准的 tool_call_id 列表",
+    )
+    denied_tool_call_ids: list[str] = Field(
+        default_factory=list,
+        description="用户拒绝的 tool_call_id 列表",
+    )
+
+
 class ChatRequest(BaseModel):
     """SSE 对话流请求体（api-contract §1.2 POST /api/chat/stream）。"""
 
@@ -170,10 +186,9 @@ class ChatRequest(BaseModel):
         description="目标数据库连接 ID",
     )
     message: str = Field(
-        ...,
-        min_length=1,
+        default="",
         max_length=4096,
-        description="用户消息",
+        description="用户消息。恢复请求时可为空",
         examples=["最近一小时慢查询有哪些？"],
     )
     mode: Literal["natural_language", "sql_editor"] = Field(
@@ -192,6 +207,10 @@ class ChatRequest(BaseModel):
     context: dict[str, Any] | None = Field(
         default=None,
         description="前端附加上下文，如 {selected_table, user_role}",
+    )
+    resume: ResumeRequest | None = Field(
+        default=None,
+        description="中断恢复请求。非空时表示恢复已中断的图执行，message 可为空",
     )
 
 

@@ -302,7 +302,7 @@ async def describe_table(
 # =============================================================================
 
 
-@tool(extras={"needs_sql_audit": True, "needs_performance_check": True})
+@tool(extras={"needs_sql_audit": True, "needs_performance_check": True, "needs_write_confirmation": True})
 async def execute_sql(
     connection_id: Annotated[str, InjectedToolArg],
     db_type: Annotated[str, InjectedToolArg],
