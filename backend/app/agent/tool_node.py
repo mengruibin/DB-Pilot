@@ -25,7 +25,12 @@ from typing import Any
 import structlog
 from langchain_core.messages import AIMessage, ToolMessage
 
-from app.agent.safety import SQLAuditCheck, PerformanceCheck, run_safety_checks
+from app.agent.safety import (
+    PerformanceCheck,
+    RowEstimationCheck,
+    SQLAuditCheck,
+    run_safety_checks,
+)
 from app.agent.state import AgentState
 from app.config import settings
 
@@ -54,6 +59,12 @@ def _resolve_checks(tool_fn: Any) -> list:
         checks.append(SQLAuditCheck())
     if extras.get("needs_performance_check"):
         checks.append(PerformanceCheck())
+    if extras.get("needs_row_estimation"):
+        checks.append(RowEstimationCheck())
+        logger.debug(
+            "安全检查链已注册 RowEstimationCheck",
+            tool_name=tool_fn.name,
+        )
     return checks
 
 
@@ -136,7 +147,10 @@ async def _run_one_tool(
 
         # ── 4. 安全护栏检查 ──
         safety_result = await run_safety_checks(
-            tool_name, tool_args, conn_config, checks=applicable_checks,
+            tool_name,
+            tool_args,
+            conn_config,
+            checks=applicable_checks,
         )
         if safety_result.blocked:
             logger.warning(
@@ -176,6 +190,11 @@ async def _run_one_tool(
         # ── 5. 执行工具 ──
         try:
             result = await tool_fn.ainvoke(tool_args)
+            # ── 5.5. LLM 上下文窗口保护：截断大结果集 ──
+            if isinstance(result, dict) and "rows" in result:
+                from app.engine.explain_estimator import truncate_result_for_llm
+
+                result = truncate_result_for_llm(result)
         except Exception as exc:
             logger.error(
                 "工具执行异常",
@@ -311,10 +330,7 @@ async def safe_tools_node(state: AgentState) -> dict[str, Any]:
     # 并发执行所有工具
     semaphore = asyncio.Semaphore(_MAX_CONCURRENT_TOOLS)
     results = await asyncio.gather(
-        *[
-            _run_one_tool(tc, conn_config, run_id, iteration, semaphore)
-            for tc in tool_calls
-        ],
+        *[_run_one_tool(tc, conn_config, run_id, iteration, semaphore) for tc in tool_calls],
         return_exceptions=True,
     )
 

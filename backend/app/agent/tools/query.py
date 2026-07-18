@@ -246,12 +246,14 @@ async def describe_table(
             try:
                 columns = await adapter.get_columns(database, tbl)
                 indexes = await adapter.get_indexes(database, tbl)
-                tables_data.append({
-                    "table_name": tbl,
-                    "columns": columns,
-                    "indexes": indexes,
-                    "summary": f"{tbl}：{len(columns)} 列, {len(indexes)} 个索引",
-                })
+                tables_data.append(
+                    {
+                        "table_name": tbl,
+                        "columns": columns,
+                        "indexes": indexes,
+                        "summary": f"{tbl}：{len(columns)} 列, {len(indexes)} 个索引",
+                    }
+                )
             except Exception as tbl_exc:
                 # 单表失败已隔离，不影响其他表继续查询
                 logger.warning(
@@ -260,20 +262,20 @@ async def describe_table(
                     table_name=tbl,
                     error=str(tbl_exc)[:200],
                 )
-                tables_data.append({
-                    "table_name": tbl,
-                    "columns": [],
-                    "indexes": [],
-                    "error": str(tbl_exc)[:200],
-                    "summary": f"{tbl}：查询失败 - {str(tbl_exc)[:100]}",
-                })
+                tables_data.append(
+                    {
+                        "table_name": tbl,
+                        "columns": [],
+                        "indexes": [],
+                        "error": str(tbl_exc)[:200],
+                        "summary": f"{tbl}：查询失败 - {str(tbl_exc)[:100]}",
+                    }
+                )
 
         await adapter.disconnect()
 
         total_tables = len(tables_data)
-        successful = sum(
-            1 for t in tables_data if t.get("columns") or t.get("indexes")
-        )
+        successful = sum(1 for t in tables_data if t.get("columns") or t.get("indexes"))
         logger.info(
             "工具执行成功",
             tool="describe_table",
@@ -302,7 +304,14 @@ async def describe_table(
 # =============================================================================
 
 
-@tool(extras={"needs_sql_audit": True, "needs_performance_check": True, "needs_write_confirmation": True})
+@tool(
+    extras={
+        "needs_sql_audit": True,
+        "needs_performance_check": True,
+        "needs_write_confirmation": True,
+        "needs_row_estimation": True,
+    }
+)
 async def execute_sql(
     connection_id: Annotated[str, InjectedToolArg],
     db_type: Annotated[str, InjectedToolArg],
