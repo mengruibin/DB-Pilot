@@ -432,7 +432,7 @@ denied=[]          denied=[tc3]      denied=[tc1,tc3]
        response_format="content_and_artifact",
        extras={
            "needs_sql_audit": True,
-           "needs_performance_check": True,
+           "needs_row_estimation": True,
            "needs_write_confirmation": True,   # 新增：写操作需要用户确认
        },
    )

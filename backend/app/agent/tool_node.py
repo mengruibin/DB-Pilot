@@ -26,7 +26,6 @@ import structlog
 from langchain_core.messages import AIMessage, ToolMessage
 
 from app.agent.safety import (
-    PerformanceCheck,
     RowEstimationCheck,
     SQLAuditCheck,
     run_safety_checks,
@@ -57,8 +56,6 @@ def _resolve_checks(tool_fn: Any) -> list:
     checks: list = []
     if extras.get("needs_sql_audit"):
         checks.append(SQLAuditCheck())
-    if extras.get("needs_performance_check"):
-        checks.append(PerformanceCheck())
     if extras.get("needs_row_estimation"):
         checks.append(RowEstimationCheck())
         logger.debug(

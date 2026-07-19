@@ -7,7 +7,7 @@ DB-Pilot 目前对 SQL 执行无任何行数/资源限制，风险：
 2. **应用层面**：全量结果加载到内存，可能 OOM
 3. **LLM 层面**：百万行 JSON 塞进 ToolMessage，上下文窗口溢出导致调用失败
 
-现有 `PerformanceCheck` 仅做正则静态分析（检测 `SELECT *`、缺少 `LIMIT`），无法感知真实数据量。现有 `diagnosis.py` 中 `BOTTLENECK_PATTERNS` 已有关键词匹配的模式识别能力，但仅用于 LLM 诊断分析，不参与安全拦截。
+之前 `PerformanceCheck` 仅做正则静态分析（检测 `SELECT *`、缺少 `LIMIT`），无法感知真实数据量。已在后续迭代中移除，由 `RowEstimationCheck` 独立负责安全评估。
 
 本方案设计一套**多维指标提取 + 规则引擎评估 + LLM 上下文保护**的三阶段防护体系。
 
@@ -18,7 +18,7 @@ DB-Pilot 目前对 SQL 执行无任何行数/资源限制，风险：
 ```
 execute_sql 被 LLM 调用
  │
- ├─ Phase 1: PerformanceCheck（现有，无 DB 开销）
+ ├─ Phase 1: [已移除] PerformanceCheck（静态文本分析，已被移除）
  │   └─ 静态文本分析 → 非阻断警告（SELECT * / 缺 LIMIT / WHERE 函数）
  │
  ├─ Phase 2: RowEstimationCheck（新增，一次 EXPLAIN 往返）
@@ -31,7 +31,7 @@ execute_sql 被 LLM 调用
  │   │   ├─ query_cost: 优化器成本
  │   │   └─ extra_operations: 额外操作（filesort/temp table）
  │   ├─ Step 4: evaluate(metrics) → ExplainDecision
- │   │   └─ 规则引擎逐条匹配，CRITICAL → 阻断，WARNING → 警告
+ │   │   └─ 规则引擎逐条匹配，CRITICAL → 阻断，其余 → LOW 放行
  │   └─ EXPLAIN 失败 → 降级放行（不阻断正常业务）
  │
  ├─ Phase 3: 实际执行（tool_fn.ainvoke）
@@ -121,7 +121,7 @@ Oracle Operation → access_pattern:
 # 修改需 Code Review。格式：
 #   (condition_fn, severity, message_template)
 # condition_fn 签名为 (ExplainMetrics) -> bool
-# severity: CRITICAL → 阻断 | WARNING → 警告
+# severity: CRITICAL → 阻断 | 其他 → 放行
 # =============================================================================
 
 # --- 规则用阈值常量 ---
@@ -313,8 +313,7 @@ def evaluate(metrics: ExplainMetrics) -> ExplainDecision:
     """对提取的指标执行规则评估。
 
     规则按优先级顺序匹配，首个命中即返回。
-    CRITICAL 规则优先于 WARNING 规则。
-    如果同时命中多条 WARNING，收集所有消息。
+    CRITICAL 规则命中即阻断，其余情况返回 LOW 放行。
 
     Returns:
         ExplainDecision(allowed, risk_level, reasons, metrics)
@@ -538,15 +537,14 @@ class RowEstimationCheck(SafetyCheck):
 **a) `_resolve_checks()` 增加映射（第 38-57 行）：**
 
 ```python
-from app.agent.safety import SQLAuditCheck, PerformanceCheck, RowEstimationCheck
+from app.agent.safety import SQLAuditCheck, RowEstimationCheck
 
 def _resolve_checks(tool_fn: Any) -> list:
     extras = getattr(tool_fn, "extras", None) or {}
     checks: list = []
     if extras.get("needs_sql_audit"):
         checks.append(SQLAuditCheck())
-    if extras.get("needs_performance_check"):
-        checks.append(PerformanceCheck())
+
     if extras.get("needs_row_estimation"):        # 新增
         checks.append(RowEstimationCheck())       # 新增
     return checks
@@ -570,7 +568,7 @@ def _resolve_checks(tool_fn: Any) -> list:
 ```python
 @tool(extras={
     "needs_sql_audit": True,
-    "needs_performance_check": True,
+    "needs_row_estimation": True,
     "needs_write_confirmation": True,
     "needs_row_estimation": True,  # 新增
 })
@@ -580,23 +578,7 @@ def _resolve_checks(tool_fn: Any) -> list:
 
 - `backend/app/config.py` — **不在 .env 中增加配置**，所有阈值硬编码于 `explain_estimator.py`
 - `backend/.env.example` — **不增加新配置项**
-- `backend/app/agent/safety.py` 中 `PerformanceCheck` — **保留不变**，继续作为零成本静态第一道防线
-
----
-
-## 六、PerformanceCheck 与新体系的互补关系
-
-| | PerformanceCheck | RowEstimationCheck |
-|---|---|---|
-| **定位** | 零成本第一道防线 | 精确第二道防线 |
-| **触发条件** | `needs_performance_check` extras | `needs_row_estimation` extras |
-| **开销** | 0（纯文本正则） | 1 次 EXPLAIN（~10-50ms） |
-| **检测能力** | `SELECT *`、缺 `LIMIT`、`WHERE func(col)` | 访问方式、实际行数、成本、filesort/temp、结果大小 |
-| **阻断能力** | 否（warning only） | 是（CRITICAL rule → block） |
-| **适用工具** | `execute_sql` | `execute_sql` |
-| **保留理由** | 即时反馈，不依赖 DB 连接，EXPLAIN 之前就能给出提示 | EXPLAIN 精确数据，能阻断真正的性能杀手 |
-
-两者在安全链中**顺序执行**：PerformanceCheck → RowEstimationCheck。前者给 LLM 快速性能提示，后者在真正执行前做精确拦截。
+- `backend/app/agent/safety.py` 中 `PerformanceCheck` — **已移除**，该功能无阻断效果，由 `RowEstimationCheck` 完全接管
 
 ---
 
@@ -616,7 +598,7 @@ def _resolve_checks(tool_fn: Any) -> list:
 | pg_plan_filter (PostgreSQL 扩展) | 基于 `total_cost` 的执行前阻断 | ✅ 成本阈值规则（R2） |
 | Metabase / DBeaver | 注入 LIMIT / 设置 maxRows 上限 | ✅ Phase 4 结果截断 |
 | qail-pg (Rust) | EXPLAIN 预检查（cost + rows + depth） | ✅ 多维评估架构 |
-| MCP 安全服务器（SafeDB, dbridge-mcp） | 分层防御：只读 + 行数上限 + EXPLAIN + 超时 | ✅ 多层防护（PerformanceCheck → EXPLAIN → 截断） |
+| MCP 安全服务器（SafeDB, dbridge-mcp） | 分层防御：只读 + 行数上限 + EXPLAIN + 超时 | ✅ 双层防护（EXPLAIN 阻断 + 结果截断） |
 
 ### 阈值参考值（行业校准）
 
@@ -655,9 +637,9 @@ TestEvaluate:
   test_r1_full_scan_allow → 全扫+3K行 → ALLOW（低于阈值）
   test_r3_huge_scan_block → 索引扫描+200K行 → CRITICAL
   test_r4_huge_result_block → 返回 50K 行 → CRITICAL
-  test_w1_full_scan_warn → 全扫+1K行 → WARNING
-  test_multiple_warnings → 命中多条 WARNING → 全部收集
-  test_priority_critical_over_warning → CRITICAL+WARNING → 只返回CRITICAL
+  test_full_scan_below_threshold_low → 全扫+1K行 → LOW
+  test_subcritical_risk_low → 多条规则触发均未达阈值 → LOW
+  test_critical_overrides_low → CRITICAL 先命中 → 阻断
   test_all_pass → INDEX_LOOKUP + 10行 → LOW
 
 TestTruncateResult:
@@ -698,7 +680,7 @@ cd backend && uv run uvicorn app.main:app --reload --port 8000
 | `backend/tests/test_explain_estimator.py` | **新增** | ~300 行：完整单元测试 |
 | `backend/app/config.py` | **不修改** | — |
 | `backend/.env.example` | **不修改** | — |
-| `backend/app/agent/safety.py` PerformanceCheck | **不修改** | 保留原样，互补共存 |
+| `backend/app/agent/safety.py` PerformanceCheck | **已移除** | 无阻断效果，由 RowEstimationCheck 完全接管 |
 
 ---
 
@@ -706,7 +688,7 @@ cd backend && uv run uvicorn app.main:app --reload --port 8000
 
 ## 方案简述
 
-在 SQL 执行前通过 EXPLAIN 获取多维度指标（访问方式、扫描行数、返回行数、查询成本、额外操作），用硬编码规则引擎逐条匹配评估，CRITICAL 规则命中即阻断执行并反馈 LLM 改写，WARNING 规则命中仅告警不阻断。同时在查询执行后对返回 LLM 的结果做行数+字符数双重截断，防止上下文窗口溢出。PerformanceCheck 保留不变作为零成本第一道静态防线。
+在 SQL 执行前通过 EXPLAIN 获取多维度指标（访问方式、扫描行数、返回行数、查询成本、额外操作），用硬编码规则引擎逐条匹配评估，CRITICAL 规则命中即阻断执行并反馈 LLM 改写（WARNING 级别已移除，仅保留 CRITICAL / LOW 二分类）。同时在查询执行后对返回 LLM 的结果做行数+字符数双重截断，防止上下文窗口溢出。
 
 ## 最终目标
 
@@ -715,7 +697,7 @@ cd backend && uv run uvicorn app.main:app --reload --port 8000
 3. **昂贵操作检测**：filesort + 大数据量 → 警告；临时表 + 大数据量 → 阻断
 4. **降级兜底**：EXPLAIN 执行/解析失败 → 警告但放行，不阻断正常业务
 5. **不依赖 .env**：所有阈值硬编码于 `explain_estimator.py`，修改走 Code Review
-6. **与现有体系兼容**：PerformanceCheck 保留，SQLAuditCheck 继续在前，三者顺序协作
+6. **简化护栏链**：SQLAuditCheck 在前审计，RowEstimationCheck 在后 EXPLAIN 评估，已移除无阻断效果的 PerformanceCheck
 7. **跨数据库统一**：MySQL / PostgreSQL / Oracle 输出归一化为 `ExplainMetrics` 同一结构
 
 ---
@@ -727,7 +709,7 @@ cd backend && uv run uvicorn app.main:app --reload --port 8000
 **具体执行**：
 - 创建文件 `backend/app/engine/explain_estimator.py`
 - 定义 `ExplainMetrics`：`access_pattern: str`, `estimated_rows_examined: int`, `estimated_rows_output: int`, `row_width_bytes: int`, `query_cost: float | None`, `extra_operations: list[str]`
-- 定义 `ExplainDecision`：`allowed: bool`, `risk_level: str ("LOW"/"WARNING"/"CRITICAL")`, `reasons: list[str]`, `metrics: ExplainMetrics`
+- 定义 `ExplainDecision`：`allowed: bool`, `risk_level: str ("LOW"/"CRITICAL")`, `reasons: list[str]`, `metrics: ExplainMetrics`
 - 添加模块级 docstring 说明职责
 
 **验收标准**：
@@ -853,22 +835,20 @@ cd backend && uv run uvicorn app.main:app --reload --port 8000
 
 ## 任务 6：规则引擎
 
-**描述**：定义 11 条规则（6 CRITICAL + 5 WARNING）+ evaluate() 函数。
+**描述**：定义 6 条 CRITICAL 规则 + evaluate() 函数（WARNING 规则已移除）。
 
 **具体执行**：
-- 定义阈值常量：`_FULL_SCAN_BLOCK_ROWS=5000`, `_FULL_SCAN_WARN_ROWS=500`, `_INDEX_SCAN_BLOCK_ROWS=100000`, `_INDEX_SCAN_WARN_ROWS=10000`, `_INDEX_LOOKUP_BLOCK_ROWS=500000`, `_RESULT_BLOCK_ROWS=10000`, `_RESULT_WARN_ROWS=500`, `_RESULT_BLOCK_BYTES=500000`, `_COST_BLOCK_RATIO=100.0`, `_FILESORT_WARN_ROWS=5000`, `_TEMPTABLE_BLOCK_ROWS=50000`
+- 定义阈值常量：`_FULL_SCAN_BLOCK_ROWS=5000`, `_INDEX_SCAN_BLOCK_ROWS=100000`, `_RESULT_BLOCK_ROWS=10000`, `_RESULT_BLOCK_BYTES=500000`, `_COST_BLOCK_RATIO=100.0`, `_TEMPTABLE_BLOCK_ROWS=50000`（WARNING 阈值已移除）
 - 定义 `_EVALUATION_RULES: list[dict]`，每条含 `id/severity/condition/message`
 - 实现 `evaluate(metrics: ExplainMetrics) -> ExplainDecision`
 - 实现 `_get_limit_for_rule(rule_id: str) -> int` 辅助函数
 - CRITICAL 命中 → 短路返回 blocked=True
-- WARNING 命中 → 收集全部消息
+- ~~WARNING 命中 → 收集全部消息~~（WARNING 规则已移除）
 - 无规则命中 → LOW 风险返回
 
 **验收标准**：
 - [ ] 6 条 CRITICAL 规则按优先级排列正确（R1→R6）
-- [ ] 5 条 WARNING 规则按优先级排列正确（W1→W5）
-- [ ] CRITICAL 优先于 WARNING 的短路行为
-- [ ] 多条 WARNING 同时触发时全部收集
+- [x] WARNING 规则已移除（仅保留 CRITICAL 阻断 / LOW 放行）
 - [ ] `evaluate()` 返回的 `ExplainDecision` 含 `metrics` 字段供上游日志记录
 - [ ] 所有阈值作为模块级 `_UPPER_CASE` 常量
 
@@ -915,7 +895,7 @@ cd backend && uv run uvicorn app.main:app --reload --port 8000
   - 创建临时适配器 → `adapter.explain(sql)`
   - 调用 `extract_metrics()` → `evaluate()`
   - CRITICAL → `SafetyResult(blocked=True, reason=详细阻断信息+评估详情)`
-  - WARNING → `SafetyResult(blocked=False, warnings=[...])`
+  - ~~WARNING → `SafetyResult(blocked=False, warnings=[...])`~~ **已移除**，仅保留 CRITICAL / LOW
   - LOW → `SafetyResult(blocked=False)`
   - 异常 → `SafetyResult(blocked=False, warnings=[降级放行])`
   - `finally` 中确保 `adapter.disconnect()`
@@ -960,10 +940,10 @@ cd backend && uv run uvicorn app.main:app --reload --port 8000
 **具体执行**：
 - 修改 `backend/app/agent/tools/query.py` 第 305 行
 - 在 `extras` 字典中增加 `"needs_row_estimation": True`
-- 确认不影响现有的 `needs_sql_audit`、`needs_performance_check`、`needs_write_confirmation`
+- 确认不影响现有的 `needs_sql_audit`、`needs_row_estimation`、`needs_write_confirmation`
 
 **验收标准**：
-- [ ] `execute_sql` extras 含 4 个 flag
+- [ ] `execute_sql` extras 含 4 个 flag（已移除 needs_performance_check）
 - [ ] `explain_query`（diagnosis.py）不添加此 flag
 - [ ] 其他工具不添加此 flag
 - [ ] `ruff check` 无报错
@@ -1000,7 +980,7 @@ cd backend && uv run uvicorn app.main:app --reload --port 8000
 - R1: FULL_SCAN + rows=3000 → 低于阈值 → 不命中 R1
 - R3: INDEX_SCAN + rows=200000 → CRITICAL
 - R4: rows_output=50000 → CRITICAL
-- W1: FULL_SCAN + rows=1000 → WARNING
+- ~~W1: FULL_SCAN + rows=1000 → WARNING~~（已移除，现在为 LOW）
 - 同时命中 W1+W3 → 收集 2 条警告
 - 同时命中 R1+W1 → 只返回 CRITICAL（短路）
 - INDEX_LOOKUP + rows=10 → LOW
@@ -1034,7 +1014,7 @@ cd backend && uv run uvicorn app.main:app --reload --port 8000
   1. 连接测试 DB，发送"查询所有订单"（目标大表）→ 被规则 R1 阻断，LLM 收到阻断原因后改写 SQL
   2. 发送"查询最近 10 笔订单" → 索引查找，LOW 风险，正常执行
   3. 发送 `SELECT * FROM <大表>` → 被 R1 或 R4 阻断
-- 验证 PerformanceCheck 仍正常输出警告（不因新增检查而失效）
+- ~~验证 PerformanceCheck 仍正常输出警告~~（已移除）
 - 验证 SQLAuditCheck 仍正常拦截 DDL（不因新增检查而失效）
 
 **验收标准**：
@@ -1042,7 +1022,7 @@ cd backend && uv run uvicorn app.main:app --reload --port 8000
 - [ ] `ruff check backend/app/` 0 报错
 - [ ] 大表全扫被阻断，阻断消息含 EXPLAIN 评估详情
 - [ ] 正常查询不被阻断，延迟增加 <50ms
-- [ ] PerformanceCheck 和 SQLAuditCheck 功能不受影响
+- [x] PerformanceCheck 已移除，SQLAuditCheck 功能不受影响
 
 **状态**：⬜ 未开始
 

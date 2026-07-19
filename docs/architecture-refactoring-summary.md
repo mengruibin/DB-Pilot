@@ -303,7 +303,7 @@
   │ ④ 安全护栏检查（仅执行声明需要的检查）               │
   │    run_safety_checks(tool_name, tool_args, checks)   │
   │    ├─ SQLAuditCheck（若声明 needs_sql_audit）         │
-  │    ├─ PerformanceCheck（若声明 needs_performance）    │
+  │    ├─ RowEstimationCheck（若声明 needs_row_estimation）│
   │    └─ 连接限额（全局，始终执行）                     │
   │                                                    │
   │    如果 blocked → 返回 ToolMessage(error)            │

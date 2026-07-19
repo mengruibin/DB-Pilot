@@ -722,25 +722,20 @@ def extract_metrics(
 # --- 阈值常量（硬编码，修改需 Code Review）---
 # 全表扫描：最危险，阈值最保守
 _FULL_SCAN_BLOCK_ROWS = 5_000
-_FULL_SCAN_WARN_ROWS = 500
 
 # 索引扫描：有索引加持，阈值放宽
 _INDEX_SCAN_BLOCK_ROWS = 100_000
-_INDEX_SCAN_WARN_ROWS = 10_000
 
 # 索引查找：精准访问，几乎不设限
-_INDEX_LOOKUP_BLOCK_ROWS = 500_000
 
 # LLM 上下文窗口保护
 _RESULT_BLOCK_ROWS = 10_000
-_RESULT_WARN_ROWS = 500
 _RESULT_BLOCK_BYTES = 500_000
 
 # 成本
 _COST_BLOCK_RATIO = 100.0
 
 # 额外操作威胁
-_FILESORT_WARN_ROWS = 5_000
 _TEMPTABLE_BLOCK_ROWS = 50_000
 
 
@@ -760,11 +755,6 @@ def _get_limit_for_rule(rule_id: str) -> int:
         "R4_HUGE_RESULT_ROWS": _RESULT_BLOCK_ROWS,
         "R5_HUGE_RESULT_BYTES": _RESULT_BLOCK_BYTES,
         "R6_TEMPTABLE_LARGE": _TEMPTABLE_BLOCK_ROWS,
-        "W1_FULL_SCAN_MODERATE": _FULL_SCAN_WARN_ROWS,
-        "W2_INDEX_SCAN_MODERATE": _INDEX_SCAN_WARN_ROWS,
-        "W3_RESULT_ROWS_MODERATE": _RESULT_WARN_ROWS,
-        "W4_FILESORT_LARGE": _FILESORT_WARN_ROWS,
-        "W5_LOOKUP_HUGE": _INDEX_LOOKUP_BLOCK_ROWS,
     }
     return _limit_map.get(rule_id, 0)
 
@@ -844,68 +834,21 @@ _EVALUATION_RULES: list[dict] = [
             "可能导致磁盘 I/O 溢出。建议：优化 GROUP BY/DISTINCT，添加合适索引。"
         ),
     },
-    # ═══════ WARNING 级别（仅警告，不阻断）═══════
-    # W1: 全表扫描 + 中等行数
-    {
-        "id": "W1_FULL_SCAN_MODERATE",
-        "severity": "WARNING",
-        "condition": lambda m: (
-            m.access_pattern == "FULL_SCAN" and m.estimated_rows_examined > _FULL_SCAN_WARN_ROWS
-        ),
-        "message": "全表扫描 {rows:,} 行，建议检查是否有可用索引。",
-    },
-    # W2: 索引扫描 + 较多行数
-    {
-        "id": "W2_INDEX_SCAN_MODERATE",
-        "severity": "WARNING",
-        "condition": lambda m: (
-            m.access_pattern == "INDEX_SCAN" and m.estimated_rows_examined > _INDEX_SCAN_WARN_ROWS
-        ),
-        "message": "索引扫描 {rows:,} 行，数据量较大，建议进一步缩小范围或使用 LIMIT。",
-    },
-    # W3: 结果行数偏多
-    {
-        "id": "W3_RESULT_ROWS_MODERATE",
-        "severity": "WARNING",
-        "condition": lambda m: m.estimated_rows_output > _RESULT_WARN_ROWS,
-        "message": "预估返回 {rows:,} 行，可能占用较多 LLM 上下文，建议添加 LIMIT。",
-    },
-    # W4: filesort + 一定数据量
-    {
-        "id": "W4_FILESORT_LARGE",
-        "severity": "WARNING",
-        "condition": lambda m: (
-            "filesort" in m.extra_operations and m.estimated_rows_examined > _FILESORT_WARN_ROWS
-        ),
-        "message": "查询需要文件排序且扫描 {rows:,} 行，考虑为 ORDER BY 列添加索引。",
-    },
-    # W5: 索引查找 + 极大行数
-    {
-        "id": "W5_LOOKUP_HUGE",
-        "severity": "WARNING",
-        "condition": lambda m: (
-            m.access_pattern == "INDEX_LOOKUP"
-            and m.estimated_rows_examined > _INDEX_LOOKUP_BLOCK_ROWS
-        ),
-        "message": "索引查找预估返回 {rows:,} 行，结果集极大，建议分页获取。",
-    },
 ]
 
 
 def evaluate(metrics: ExplainMetrics) -> ExplainDecision:
     """对提取的指标执行规则评估。
 
-    规则按优先级顺序匹配，首个命中即返回。
-    CRITICAL 规则优先于 WARNING 规则。
-    如果同时命中多条 WARNING，收集所有消息。
+    规则按顺序匹配，首个 CRITICAL 规则命中则阻断。
+    所有 CRITICAL 均未命中则放行（LOW 风险）。
 
     Args:
         metrics: 标准化评估指标。
 
     Returns:
-        ExplainDecision 包含 allowed、risk_level 和 reasons。
+        ExplainDecision — CRITICAL 时 allowed=False，否则 allowed=True。
     """
-    warnings: list[str] = []
     for rule in _EVALUATION_RULES:
         if not rule["condition"](metrics):
             continue
@@ -924,15 +867,6 @@ def evaluate(metrics: ExplainMetrics) -> ExplainDecision:
                 reasons=[message],
                 metrics=metrics,
             )
-        warnings.append(message)
-
-    if warnings:
-        return ExplainDecision(
-            allowed=True,
-            risk_level="WARNING",
-            reasons=warnings,
-            metrics=metrics,
-        )
 
     return ExplainDecision(
         allowed=True,

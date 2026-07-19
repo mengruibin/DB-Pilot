@@ -108,8 +108,6 @@ flowchart TD
     subgraph Layer0["📦 Layer 0 — 安全护栏 (safe_tools_node)"]
         direction TB
         SA1["SQLAuditCheck<br/>sqlglot AST 解析 + 角色权限"]
-        SA3["PerformanceCheck<br/>性能静态分析"]
-        SA1 --> SA3
     end
 
     subgraph Layer1["📦 Layer 1 — 工具内部二次审计 (run_query)"]
@@ -185,11 +183,11 @@ flowchart TD
       <td><strong>安全护栏链</strong></td>
       <td class="muted">
         safety.py → SQLAuditCheck<br/>
-        safety.py → PerformanceCheck
+        safety.py → RowEstimationCheck
       </td>
       <td>
         SQLAuditCheck: INSERT 不在 _FORBIDDEN_STATEMENTS，不在 _ADMIN_ONLY_STATEMENTS（ReadOnlyCheck 已合并至此，`_ADMIN_ONLY` 已新增 INSERT/MERGE）<br/>
-        PerformanceCheck: INSERT 非 SELECT，跳过
+        RowEstimationCheck: INSERT 非 SELECT，跳过；DDL 已被 SQLAuditCheck 拦截
       </td>
       <td><span class="badge badge-yellow">放行</span></td>
     </tr>

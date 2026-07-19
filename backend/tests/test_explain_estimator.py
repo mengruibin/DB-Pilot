@@ -436,8 +436,8 @@ class TestEvaluate:
         assert not d.allowed
         assert d.risk_level == "CRITICAL"
 
-    def test_w1_full_scan_warn(self) -> None:
-        """W1: 全表扫描 + 1K 行 → WARNING。"""
+    def test_full_scan_below_threshold_low(self) -> None:
+        """FULL_SCAN + 1K 行（<5K 阻断阈值）→ LOW。"""
         m = ExplainMetrics(
             access_pattern="FULL_SCAN",
             estimated_rows_examined=1_000,
@@ -445,22 +445,21 @@ class TestEvaluate:
         )
         d = evaluate(m)
         assert d.allowed
-        assert d.risk_level == "WARNING"
+        assert d.risk_level == "LOW"
 
-    def test_multiple_warnings_collected(self) -> None:
-        """同时命中 W1+W3 → 收集所有警告。"""
+    def test_subcritical_risk_low(self) -> None:
+        """触发多条规则但均未达 CRITICAL 阈值 → LOW。"""
         m = ExplainMetrics(
             access_pattern="FULL_SCAN",
             estimated_rows_examined=3_000,
-            estimated_rows_output=600,  # W3: >500
+            estimated_rows_output=600,
         )
         d = evaluate(m)
         assert d.allowed
-        assert d.risk_level == "WARNING"
-        assert len(d.reasons) >= 2  # 至少两条警告
+        assert d.risk_level == "LOW"
 
-    def test_critical_overrides_warning(self) -> None:
-        """CRITICAL + WARNING 同时触发 → 只返回 CRITICAL。"""
+    def test_critical_overrides_low(self) -> None:
+        """CRITICAL 命中 → 直接阻断（即使有 LOW 规则）。"""
         m = ExplainMetrics(
             access_pattern="FULL_SCAN",
             estimated_rows_examined=6_000,  # R1: 全扫+>5K → CRITICAL
@@ -506,8 +505,8 @@ class TestEvaluate:
         assert not d.allowed
         assert d.risk_level == "CRITICAL"
 
-    def test_w4_filesort_warn(self) -> None:
-        """W4: filesort + 一定数据量。"""
+    def test_w4_filesort_no_warn(self) -> None:
+        """filesort + 6K 行 → 未达 CRITICAL 阈值 → LOW。"""
         m = ExplainMetrics(
             access_pattern="INDEX_SCAN",
             estimated_rows_examined=6_000,
@@ -516,10 +515,10 @@ class TestEvaluate:
         )
         d = evaluate(m)
         assert d.allowed
-        assert d.risk_level == "WARNING"
+        assert d.risk_level == "LOW"
 
-    def test_w5_lookup_huge_warn(self) -> None:
-        """W5: INDEX_LOOKUP + 极大行数。"""
+    def test_w5_lookup_huge_no_warn(self) -> None:
+        """INDEX_LOOKUP + 600K 行 → 未达 CRITICAL 阈值 → LOW。"""
         m = ExplainMetrics(
             access_pattern="INDEX_LOOKUP",
             estimated_rows_examined=600_000,
@@ -527,7 +526,7 @@ class TestEvaluate:
         )
         d = evaluate(m)
         assert d.allowed
-        assert d.risk_level == "WARNING"
+        assert d.risk_level == "LOW"
 
 
 # =============================================================================

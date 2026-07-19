@@ -6,8 +6,7 @@ Agent 安全护栏（B-30）。
 
 护栏链执行顺序（按 extras 声明动态组装）：
   1. SQLAuditCheck — 对 SQL 类工具进行 sqlglot 审计，含只读角色权限拦截
-  2. PerformanceCheck — SQL 静态文本分析（SELECT * / 缺 LIMIT / WHERE 函数），非阻断警告
-  3. RowEstimationCheck — EXPLAIN 多维度安全评估（访问方式/行数/成本/额外操作），硬编码规则引擎
+  2. RowEstimationCheck — EXPLAIN 多维度安全评估（访问方式/行数/成本/额外操作），硬编码规则引擎
   4. ConnectionLimitCheck — 限制单次会话最大查询次数（预留）
 """
 
@@ -157,141 +156,6 @@ class ConnectionLimitCheck(SafetyCheck):
                 )
         return SafetyResult(blocked=False)
 
-
-# =============================================================================
-# PerformanceCheck — SQL 性能静态分析护栏（非阻断，仅警告）
-# =============================================================================
-
-
-def _has_select_star(sql: str) -> bool:
-    """检测 SQL 中是否使用了 SELECT *（全列扫描）。
-
-    通过 sqlglot AST 解析判断 SELECT 语句的列是否为 *（Star 表达式）。
-
-    Args:
-        sql: 待检测的 SQL 语句。
-
-    Returns:
-        是否包含 SELECT *。
-    """
-    import re
-
-    # 简单正则：匹配 SELECT *（不区分大小写）
-    # 排除 SELECT *, COUNT(*), EXISTS(SELECT *) 等场景中的误报
-    pattern = r"\bSELECT\s+\*\s"
-    return bool(re.search(pattern, sql, re.IGNORECASE))
-
-
-def _is_select_without_limit(sql: str) -> bool:
-    """检测 SELECT 语句是否缺少 LIMIT 限制。
-
-    仅检查 SELECT 语句（非 EXPLAIN/SHOW/DESCRIBE 等）。
-
-    Args:
-        sql: 待检测的 SQL 语句。
-
-    Returns:
-        是否为缺少 LIMIT 的 SELECT 查询。
-    """
-    sql_upper = sql.upper().strip()
-
-    # 仅检查 SELECT 语句
-    if not sql_upper.startswith("SELECT"):
-        return False
-
-    # 已有 LIMIT 子句则不告警
-    return "LIMIT" not in sql_upper
-
-
-def _detect_function_on_column(sql: str) -> str:
-    """检测 WHERE 子句中是否对列使用了函数（阻止索引使用）。
-
-    常见模式：WHERE YEAR(col) = 2024, WHERE UPPER(col) = 'X' 等。
-
-    Args:
-        sql: 待检测的 SQL 语句。
-
-    Returns:
-        检测到的函数名，无问题返回空字符串。
-    """
-    import re
-
-    # 匹配 WHERE 子句中列上使用函数的模式
-    # 例如: WHERE YEAR(create_time) = 2024, WHERE LOWER(name) = 'x'
-    # 排除聚合函数场景（COUNT, SUM 等不在 WHERE 中对列使用函数的情况）
-    patterns = [
-        # WHERE/AND/OR 后跟 FUNC(column_name)
-        r"(?:WHERE|AND|OR)\s+\w+\((\w+)\)",
-    ]
-
-    sql_upper = sql.upper()
-    for p in patterns:
-        match = re.search(p, sql_upper, re.IGNORECASE)
-        if match:
-            return match.group(1)
-    return ""
-
-
-class PerformanceCheck(SafetyCheck):
-    """SQL 性能检查护栏（仅警告，不阻断执行）。
-
-    在 SQL 执行前进行静态分析，检测常见的性能反模式：
-      - SELECT *（全列扫描，浪费 IO）
-      - 无 LIMIT 的 SELECT（可能返回大量数据）
-      - WHERE 列上使用函数（阻止索引使用）
-
-    此护栏始终返回 blocked=False，仅通过 warnings 字段提供性能提示。
-    Agent 在后续推理中可据此决定是否调用 explain_query 或改写 SQL。
-    """
-
-    async def check(
-        self,
-        tool_name: str,
-        tool_args: dict[str, Any],
-        conn_config: dict[str, Any],
-    ) -> SafetyResult:
-        """对 SQL 进行静态性能分析，返回非阻断性警告。
-
-        由调用方（tool_node._resolve_checks）根据工具元数据决定是否传入此检查，
-        因此不再需要按 tool_name 硬编码过滤。
-
-        Args:
-            tool_name: 工具名称。
-            tool_args: 工具参数。
-            conn_config: 连接配置。
-
-        Returns:
-            SafetyResult(blocked=False, warnings=[...])
-        """
-        sql = tool_args.get("sql", "")
-        if not sql:
-            return SafetyResult(blocked=False)
-
-        warnings: list[str] = []
-
-        # 检查 1: SELECT *（全列扫描）
-        if _has_select_star(sql):
-            warnings.append(
-                "性能提示: 使用 SELECT * 会扫描所有列，建议明确列出需要的列名以减少 IO 开销"
-            )
-
-        # 检查 2: SELECT without LIMIT
-        if _is_select_without_limit(sql):
-            warnings.append(
-                "性能提示: SELECT 查询缺少 LIMIT 限制，可能返回大量数据，建议添加合理的 LIMIT"
-            )
-
-        # 检查 3: WHERE 列上使用函数（阻止索引）
-        func_col = _detect_function_on_column(sql)
-        if func_col:
-            warnings.append(
-                "性能提示: WHERE 子句中对列使用了函数，这将阻止该列上的索引使用，建议改写查询条件"
-            )
-
-        if warnings:
-            return SafetyResult(blocked=False, warnings=warnings)
-
-        return SafetyResult(blocked=False)
 
 
 # =============================================================================
@@ -501,18 +365,7 @@ class RowEstimationCheck(SafetyCheck):
             )
             return SafetyResult(blocked=True, reason=reason)
 
-        if decision.risk_level == "WARNING":
-            logger.info(
-                "RowEstimationCheck 发出性能警告",
-                tool_name=tool_name,
-                warnings=decision.reasons,
-                sql_preview=sql[:100],
-            )
-            return SafetyResult(
-                blocked=False,
-                warnings=[f"[EXPLAIN 评估] {r}" for r in decision.reasons],
-            )
-
+        # LOW 风险 — 放行
         logger.debug(
             "RowEstimationCheck 评估通过（LOW 风险）",
             tool_name=tool_name,
@@ -590,5 +443,4 @@ def _default_checks() -> list[SafetyCheck]:
     """返回默认安全护栏链。"""
     return [
         SQLAuditCheck(),
-        PerformanceCheck(),  # SQL 性能静态分析（非阻断，仅警告）
     ]

@@ -6,7 +6,7 @@
 
 Agent 工具的安全护栏存在两个问题：
 
-1. **硬编码工具名列表** — `SQLAuditCheck` 和 `PerformanceCheck` 内部通过 `tool_name not in ("execute_sql", "explain_query")` 判断是否执行检查。新增需要审计的工具必须同步修改 safety.py，违反开闭原则，也增加了遗漏风险。
+1. **硬编码工具名列表** — `SQLAuditCheck` 和 `RowEstimationCheck` 内部通过 `tool_name not in ("execute_sql", "explain_query")` 判断是否执行检查。新增需要审计的工具必须同步修改 safety.py，违反开闭原则，也增加了遗漏风险。
 
 2. **双重审计** — `execute_sql` 和 `explain_query` 的 SQL 审计在安全护栏层（`safety.py:94`）和工具函数内部（`query.py:359` / `diagnosis.py:113`）各执行一次，浪费 CPU 资源。
 
@@ -59,9 +59,6 @@ Agent 工具的安全护栏存在两个问题：
 1. `backend/app/agent/tools/query.py:306` — `execute_sql` 的 `@tool` 装饰器改为：
 
    ```python
-   @tool(extras={"needs_sql_audit": True, "needs_performance_check": True})
-   async def execute_sql(
-   ```
 
 2. `backend/app/agent/tools/diagnosis.py:76` — `explain_query` 的 `@tool` 装饰器改为：
 
@@ -74,9 +71,6 @@ Agent 工具的安全护栏存在两个问题：
 
 #### 验收标准
 
-- `TOOL_REGISTRY["execute_sql"].extras` 返回 `{"needs_sql_audit": True, "needs_performance_check": True}`
-- `TOOL_REGISTRY["explain_query"].extras` 返回 `{"needs_sql_audit": True}`
-- 其他工具的 `.extras` 为 `None` 或空字典
 
 ---
 
@@ -90,7 +84,7 @@ Agent 工具的安全护栏存在两个问题：
 
 #### 执行步骤
 
-1. **新增导入** — 从 `app.agent.safety` 导入 `SQLAuditCheck` 和 `PerformanceCheck`（它们目前可能通过 `run_safety_checks` 间接依赖，需要确认导入路径）。
+1. **新增导入** — 从 `app.agent.safety` 导入 `SQLAuditCheck`、`RowEstimationCheck` 和相关函数（它们目前可能通过 `run_safety_checks` 间接依赖，需要确认导入路径）。
 
 2. **新增 `_resolve_checks(tool_fn)` 函数**：
 
@@ -112,9 +106,6 @@ Agent 工具的安全护栏存在两个问题：
        checks: list[SafetyCheck] = []
        if extras.get("needs_sql_audit"):
            checks.append(SQLAuditCheck())
-       if extras.get("needs_performance_check"):
-           checks.append(PerformanceCheck())
-       return checks
    ```
 
 3. **重排 `_run_one_tool` 中的执行顺序**：
@@ -149,7 +140,7 @@ Agent 工具的安全护栏存在两个问题：
 
 #### 验收标准
 
-- `execute_sql` 调用时：`_resolve_checks` 返回 `[SQLAuditCheck(), PerformanceCheck()]`
+- `execute_sql` 调用时：`_resolve_checks` 返回 `[SQLAuditCheck(), RowEstimationCheck()]`（注：PerformanceCheck 已移除）
 - `explain_query` 调用时：`_resolve_checks` 返回 `[SQLAuditCheck()]`
 - `list_tables` 调用时：`_resolve_checks` 返回 `[]`（空列表 — 跳过所有检查）
 - 未注册工具：直接返回错误，不执行安全检查
@@ -158,7 +149,7 @@ Agent 工具的安全护栏存在两个问题：
 
 ### Task 3：简化 safety.py 中的检查器
 
-删除 `SQLAuditCheck` 和 `PerformanceCheck` 中的硬编码 `tool_name` 过滤，因为它们现在只会在有声明需求的工具上被执行。
+删除 `SQLAuditCheck` 和 `RowEstimationCheck` 中的硬编码 `tool_name` 过滤，因为它们现在只会在有声明需求的工具上被执行。
 
 #### 涉及文件
 
@@ -176,7 +167,7 @@ Agent 工具的安全护栏存在两个问题：
 
    保留后面的 SQL 判空检查（`if not sql: return SafetyResult(blocked=False)`）作为防御性编程。
 
-2. **`PerformanceCheck.check()`**（第 239-286 行）— 删除第 255-256 行：
+2. **`RowEstimationCheck.check()`**（第 239-286 行）— 删除第 255-256 行：
 
    ```python
    # 删除这两行：

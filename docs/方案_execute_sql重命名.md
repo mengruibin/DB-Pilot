@@ -185,7 +185,7 @@ LLM 决定写操作 → execute_sql 被调用
   ├── Step 1: SQLAuditCheck ─── 拦截 DDL（所有角色）
   │                             拦截 DML 非 admin 用户
   ├── Step 2: [已移除] ReadOnlyCheck 曾在此，功能已合并至 Step 1
-  ├── Step 3: PerformanceCheck ─ 非阻断，仅警告
+  ├── Step 3: RowEstimationCheck ── EXPLAIN 多维度评估（CRITICAL 阻断）
   ├── Step 4: 工具内 audit() ── 第二道审计
   └── Step 5: MySQL READ ONLY ── 数据库级兜底
 ```
