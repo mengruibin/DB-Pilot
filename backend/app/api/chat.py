@@ -535,7 +535,7 @@ async def _stream_events(
                     session.id,
                     "user",
                     body.message,
-                    message_type=body.mode,
+                    message_type="natural_language",
                 )
 
             # ── 获取会话历史（最近 10 条，用于记忆上下文） ──

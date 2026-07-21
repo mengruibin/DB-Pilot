@@ -129,12 +129,6 @@ export interface StoreMessage {
   thinkingGroup?: ThinkingGroupData
 }
 
-// ─── 输入模式 ───
-
-export type InputMode = 'natural_language' | 'sql_editor'
-
-const INPUT_MODE_KEY = 'db-pilot:input-mode'
-
 // ─── Store ───
 
 export const useChatStore = defineStore('chat', () => {
@@ -153,11 +147,6 @@ export const useChatStore = defineStore('chat', () => {
 
   /** 是否正在 SSE 流式接收 */
   const isStreaming = ref(false)
-
-  /** 输入模式（持久化到 localStorage） */
-  const inputMode = ref<InputMode>(
-    (localStorage.getItem(INPUT_MODE_KEY) as InputMode) || 'natural_language'
-  )
 
   /** SSE 连接状态 */
   const sseConnected = ref(false)
@@ -232,10 +221,6 @@ export const useChatStore = defineStore('chat', () => {
   watch(() => sse.isConnected.value, (v) => { sseConnected.value = v })
   watch(() => sse.isError.value, (v) => { sseError.value = v ? sse.errorMessage.value : null })
 
-  // 持久化 inputMode
-  watch(inputMode, (val) => {
-    localStorage.setItem(INPUT_MODE_KEY, val)
-  })
 
   // ═══════════════════════════════════════════════════
   //  Actions — 消息管理
@@ -440,10 +425,9 @@ export const useChatStore = defineStore('chat', () => {
    *
    * @param connectionId 目标连接 ID
    * @param text         用户消息文本
-   * @param mode         输入模式
    * @param resume       中断恢复请求（可选，非空时 text 可为空）
    */
-  function sendMessage(connectionId: string, text: string, mode: InputMode, resume?: { approved_tool_call_ids: string[]; denied_tool_call_ids: string[] }): void {
+  function sendMessage(connectionId: string, text: string, resume?: { approved_tool_call_ids: string[]; denied_tool_call_ids: string[] }): void {
     if (isStreaming.value) return
     if (!connectionId) return
 
@@ -494,7 +478,7 @@ export const useChatStore = defineStore('chat', () => {
       {
         connection_id: connectionId,
         message: text,
-        mode,
+        mode: 'natural_language',
         session_id: currentSessionId.value,
         password,  // AGENTS.md §安全与合规红线：密码仅存于内存，每次请求传入
         ...(resume ? { resume } : {}),
@@ -782,7 +766,7 @@ export const useChatStore = defineStore('chat', () => {
     // 临时放行 isStreaming 检查，通过 sendMessage 发起恢复 SSE 流
     const connectionStore = useConnectionStore()
     isStreaming.value = false
-    sendMessage(connectionStore.activeId ?? '', '', inputMode.value, decision)
+    sendMessage(connectionStore.activeId ?? '', '', decision)
   }
 
   /**
@@ -826,11 +810,6 @@ export const useChatStore = defineStore('chat', () => {
     currentSessionId.value = null
     turnStartIndex.value = -1
     currentStage.value = 'thinking'
-  }
-
-  /** 设置输入模式 */
-  function setInputMode(mode: InputMode): void {
-    inputMode.value = mode
   }
 
   // ═══════════════════════════════════════════════════
@@ -1109,7 +1088,6 @@ export const useChatStore = defineStore('chat', () => {
     sessions,
     currentSessionId,
     isStreaming,
-    inputMode,
     sseConnected,
     sseError,
 
@@ -1138,7 +1116,6 @@ export const useChatStore = defineStore('chat', () => {
     respondToConfirm,
     cancelStreaming,
     clearMessages,
-    setInputMode,
 
     // F2: 会话管理 actions
     fetchSessions,

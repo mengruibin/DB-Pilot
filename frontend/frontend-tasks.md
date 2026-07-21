@@ -95,7 +95,7 @@
 | **关联契约** | api-contract §三 Store 划分（chatStore）、§2.2 Session/Message 实体 |
 | **输入** | F-05 useSSE |
 | **输出物** | `frontend/src/stores/chat.ts`、`frontend/src/api/chat.ts` |
-| **验收标准** | 1. `chatStore.messages` 为消息数组，每条符合 api-contract §2.2 Message 结构<br>2. `sendMessage(connectionId, message, mode)` 调用 POST /api/chat/stream<br>3. SSE `thinking` → 追加 thinking 类型消息（`role="assistant"`, `content=thinking.text`）<br>4. SSE `tool_call` → 追加 tool_call 类型消息（含 tool/display 展示）<br>5. SSE `tool_result` → 更新对应 tool_call 消息的 status=done + duration_ms<br>6. SSE `sql` → 追加 sql 类型消息（含 sql_content/audit_status/is_readonly）<br>7. SSE `result` → 追加 result 类型消息（含 summary/data_preview/duration_ms）<br>8. SSE `error` → 追加 error 类型消息<br>9. SSE `done` → `isStreaming=false`，更新 `currentSession.id` 和 `tokens_used`<br>10. `isStreaming=true` 期间 InputArea 显示「停止」按钮<br>11. `inputMode` 在 'natural_language'/'sql_editor' 间切换，持久化到 localStorage |
+| **验收标准** | 1. `chatStore.messages` 为消息数组，每条符合 api-contract §2.2 Message 结构<br>2. `sendMessage(connectionId, message)` 调用 POST /api/chat/stream<br>3. SSE `thinking` → 追加 thinking 类型消息（`role="assistant"`, `content=thinking.text`）<br>4. SSE `tool_call` → 追加 tool_call 类型消息（含 tool/display 展示）<br>5. SSE `tool_result` → 更新对应 tool_call 消息的 status=done + duration_ms<br>6. SSE `sql` → 追加 sql 类型消息（含 sql_content/audit_status/is_readonly）<br>7. SSE `result` → 追加 result 类型消息（含 summary/data_preview/duration_ms）<br>8. SSE `error` → 追加 error 类型消息<br>9. SSE `done` → `isStreaming=false`，更新 `currentSession.id` 和 `tokens_used`<br>10. `isStreaming=true` 期间 InputArea 显示「停止」按钮 |
 | **前置依赖** | F-05 |
 | **继承 TODO** | 无 |
 | **状态** | 已完成 |

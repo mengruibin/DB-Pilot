@@ -326,7 +326,6 @@ export interface SSEEventCallbacks {
 export interface StreamChatRequest {
   connection_id: string
   message: string
-  mode: 'natural_language' | 'sql_editor'
   session_id: string | null
   password?: string  // 数据库密码，仅存于内存，不落盘（AGENTS.md §安全红线）
   context?: {

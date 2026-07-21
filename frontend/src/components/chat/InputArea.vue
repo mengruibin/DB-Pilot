@@ -2,21 +2,18 @@
 /**
  * InputArea — 输入区域组件
  *
- * 双模式（自然语言 / SQL）+ 自动高度 + 粘贴确认 + 发送/停止。
+ * 自然语言输入 + 自动高度 + 发送/停止。
  *
  * 依据 frontend AGENTS.md §4 输入区行为规范
  *     api-contract §三 InputArea 组件
  */
 import { ref, watch, nextTick } from 'vue'
-import type { InputMode } from '@/stores/chat'
 import type { ConnectionConfig } from '@/types/connection'
 import ConnectionSwitcher from './ConnectionSwitcher.vue'
 
 const props = defineProps<{
   /** 输入文本（v-model） */
   modelValue: string
-  /** 输入模式 */
-  inputMode: InputMode
   /** 是否正在流式接收 */
   isStreaming: boolean
   /** 是否有活跃连接 */
@@ -29,7 +26,6 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   'update:modelValue': [value: string]
-  'update:inputMode': [mode: InputMode]
   send: [text: string]
   stop: []
   'select-connection': [id: string]
@@ -63,62 +59,14 @@ function handleInput(e: Event): void {
 function handleKeydown(e: KeyboardEvent): void {
   if (props.isStreaming) return
 
-  // Shift+Enter = 换行（两种模式）
-  if (e.key === 'Enter' && e.shiftKey) {
-    // 默认行为就是换行，不做特殊处理
-    return
-  }
+  // Shift+Enter = 换行
+  if (e.key === 'Enter' && e.shiftKey) return
 
-  // Enter = 提交（自然语言模式）
-  if (e.key === 'Enter' && !e.shiftKey && props.inputMode === 'natural_language') {
+  // Enter = 提交
+  if (e.key === 'Enter' && !e.shiftKey) {
     e.preventDefault()
     submit()
-    return
   }
-
-  // Ctrl+Enter = 提交（SQL 编辑器模式）
-  if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && props.inputMode === 'sql_editor') {
-    e.preventDefault()
-    submit()
-    return
-  }
-}
-
-/** 处理粘贴事件（多行 SQL 确认） */
-function handlePaste(e: ClipboardEvent): void {
-  // 仅在 SQL 模式下检测
-  if (props.inputMode !== 'sql_editor') return
-
-  const text = e.clipboardData?.getData('text/plain')
-  if (!text) return
-
-  const lines = text.split('\n').filter((l) => l.trim().length > 0)
-  if (lines.length <= 1) return
-
-  // 阻止默认粘贴，显示确认
-  e.preventDefault()
-
-  const confirmed = window.confirm(
-    `检测到 ${lines.length} 条 SQL 语句，确认全部执行？`
-  )
-  if (confirmed) {
-    const current = props.modelValue
-    const before = current.slice(0, getCursorPos())
-    const after = current.slice(getCursorPos())
-    emit('update:modelValue', before + text + after)
-    nextTick(autoResize)
-  }
-}
-
-/** 获取光标位置 */
-function getCursorPos(): number {
-  return textareaRef.value?.selectionStart ?? props.modelValue.length
-}
-
-/** 切换模式 */
-function toggleMode(mode: InputMode): void {
-  emit('update:inputMode', mode)
-  nextTick(() => textareaRef.value?.focus())
 }
 
 /** 提交 */
@@ -139,35 +87,15 @@ function handleStop(): void {
 
 const placeholderText = !props.hasConnection
   ? '请先选择数据库连接'
-  : props.inputMode === 'natural_language'
-    ? '输入消息，Enter 发送，Shift+Enter 换行…'
-    : '输入 SQL，Ctrl+Enter 执行，Shift+Enter 换行…'
+  : '输入消息，Enter 发送，Shift+Enter 换行…'
 </script>
 
 <template>
   <div class="input-area">
     <!-- 圆角卡片容器 -->
     <div class="input-card">
-      <!-- 上层：模式切换 + 连接选择器 -->
+      <!-- 上层：连接选择器 -->
       <div class="area-topbar">
-        <div class="mode-tabs">
-          <button
-            class="mode-tab"
-            :class="{ active: inputMode === 'natural_language' }"
-            :disabled="isStreaming || !hasConnection"
-            @click="toggleMode('natural_language')"
-          >
-            <span class="tab-label">自然语言</span>
-          </button>
-          <button
-            class="mode-tab"
-            :class="{ active: inputMode === 'sql_editor' }"
-            :disabled="isStreaming || !hasConnection"
-            @click="toggleMode('sql_editor')"
-          >
-            <span class="tab-label">SQL</span>
-          </button>
-        </div>
         <ConnectionSwitcher
           :connections="connections"
           :active-id="activeConnectionId"
@@ -181,14 +109,12 @@ const placeholderText = !props.hasConnection
           <textarea
             ref="textareaRef"
             class="input-textarea"
-            :class="{ 'sql-mode': inputMode === 'sql_editor' }"
             :value="modelValue"
             :placeholder="placeholderText"
             :disabled="!hasConnection || isStreaming"
             rows="1"
             @input="handleInput"
             @keydown="handleKeydown"
-            @paste="handlePaste"
           ></textarea>
           <button
             class="submit-btn"
@@ -230,57 +156,15 @@ const placeholderText = !props.hasConnection
   transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
 }
 
-/* ─── 上区块：Tab + 连接选择器 ─── */
+/* ─── 上区块：连接选择器 ─── */
 .area-topbar {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-end;
   padding: 10px 10px 9px;
   border-bottom: 1px solid var(--input-card-divider);
   background: var(--input-card-bg);
   border-radius: 16px 16px 0 0;
-}
-
-.mode-tabs {
-  display: flex;
-  gap: 2px;
-  background: var(--input-tab-bg);
-  border-radius: var(--radius-md);
-  padding: 2px;
-}
-
-.mode-tab {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  padding: 3px 12px;
-  border: none;
-  border-radius: 5px;
-  background: transparent;
-  color: var(--text-tertiary);
-  font-family: var(--font-body);
-  font-size: 12px;
-  cursor: pointer;
-  transition: all var(--transition-fast);
-  white-space: nowrap;
-}
-
-.mode-tab:hover:not(:disabled) {
-  color: var(--text-secondary);
-}
-
-.mode-tab.active {
-  background: var(--input-tab-active-bg);
-  color: var(--mode-tab-active-color);
-}
-
-.mode-tab:disabled {
-  opacity: 0.4;
-  cursor: not-allowed;
-}
-
-.tab-label {
-  font-weight: 450;
 }
 
 /* ─── 下区块：通栏输入框 + 右下角发送按钮 ─── */
@@ -322,12 +206,6 @@ const placeholderText = !props.hasConnection
 /* 浅色主题下 focus 边框用浅蓝，增加交互层次感 */
 [data-theme="light"] .input-textarea:focus {
   border-color: var(--interactive-color);
-}
-
-.input-textarea.sql-mode {
-  font-family: var(--font-mono);
-  font-size: 15px;
-  line-height: 1.6;
 }
 
 .input-textarea::placeholder {
@@ -382,8 +260,6 @@ const placeholderText = !props.hasConnection
   --input-card-border: #374151;
   --input-card-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
   --input-card-divider: #374151;
-  --input-tab-bg: #0f172a;
-  --input-tab-active-bg: #273444;
   --input-textarea-bg: #0f172a;
   --input-textarea-border: #374151;
 }
@@ -400,7 +276,5 @@ const placeholderText = !props.hasConnection
   --input-textarea-border: #e2e8f0;
 }
 
-[data-theme="light"] .mode-tab.active {
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
-}
+
 </style>

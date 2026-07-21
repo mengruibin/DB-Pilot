@@ -15,8 +15,6 @@ import { ref, computed } from 'vue'
 export interface HistoryEntry {
   /** 输入文本 */
   text: string
-  /** 输入模式 */
-  mode: 'natural_language' | 'sql_editor'
   /** 时间戳 ISO 8601 */
   timestamp: string
   /** 执行状态 */
@@ -198,7 +196,6 @@ export function useHistory() {
    */
   async function addEntry(
     text: string,
-    mode: 'natural_language' | 'sql_editor',
     status: 'success' | 'error'
   ): Promise<void> {
     // 加载（如果尚未加载）
@@ -206,7 +203,6 @@ export function useHistory() {
 
     const newEntry: HistoryEntry = {
       text: text.slice(0, 80), // 截断前 80 字符
-      mode,
       timestamp: new Date().toISOString(),
       status,
     }

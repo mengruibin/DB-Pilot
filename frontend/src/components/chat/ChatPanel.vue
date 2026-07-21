@@ -36,7 +36,7 @@ const panelTitle = computed(() => {
 /** 发送消息 */
 function handleSend(text: string): void {
   if (!connectionStore.activeId) return
-  chatStore.sendMessage(connectionStore.activeId, text, chatStore.inputMode)
+  chatStore.sendMessage(connectionStore.activeId, text)
   inputText.value = ''
 }
 
@@ -91,12 +91,10 @@ function handleNewSession(): void {
     <div class="input-area-wrapper">
       <InputArea
         v-model="inputText"
-        :input-mode="chatStore.inputMode"
         :is-streaming="chatStore.isStreaming"
         :has-connection="!!connectionStore.activeId"
         :connections="connectionStore.connections"
         :active-connection-id="connectionStore.activeId"
-        @update:input-mode="chatStore.setInputMode"
         @send="handleSend"
         @stop="handleStop"
         @select-connection="handleSelectConnection"

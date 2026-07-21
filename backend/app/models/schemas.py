@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 from datetime import datetime
 from enum import StrEnum
-from typing import Any, Literal
+from typing import Any
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -190,10 +190,6 @@ class ChatRequest(BaseModel):
         max_length=4096,
         description="用户消息。恢复请求时可为空",
         examples=["最近一小时慢查询有哪些？"],
-    )
-    mode: Literal["natural_language", "sql_editor"] = Field(
-        default="natural_language",
-        description="输入模式：natural_language（自然语言）或 sql_editor（SQL 编辑器直接输入）",
     )
     session_id: str | None = Field(
         default=None,

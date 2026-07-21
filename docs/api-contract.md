@@ -141,7 +141,6 @@
 {
   "connection_id": "conn_abc123",
   "message": "最近一小时慢查询有哪些？",
-  "mode": "natural_language",                  // "natural_language" | "sql_editor"
   "session_id": null,                          // null=新会话，非空=续接已有会话
   "context": {                                 // 可选：前端附加上下文
     "selected_table": "orders",                // 用户当前关注的表（NL2SQL 优先用此表）
@@ -709,7 +708,7 @@ data: {"type":"diagnosis","conclusion":"事务 #82491 长时间未提交导致�
 | | │  │     ├ `ResultTable` | 查询结果表格（当 message.type=result） | 无 | PRD §7 ResultTable.vue |
 | | │  │     ├ `DiagnosisCard` | 诊断结果卡片（当 message.type=diagnosis） | 无 | PRD §9 Phase 3 |
 | | │  │     └ `TroubleshootSteps` | 排查步骤列表（当 message.type=troubleshoot） | 无 | PRD §5.3 |
-| | │  └ `InputArea` | 输入区域（自然语言/SQL 切换） | `chatStore.inputMode` | PRD §7 InputArea.vue |
+| | │  └ `InputArea` | 输入区域 | — | PRD §7 InputArea.vue |
 | | └ `ThinkingIndicator` | Agent 思考中动画 + 实时耗时 | `chatStore.isStreaming` | PRD §7 ThinkingIndicator.vue |
 | `/connections` | ConnectionView | PRD §7 ConnectionView.vue |
 | | ├ `AppLayout` | 同 ChatView | 无 | |
@@ -745,7 +744,7 @@ data: {"type":"diagnosis","conclusion":"事务 #82491 长时间未提交导致�
 | Store | 作用域 | 核心状态 | 持久化策略 | 依据 |
 |-------|--------|---------|-----------|------|
 | `connectionStore` | 全局 | `connections[]`, `activeId`, `status` | 连接列表 → localStorage（不含密码）；activeId → 会话内存 | PRD §8.2 |
-| `chatStore` | 全局 | `currentSession`, `messages[]`, `isStreaming`, `inputMode` | 消息列表 → 会话内存；inputMode → localStorage | PRD §4.2 |
+| `chatStore` | 全局 | `currentSession`, `messages[]`, `isStreaming` | 消息列表 → 会话内存 | PRD §4.2 |
 | `reportStore` | 页面级 | `reports[]`, `currentReport` | 无持久化（每次从后端拉取） | PRD §5.4 |
 
 - [ ] MUST `connectionStore` 在页面刷新后从 localStorage 恢复连接列表，但 `activeId` 需重新测试连接有效性（依据 PRD §8.2 会话超时清理策略）
