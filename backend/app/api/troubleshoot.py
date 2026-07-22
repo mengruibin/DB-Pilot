@@ -19,7 +19,7 @@ from typing import Any
 from uuid import uuid4
 
 import structlog
-from fastapi import APIRouter, Body, HTTPException, status
+from fastapi import APIRouter, Body, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse
 from langchain_core.messages import HumanMessage
 from sqlalchemy import select
@@ -27,11 +27,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent.sse_utils import format_sse
 from app.agent.state import AgentState
+from app.auth.dependencies import get_current_user
 
 # 复用 B-20 的 SSE 取消机制
 from app.api.chat import _active_streams, _running_tasks  # type: ignore[attr-defined]  # noqa: F811
 from app.database import async_session_factory
 from app.models.connection import ConnectionConfigModel
+from app.models.user import UserModel
 from app.models.schemas import TroubleshootRequest
 
 logger = structlog.get_logger(__name__)
@@ -48,6 +50,7 @@ async def _resolve_conn_config(
     connection_id: str,
     password: str | None,
     session: AsyncSession,
+    user_role: str = "readonly",
     trace_id: str = "",
 ) -> dict[str, Any]:
     """从 ORM 加载连接配置，组装为工具调用参数字典。
@@ -56,7 +59,7 @@ async def _resolve_conn_config(
         connection_id: 连接 ID。
         password: 连接密码。
         session: 数据库会话。
-        trace_id: 请求追踪 ID（用于角色检测日志链路）。
+        user_role: 当前登录用户的角色（readonly / admin）。
     """
     result = await session.execute(
         select(ConnectionConfigModel).where(
@@ -81,43 +84,10 @@ async def _resolve_conn_config(
         "database": conn.database,
         "user": conn.user,
         "password": password or "",
+        "user_role": user_role,
         "ssl_enabled": conn.ssl_enabled or False,
         "ssl_ca_cert": conn.ssl_ca_cert,
     }
-
-    # ── 用户角色检测（仅 MySQL） ──
-    # 共享 chat.py 同一份 grant_detector 缓存
-    if conn.db_type == "mysql":
-        from app.engine.grant_detector import (
-            detect_mysql_role,
-            get_cached_role,
-            set_cached_role,
-        )
-
-        cached = get_cached_role(connection_id, trace_id=trace_id)
-        if cached is not None:
-            config["user_role"] = cached
-            logger.debug("角色取自缓存",
-                         connection_id=connection_id, role=cached,
-                         trace_id=trace_id)
-        else:
-            role = await detect_mysql_role(
-                host=conn.host,
-                port=conn.port,
-                user=conn.user,
-                password=password or "",
-                database=conn.database,
-                ssl_enabled=conn.ssl_enabled or False,
-                ssl_ca_cert=conn.ssl_ca_cert,
-                trace_id=trace_id,
-            )
-            set_cached_role(connection_id, role, trace_id=trace_id)
-            config["user_role"] = role
-            logger.info("角色来自实时检测",
-                        connection_id=connection_id, role=role,
-                        trace_id=trace_id)
-    else:
-        config["user_role"] = "readonly"
 
     return config
 
@@ -130,6 +100,7 @@ async def _resolve_conn_config(
 async def _troubleshoot_stream(
     connection_id: str,
     body: TroubleshootRequest,
+    user_role: str = "readonly",
 ) -> AsyncGenerator[str, None]:
     """故障排查 SSE 流——由 LangGraph Agent 图自主决策工具调用。
 
@@ -162,16 +133,14 @@ async def _troubleshoot_stream(
 
     try:
         async with async_session_factory() as db:
-            precheck_trace_id = f"role_{uuid4().hex[:12]}"
             conn_config = await _resolve_conn_config(
                 connection_id, body.password, db,
-                trace_id=precheck_trace_id,
+                user_role=user_role,
             )
             logger.info("连接配置已解析",
                         connection_id=connection_id,
                         db_type=conn_config.get("db_type"),
-                        user_role=conn_config.get("user_role", "N/A"),
-                        trace_id=precheck_trace_id)
+                        user_role=conn_config.get("user_role", "N/A"))
 
             # ── 构建 AgentState + 执行 LangGraph 图 ──
             from app.agent.graph import build_agent_graph
@@ -257,22 +226,25 @@ async def _troubleshoot_stream(
 async def troubleshoot_stream(
     connection_id: str,
     body: TroubleshootRequest = Body(...),  # noqa: B008
+    current_user: UserModel = Depends(get_current_user),
 ) -> StreamingResponse:
     """触发故障排查，Agent 自主决策工具调用，SSE 流返回结果。
 
     Args:
         connection_id: 目标数据库连接 ID。
         body: TroubleshootRequest 请求体。
+        current_user: 当前登录用户（从 JWT 令牌解析）。
 
     Returns:
         StreamingResponse（Content-Type: text/event-stream）。
     """
     logger.info("故障排查请求开始", connection_id=connection_id,
                 issue_type=body.issue_type,
-                has_context=bool(body.context))
+                has_context=bool(body.context),
+                user_role=current_user.role)
 
     return StreamingResponse(
-        _troubleshoot_stream(connection_id, body),
+        _troubleshoot_stream(connection_id, body, user_role=current_user.role),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

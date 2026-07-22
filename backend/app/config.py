@@ -99,6 +99,17 @@ class Settings(BaseSettings):
         description="会话空闲超时（分钟），PRD §8.2 要求 30 分钟自动清理。",
     )
 
+    # ==================== 认证 ====================
+    JWT_SECRET: str = Field(
+        default="",
+        description="JWT 签名密钥（至少 32 字符）。必填，缺失时拒绝启动。",
+    )
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = Field(
+        default=1440,
+        ge=5,
+        description="JWT 访问令牌过期时间（分钟），默认 1440（24 小时）。",
+    )
+
     # ==================== 日志与可观测性 ====================
     LOG_LEVEL: str = Field(
         default="DEBUG",
@@ -139,7 +150,7 @@ class Settings(BaseSettings):
 
     # ==================== 校验 ====================
 
-    @field_validator("LLM_API_KEY", "LLM_MODEL", "DATABASE_URL")
+    @field_validator("LLM_API_KEY", "LLM_MODEL", "DATABASE_URL", "JWT_SECRET")
     @classmethod
     def _required_not_empty(cls, v: str, info: Field.field_validator) -> str:
         """必填字段非空校验。缺失任一字段则拒绝启动（AGENTS.md §安全与合规红线）。"""
@@ -151,6 +162,18 @@ class Settings(BaseSettings):
             )
             raise ValueError(msg)
         return v.strip()
+
+    @field_validator("JWT_SECRET")
+    @classmethod
+    def _jwt_secret_min_length(cls, v: str) -> str:
+        """JWT 签名密钥长度至少 32 字符。"""
+        v_stripped = v.strip()
+        if len(v_stripped) < 32:
+            raise ValueError(
+                "JWT_SECRET 长度必须至少为 32 字符。"
+                f"当前长度为 {len(v_stripped)}。"
+            )
+        return v_stripped
 
     @property
     def cors_origin_list(self) -> list[str]:

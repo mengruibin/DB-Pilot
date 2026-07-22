@@ -33,6 +33,7 @@ export function useSSE() {
   let timeoutId: ReturnType<typeof setTimeout> | null = null
   let userCallbacks: SSEEventCallbacks | null = null
   let errorSeen = false // 收到 error 事件后忽略后续事件
+  let manualDisconnect = false // 手动断开标记，用于区分服务端意外关闭
 
   // ─── 超时定时器 ───
 
@@ -155,7 +156,7 @@ export function useSSE() {
     try {
       while (true) {
         const { done, value } = await reader.read()
-        if (done) break // 服务端正常关闭
+        if (done) break // 服务端关闭连接
 
         // 解码并追加到缓冲区
         buffer += decoder.decode(value, { stream: true })
@@ -176,6 +177,11 @@ export function useSSE() {
       // 处理剩余缓冲
       if (buffer.trim()) {
         dispatchSSEEvent(buffer)
+      }
+
+      // 流意外结束（非手动断开、非 catch 异常）→ 通知调用方
+      if (!manualDisconnect) {
+        userCallbacks?.onDisconnect?.('连接已断开')
       }
     } catch (err: unknown) {
       // 手动取消连接不是错误
@@ -217,6 +223,9 @@ export function useSSE() {
 
     abortController = new AbortController()
 
+    // 从 localStorage 读取 JWT token
+    const token = localStorage.getItem('db-pilot:token')
+
     try {
       const response = await fetch(url, {
         method: 'POST',
@@ -224,6 +233,7 @@ export function useSSE() {
           'Content-Type': 'application/json',
           Accept: 'text/event-stream',
           'X-Request-ID': crypto.randomUUID(),
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
         },
         body: JSON.stringify(body),
         signal: abortController.signal,
@@ -274,6 +284,7 @@ export function useSSE() {
    * - 不触发 onDisconnect 回调
    */
   function disconnect(): void {
+    manualDisconnect = true
     if (reader) {
       reader.cancel().catch(() => {
         /* 忽略取消错误 */

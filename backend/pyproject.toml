@@ -35,6 +35,9 @@ dependencies = [
     "alembic>=1.13.0",           # 数据库迁移管理（B-02 引入）
     "jinja2>=3.1.0",             # HTML 模板渲染（B-25 报告导出）
     "weasyprint>=62.0",          # HTML→PDF 转换（B-25 报告导出）
+    "python-jose[cryptography]>=3.3.0",
+    "bcrypt>=4.0.0,<5.0.0",
+    "structlog>=26.1.0",
 ]
 
 [project.optional-dependencies]
@@ -68,3 +71,8 @@ asyncio_mode = "auto"
 
 [tool.setuptools.packages.find]
 include = ["app*"]
+
+[dependency-groups]
+dev = [
+    "structlog>=26.1.0",
+]

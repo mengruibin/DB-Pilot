@@ -1,21 +1,29 @@
 <script setup lang="ts">
 import { onMounted } from 'vue'
-import { zhCN, NNotificationProvider } from 'naive-ui'
+import { zhCN, NConfigProvider, NNotificationProvider, NMessageProvider, NDialogProvider } from 'naive-ui'
 import AppLayout from '@/components/common/AppLayout.vue'
 import { darkThemeOverrides, lightThemeOverrides } from '@/utils/theme'
 import { useThemeStore } from '@/stores/theme'
+import { useAuthStore } from '@/stores/auth'
 
 const themeStore = useThemeStore()
+const authStore = useAuthStore()
 
 onMounted(() => {
   themeStore.initTheme()
+  authStore.initAuth()
 })
 </script>
 
 <template>
-  <n-config-provider :theme="themeStore.naiveTheme" :theme-overrides="themeStore.isDark ? darkThemeOverrides : lightThemeOverrides" :locale="zhCN">
-    <n-notification-provider>
-      <AppLayout />
+  <!-- style 透传确保 Provider 链高度 100%，防止 .layout height:100% 坍塌 -->
+  <n-config-provider :theme="themeStore.naiveTheme" :theme-overrides="themeStore.isDark ? darkThemeOverrides : lightThemeOverrides" :locale="zhCN" style="height:100%;display:flex;flex-direction:column">
+    <n-notification-provider style="height:100%;display:flex;flex-direction:column">
+      <n-message-provider style="height:100%;display:flex;flex-direction:column">
+        <n-dialog-provider style="height:100%;display:flex;flex-direction:column">
+          <AppLayout />
+        </n-dialog-provider>
+      </n-message-provider>
     </n-notification-provider>
   </n-config-provider>
 </template>

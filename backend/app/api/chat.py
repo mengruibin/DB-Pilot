@@ -36,6 +36,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent.sse_utils import format_sse
 from app.agent.state import AgentState
+from app.auth.dependencies import get_current_user
 from app.correlation import set_connection_id
 from app.database import async_session_factory, get_session
 from app.models.connection import ConnectionConfigModel
@@ -49,6 +50,7 @@ from app.models.schemas import (
     SessionResponse,
 )
 from app.models.session import MessageModel, SessionModel
+from app.models.user import UserModel
 
 logger = structlog.get_logger(__name__)
 
@@ -240,6 +242,7 @@ async def _resolve_connection_config(
     db: AsyncSession,
     connection_id: str,
     password: str | None,
+    user_role: str = "readonly",
     trace_id: str = "",
 ) -> dict[str, Any]:
     """从 ORM 读取连接配置，组装为工具调用参数。
@@ -248,7 +251,7 @@ async def _resolve_connection_config(
         db: 数据库会话。
         connection_id: 连接 ID。
         password: 前端传入的连接密码。
-        trace_id: 请求追踪 ID（用于角色检测日志链路）。
+        user_role: 当前登录用户的角色（readonly / admin）。
 
     Returns:
         包含 db_type, host, port, database, user, password 等字段的 dict。
@@ -269,44 +272,11 @@ async def _resolve_connection_config(
         "database": conn.database,
         "user": conn.user,
         "password": password or "",
+        "user_role": user_role,
         "ssl_enabled": conn.ssl_enabled or False,
         "ssl_ca_cert": conn.ssl_ca_cert,
         "extra_params": conn.extra_params,
     }
-
-    # ── 用户角色检测（仅 MySQL，其他数据库默认安全兜底为 readonly） ──
-    # 通过 SHOW GRANTS 自动判定数据库用户实际拥有多少权限
-    if conn.db_type == "mysql":
-        from app.engine.grant_detector import (
-            detect_mysql_role,
-            get_cached_role,
-            set_cached_role,
-        )
-
-        cached = get_cached_role(connection_id, trace_id=trace_id)
-        if cached is not None:
-            config["user_role"] = cached
-            logger.debug(
-                "角色取自缓存", connection_id=connection_id, role=cached, trace_id=trace_id
-            )
-        else:
-            role = await detect_mysql_role(
-                host=conn.host,
-                port=conn.port,
-                user=conn.user,
-                password=password or "",
-                database=conn.database,
-                ssl_enabled=conn.ssl_enabled or False,
-                ssl_ca_cert=conn.ssl_ca_cert,
-                trace_id=trace_id,
-            )
-            set_cached_role(connection_id, role, trace_id=trace_id)
-            config["user_role"] = role
-            logger.info(
-                "角色来自实时检测", connection_id=connection_id, role=role, trace_id=trace_id
-            )
-    else:
-        config["user_role"] = "readonly"
 
     return config
 
@@ -485,6 +455,7 @@ def _infer_message_type(state: dict[str, Any]) -> str:
 
 async def _stream_events(
     body: ChatRequest,
+    user_role: str = "readonly",
 ) -> AsyncGenerator[str, None]:
     """SSE 事件流主引擎——异步生成器，逐条 yield SSE 格式化字符串。
 
@@ -546,19 +517,17 @@ async def _stream_events(
             )
 
             # ========== Step 2: 解析连接配置 ==========
-            precheck_trace_id = f"role_{uuid4().hex[:12]}"
             conn_config = await _resolve_connection_config(
                 db,
                 body.connection_id,
                 body.password,
-                trace_id=precheck_trace_id,
+                user_role=user_role,
             )
             logger.info(
                 "连接配置已解析",
                 connection_id=body.connection_id,
                 db_type=conn_config.get("db_type"),
                 user_role=conn_config.get("user_role", "N/A"),
-                trace_id=precheck_trace_id,
             )
 
             # 存储适配器连接信息，供取消时 KILL QUERY（AC-3）
@@ -955,7 +924,10 @@ async def _stream_events(
 
 
 @router.post("/stream")
-async def chat_stream(body: ChatRequest) -> StreamingResponse:
+async def chat_stream(
+    body: ChatRequest,
+    current_user: UserModel = Depends(get_current_user),
+) -> StreamingResponse:
     """SSE 流式对话端点。
 
     接收用户消息，通过 SSE 流式返回 Agent 推理过程和执行结果。
@@ -963,6 +935,7 @@ async def chat_stream(body: ChatRequest) -> StreamingResponse:
 
     Args:
         body: ChatRequest 请求体。
+        current_user: 当前登录用户（从 JWT 令牌解析）。
 
     Returns:
         StreamingResponse（Content-Type: text/event-stream）。
@@ -972,10 +945,11 @@ async def chat_stream(body: ChatRequest) -> StreamingResponse:
         connection_id=body.connection_id,
         session_id=body.session_id or "(新会话)",
         message_length=len(body.message),
+        user_role=current_user.role,
     )
 
     return StreamingResponse(
-        _stream_events(body),
+        _stream_events(body, user_role=current_user.role),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -988,6 +962,7 @@ async def chat_stream(body: ChatRequest) -> StreamingResponse:
 @router.post("/cancel", status_code=status.HTTP_204_NO_CONTENT)
 async def cancel_chat(
     session_id: str = Body(..., embed=True, description="要取消的会话 ID"),
+    current_user: UserModel = Depends(get_current_user),
 ) -> None:
     """取消进行中的 SSE 流（B-20 完整实现）。
 
@@ -1097,6 +1072,7 @@ async def list_sessions(
         default=20, ge=1, le=100, alias="pageSize", description="每页条数（最大 100）"
     ),
     session: AsyncSession = Depends(get_session),  # noqa: B008
+    current_user: UserModel = Depends(get_current_user),
 ) -> Any:
     """获取会话列表（分页，AC-3）。
 
@@ -1167,6 +1143,7 @@ async def list_session_messages(
         default=50, ge=1, le=200, alias="pageSize", description="每页条数（最大 200）"
     ),
     db_session: AsyncSession = Depends(get_session),  # noqa: B008
+    current_user: UserModel = Depends(get_current_user),
 ) -> Any:
     """获取指定会话的消息历史（分页，AC-4, AC-5）。
 
@@ -1257,6 +1234,7 @@ async def rename_session(
     session_id: str,
     body: SessionRenameRequest,
     db_session: AsyncSession = Depends(get_session),  # noqa: B008
+    current_user: UserModel = Depends(get_current_user),
 ) -> Any:
     """重命名会话标题（B1）。
 
@@ -1306,6 +1284,7 @@ async def rename_session(
 async def delete_session(
     session_id: str,
     db_session: AsyncSession = Depends(get_session),  # noqa: B008
+    current_user: UserModel = Depends(get_current_user),
 ) -> None:
     """删除指定会话及其所有关联消息（B2）。
 

@@ -22,7 +22,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_session
 from app.db.factory import AdapterFactory
+from app.auth.dependencies import get_current_user
 from app.models.connection import ConnectionConfigModel
+from app.models.user import UserModel
 from app.models.schemas import (
     ConnectionCreateRequest,
     ExplainRequest,
@@ -100,6 +102,7 @@ async def execute_query(
     connection_id: str,
     body: QueryRequest,
     session: AsyncSession = Depends(get_session),  # noqa: B008
+    current_user: UserModel = Depends(get_current_user),
 ) -> dict[str, Any]:
     """执行只读 SQL 查询（直接模式）。
 
@@ -134,7 +137,7 @@ async def execute_query(
         # AC-1：所有 SQL 经过 sql_auditor.audit() 校验后执行
         from app.engine.sql_auditor import audit
 
-        audit_result = audit(body.sql, db_type=config.db_type)
+        audit_result = audit(body.sql, db_type=config.db_type, user_role=current_user.role)
         if not audit_result.passed:
             violation = audit_result.violations[0]
             # AC-2：审计拦截以 HTTP 400 返回（非 500）
@@ -210,6 +213,7 @@ async def execute_explain(
     connection_id: str,
     body: ExplainRequest,
     session: AsyncSession = Depends(get_session),  # noqa: B008
+    current_user: UserModel = Depends(get_current_user),
 ) -> dict[str, Any]:
     """获取 SQL 执行计划并进行分析（AC-3）。
 
@@ -320,6 +324,7 @@ async def list_slow_queries(
     ),
     password: str | None = Query(default=None, description="连接密码"),
     session: AsyncSession = Depends(get_session),  # noqa: B008
+    current_user: UserModel = Depends(get_current_user),
 ) -> SlowQueryListResponse:
     """获取慢查询列表（分页）。
 

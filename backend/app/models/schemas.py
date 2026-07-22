@@ -570,3 +570,103 @@ class TroubleshootRequest(BaseModel):
         default=None,
         description="会话 ID，指定后将诊断结论写入该会话的消息历史",
     )
+
+
+# =============================================================================
+# 认证与用户管理 Schema
+# =============================================================================
+
+
+class LoginRequest(BaseModel):
+    """登录请求体。"""
+
+    username: str = Field(
+        ...,
+        min_length=1,
+        max_length=64,
+        description="用户名",
+    )
+    password: str = Field(
+        ...,
+        min_length=1,
+        description="密码",
+    )
+
+
+class UserResponse(BaseModel):
+    """用户信息响应体（不含密码哈希）。"""
+
+    id: str
+    username: str
+    role: str
+    is_active: bool
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class LoginResponse(BaseModel):
+    """登录响应体——返回 JWT token 和用户基本信息。"""
+
+    access_token: str = Field(..., description="JWT 访问令牌")
+    token_type: str = Field(default="bearer", description="令牌类型")
+    user: "UserResponse"  # 前向引用，使用 model_rebuild() 解析
+
+
+class UserCreateRequest(BaseModel):
+    """创建用户请求体（仅 admin 可用）。"""
+
+    username: str = Field(
+        ...,
+        min_length=1,
+        max_length=64,
+        description="用户名",
+    )
+    password: str = Field(
+        ...,
+        min_length=6,
+        max_length=128,
+        description="密码（至少 6 字符）",
+    )
+    role: str = Field(
+        default="readonly",
+        description="角色：admin 或 readonly",
+    )
+
+    @field_validator("role")
+    @classmethod
+    def _validate_role(cls, v: str) -> str:
+        if v not in ("admin", "readonly"):
+            raise ValueError("角色必须为 admin 或 readonly")
+        return v
+
+
+class UserUpdateRequest(BaseModel):
+    """更新用户请求体（所有字段可选）。"""
+
+    role: str | None = Field(default=None, description="新角色")
+    is_active: bool | None = Field(default=None, description="是否启用")
+    password: str | None = Field(
+        default=None, min_length=6, max_length=128, description="新密码（可选）"
+    )
+
+    @field_validator("role")
+    @classmethod
+    def _validate_role(cls, v: str | None) -> str | None:
+        if v is not None and v not in ("admin", "readonly"):
+            raise ValueError("角色必须为 admin 或 readonly")
+        return v
+
+
+class UserListResponse(BaseModel):
+    """分页用户列表响应。"""
+
+    items: list[UserResponse]
+    total: int
+    page: int
+    page_size: int = Field(serialization_alias="pageSize")
+
+
+# 解析 LoginResponse 中的前向引用
+LoginResponse.model_rebuild()

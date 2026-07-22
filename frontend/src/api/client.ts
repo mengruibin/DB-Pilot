@@ -71,6 +71,9 @@ async function request<T>(url: string, options: RequestOptions = {}): Promise<T>
       headers: {
         'Content-Type': 'application/json',
         'X-Request-ID': generateRequestId(),
+        ...(localStorage.getItem('db-pilot:token')
+          ? { Authorization: `Bearer ${localStorage.getItem('db-pilot:token')}` }
+          : {}),
         ...fetchOptions.headers,
       },
     })
@@ -93,6 +96,18 @@ async function request<T>(url: string, options: RequestOptions = {}): Promise<T>
       errorBody = await response.json()
     } catch {
       // 非 JSON 响应体
+    }
+
+    // 401: token 过期或无效 — 清除并跳转登录
+    // 必须放在错误体解析之后，优先使用后端的 user_message（如"用户名或密码错误"）
+    if (response.status === 401) {
+      localStorage.removeItem('db-pilot:token')
+      const userMsg = (errorBody?.user_message as string) || '登录已过期，请重新登录'
+      // 仅非登录页跳转（避免登录失败时页面跳转）
+      if (window.location.pathname !== '/login') {
+        window.location.href = '/login'
+      }
+      throw new ApiError(401, 'UNAUTHORIZED', userMsg)
     }
 
     const errorCode = errorBody?.error_code as string | undefined

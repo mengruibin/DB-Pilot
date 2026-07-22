@@ -37,3 +37,7 @@ pytest-asyncio>=0.23.0
 
 # Observability
 structlog>=24.0.0
+
+# Auth
+bcrypt>=4.0.0
+python-jose[cryptography]>=3.3.0

@@ -31,7 +31,9 @@ from app.agent.sse_utils import format_sse
 
 # 复用 B-20 的 SSE 取消机制（report_id → asyncio.Event）
 from app.api.chat import _active_streams, _running_tasks  # type: ignore[attr-defined]  # noqa: F811
+from app.auth.dependencies import get_current_user
 from app.database import async_session_factory, get_session
+from app.models.user import UserModel
 from app.db.factory import AdapterFactory
 from app.engine.health_check import HealthCheckEngine
 from app.models.connection import ConnectionConfigModel
@@ -485,6 +487,7 @@ async def list_reports(
 async def get_report(
     report_id: str,
     session: AsyncSession = Depends(get_session),  # noqa: B008
+    current_user: UserModel = Depends(get_current_user),
 ) -> Any:
     """获取单份健康巡检报告详情。"""
     logger.info("API 请求开始", endpoint="get_report", report_id=report_id)

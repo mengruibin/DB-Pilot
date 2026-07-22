@@ -16,7 +16,7 @@ export type Theme = 'dark' | 'light'
 export const useThemeStore = defineStore('theme', () => {
   // ─── state ───
   /** 当前主题，优先从 localStorage 读取，默认浅色 */
-  const theme = ref<Theme>((localStorage.getItem(STORAGE_KEY) as Theme) || 'light')
+  const theme = ref<Theme>((localStorage.getItem(STORAGE_KEY) as Theme) || 'dark')
 
   // ─── getters ───
   /** 是否为深色模式 */

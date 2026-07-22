@@ -24,7 +24,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_session
 from app.db.factory import AdapterFactory
+from app.auth.dependencies import get_current_user
 from app.models.connection import ConnectionConfigModel
+from app.models.user import UserModel
 from app.models.schemas import (
     ConnectionCreateRequest,
     ConnectionListResponse,
@@ -46,6 +48,7 @@ async def list_connections(
     page: int = Query(default=1, ge=1, description="页码"),
     page_size: int = Query(default=20, ge=1, alias="pageSize", description="每页条数（最大 100）"),
     session: AsyncSession = Depends(get_session),  # noqa: B008
+    current_user: UserModel = Depends(get_current_user),
 ) -> Any:
     """获取已保存连接列表。
 
@@ -89,6 +92,7 @@ async def list_connections(
 async def create_connection(
     body: ConnectionCreateRequest,
     session: AsyncSession = Depends(get_session),  # noqa: B008
+    current_user: UserModel = Depends(get_current_user),
 ) -> Any:
     """创建新连接。
 
@@ -130,6 +134,7 @@ async def create_connection(
 async def get_connection(
     connection_id: str,
     session: AsyncSession = Depends(get_session),  # noqa: B008
+    current_user: UserModel = Depends(get_current_user),
 ) -> Any:
     """获取单个连接详情。
 
@@ -165,6 +170,7 @@ async def update_connection(
     connection_id: str,
     body: ConnectionUpdateRequest,
     session: AsyncSession = Depends(get_session),  # noqa: B008
+    current_user: UserModel = Depends(get_current_user),
 ) -> Any:
     """更新连接配置。
 
@@ -209,6 +215,7 @@ async def update_connection(
 async def delete_connection(
     connection_id: str,
     session: AsyncSession = Depends(get_session),  # noqa: B008
+    current_user: UserModel = Depends(get_current_user),
 ) -> None:
     """删除连接。
 
@@ -246,6 +253,7 @@ async def test_connection(
     connection_id: str,
     password: str | None = Body(default=None, embed=True),
     session: AsyncSession = Depends(get_session),  # noqa: B008
+    current_user: UserModel = Depends(get_current_user),
 ) -> dict:
     """测试连接可用性。
 
@@ -290,22 +298,8 @@ async def test_connection(
         start = time.monotonic()
         adapter = AdapterFactory.create(test_config.db_type, test_config)
 
-        # ── 检测用户角色（仅 MySQL）并传入适配器 ──
-        # 此时做检测可提前填充 _role_cache，后续 SSE 聊天直接命中
-        user_role = "readonly"
-        if test_config.db_type == "mysql":
-            from app.engine.grant_detector import detect_mysql_role, set_cached_role
-
-            user_role = await detect_mysql_role(
-                host=test_config.host,
-                port=test_config.port or 3306,
-                user=test_config.user,
-                password=test_config.password or "",
-                database=test_config.database,
-                ssl_enabled=test_config.ssl_enabled or False,
-                ssl_ca_cert=test_config.ssl_ca_cert,
-            )
-            set_cached_role(connection_id, user_role)
+        # ── 用户角色：来自当前登录用户的 role 字段 ──
+        user_role = current_user.role
 
         await adapter.connect(test_config, user_role=user_role)
         await adapter.disconnect()
@@ -361,6 +355,7 @@ async def get_metadata(
     connection_id: str,
     password: str = Body(..., embed=True),
     session: AsyncSession = Depends(get_session),  # noqa: B008
+    current_user: UserModel = Depends(get_current_user),
 ) -> JSONResponse:
     """获取数据库 Schema 元数据。
 
