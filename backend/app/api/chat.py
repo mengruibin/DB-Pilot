@@ -36,7 +36,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent.sse_utils import format_sse
 from app.agent.state import AgentState
-from app.auth.dependencies import get_current_user
+from app.auth.dependencies import get_current_user, verify_resource_ownership
 from app.correlation import set_connection_id
 from app.database import async_session_factory, get_session
 from app.models.connection import ConnectionConfigModel
@@ -130,6 +130,7 @@ async def _get_or_create_session(
     connection_id: str,
     session_id: str | None,
     message: str,
+    current_user: UserModel,
 ) -> SessionModel:
     """获取已有会话或创建新会话。
 
@@ -138,6 +139,7 @@ async def _get_or_create_session(
         connection_id: 目标数据库连接 ID。
         session_id: 已有会话 ID（None 表示新建）。
         message: 用户消息，新建时用于生成 title。
+        current_user: 当前登录用户。
 
     Returns:
         SessionModel 实例。
@@ -146,6 +148,15 @@ async def _get_or_create_session(
         result = await db.execute(select(SessionModel).where(SessionModel.id == session_id))
         session = result.scalar_one_or_none()
         if session:
+            # 所有权校验：只能续接自己的会话
+            if session.user_id != current_user.id:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail={
+                        "error_code": "NOT_FOUND",
+                        "user_message": f"会话 {session_id} 不存在或已删除",
+                    },
+                )
             # 更新活跃时间
             session.last_active_at = datetime.now(UTC)
             await db.commit()
@@ -160,6 +171,7 @@ async def _get_or_create_session(
         status="active",
         message_count=0,
         tokens_used_total=0,
+        user_id=current_user.id,  # 关联当前用户
     )
     db.add(session)
     await db.commit()
@@ -244,6 +256,7 @@ async def _resolve_connection_config(
     password: str | None,
     user_role: str = "readonly",
     trace_id: str = "",
+    current_user: UserModel | None = None,
 ) -> dict[str, Any]:
     """从 ORM 读取连接配置，组装为工具调用参数。
 
@@ -252,6 +265,7 @@ async def _resolve_connection_config(
         connection_id: 连接 ID。
         password: 前端传入的连接密码。
         user_role: 当前登录用户的角色（readonly / admin）。
+        current_user: 当前登录用户（用于所有权校验）。
 
     Returns:
         包含 db_type, host, port, database, user, password 等字段的 dict。
@@ -261,6 +275,10 @@ async def _resolve_connection_config(
     )
     conn = result.scalar_one_or_none()
     if conn is None:
+        raise ValueError(f"连接 {connection_id} 不存在")
+
+    # 所有权校验：只能使用自己的连接
+    if current_user and conn.user_id != current_user.id:
         raise ValueError(f"连接 {connection_id} 不存在")
 
     # SAFETY: 密码仅存于内存，不持久化（AGENTS.md §安全与合规红线）
@@ -455,6 +473,7 @@ def _infer_message_type(state: dict[str, Any]) -> str:
 
 async def _stream_events(
     body: ChatRequest,
+    current_user: UserModel,
     user_role: str = "readonly",
 ) -> AsyncGenerator[str, None]:
     """SSE 事件流主引擎——异步生成器，逐条 yield SSE 格式化字符串。
@@ -496,6 +515,7 @@ async def _stream_events(
                 body.connection_id,
                 body.session_id,
                 body.message,
+                current_user,
             )
             set_connection_id(body.connection_id)
 
@@ -522,6 +542,7 @@ async def _stream_events(
                 body.connection_id,
                 body.password,
                 user_role=user_role,
+                current_user=current_user,
             )
             logger.info(
                 "连接配置已解析",
@@ -544,8 +565,9 @@ async def _stream_events(
                 }
 
             # ========== Step 3: 构建/恢复 AgentState + 执行 LangGraph 图 ==========
-            from app.agent.graph import get_agent_graph
             from langgraph.types import Command
+
+            from app.agent.graph import get_agent_graph
 
             graph = get_agent_graph()
             config: RunnableConfig = {"configurable": {"thread_id": session.id}}
@@ -949,7 +971,7 @@ async def chat_stream(
     )
 
     return StreamingResponse(
-        _stream_events(body, user_role=current_user.role),
+        _stream_events(body, current_user=current_user, user_role=current_user.role),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -1102,6 +1124,10 @@ async def list_sessions(
     query = select(SessionModel)
     count_query = select(func.count()).select_from(SessionModel)
 
+    # 所有用户只能看到自己的会话
+    query = query.where(SessionModel.user_id == current_user.id)
+    count_query = count_query.where(SessionModel.user_id == current_user.id)
+
     if connection_id:
         query = query.where(SessionModel.connection_id == connection_id)
         count_query = count_query.where(
@@ -1170,20 +1196,9 @@ async def list_session_messages(
         select(SessionModel).where(SessionModel.id == session_id)
     )
     session = sess_result.scalar_one_or_none()
-    if session is None:
-        logger.warning(
-            "API 请求失败",
-            endpoint="list_session_messages",
-            session_id=session_id,
-            reason="not_found",
-        )
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail={
-                "error_code": "NOT_FOUND",
-                "user_message": f"会话 {session_id} 不存在或已删除",
-            },
-        )
+    # 不存在或不属于当前用户均返回 404（信息隔离）
+    await verify_resource_ownership(session, current_user, "会话")
+    assert session is not None
 
     # AC-5：WHERE session_id = :id 天然保证跨会话隔离
     count_query = (
@@ -1257,17 +1272,9 @@ async def rename_session(
     # 查找会话
     result = await db_session.execute(select(SessionModel).where(SessionModel.id == session_id))
     session = result.scalar_one_or_none()
-    if session is None:
-        logger.warning(
-            "API 请求失败", endpoint="rename_session", session_id=session_id, reason="not_found"
-        )
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail={
-                "error_code": "NOT_FOUND",
-                "user_message": f"会话 {session_id} 不存在或已删除",
-            },
-        )
+    # 不存在或不属于当前用户均返回 404
+    await verify_resource_ownership(session, current_user, "会话")
+    assert session is not None
 
     # 更新标题和最后活跃时间
     session.title = body.title
@@ -1309,17 +1316,9 @@ async def delete_session(
     # 查找会话
     result = await db_session.execute(select(SessionModel).where(SessionModel.id == session_id))
     session = result.scalar_one_or_none()
-    if session is None:
-        logger.warning(
-            "API 请求失败", endpoint="delete_session", session_id=session_id, reason="not_found"
-        )
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail={
-                "error_code": "NOT_FOUND",
-                "user_message": f"会话 {session_id} 不存在或已删除",
-            },
-        )
+    # 不存在或不属于当前用户均返回 404
+    await verify_resource_ownership(session, current_user, "会话")
+    assert session is not None
 
     # 删除会话（消息通过 CASCADE 自动删除）
     await db_session.delete(session)

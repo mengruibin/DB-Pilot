@@ -22,17 +22,17 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.auth.dependencies import get_current_user, verify_resource_ownership
 from app.database import get_session
 from app.db.factory import AdapterFactory
-from app.auth.dependencies import get_current_user
 from app.models.connection import ConnectionConfigModel
-from app.models.user import UserModel
 from app.models.schemas import (
     ConnectionCreateRequest,
     ConnectionListResponse,
     ConnectionResponse,
     ConnectionUpdateRequest,
 )
+from app.models.user import UserModel
 
 logger = structlog.get_logger(__name__)
 
@@ -58,14 +58,21 @@ async def list_connections(
     # 限制 pageSize 最大 100（验收标准 AC-6）
     actual_page_size = min(page_size, 100)
 
-    # 查询总数
+    # 查询基础语句
     count_q = select(func.count()).select_from(ConnectionConfigModel)
+    stmt = select(ConnectionConfigModel)
+
+    # 所有用户只能看到自己创建的连接
+    count_q = count_q.where(ConnectionConfigModel.user_id == current_user.id)
+    stmt = stmt.where(ConnectionConfigModel.user_id == current_user.id)
+
+    # 查询总数
     total_result = await session.execute(count_q)
     total = total_result.scalar() or 0
 
-    # 查询分页数据
+    # 添加分页和排序
     stmt = (
-        select(ConnectionConfigModel)
+        stmt
         .offset((page - 1) * actual_page_size)
         .limit(actual_page_size)
         .order_by(ConnectionConfigModel.created_at.desc())
@@ -116,6 +123,7 @@ async def create_connection(
         ssl_ca_cert=body.ssl_ca_cert,
         extra_params=body.extra_params,
         status="unknown",  # 新连接默认未测试
+        user_id=current_user.id,  # 关联当前用户
     )
     session.add(db_conn)
     await session.commit()
@@ -146,16 +154,10 @@ async def get_connection(
         select(ConnectionConfigModel).where(ConnectionConfigModel.id == connection_id)
     )
     db_conn = result.scalar_one_or_none()
-    if db_conn is None:
-        logger.warning("API 请求失败", endpoint="get_connection",
-                        connection_id=connection_id, reason="not_found")
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail={
-                "error_code": "NOT_FOUND",
-                "user_message": f"连接 {connection_id} 不存在或已删除",
-            },
-        )
+    # 不存在或不属于当前用户均返回 404
+    await verify_resource_ownership(db_conn, current_user, "连接")
+    # 类型安全保障：verify_resource_ownership 在 None 时已抛异常
+    assert db_conn is not None
     logger.info("API 请求完成", endpoint="get_connection",
                  connection_id=connection_id)
     return ConnectionResponse.model_validate(db_conn)
@@ -181,16 +183,9 @@ async def update_connection(
         select(ConnectionConfigModel).where(ConnectionConfigModel.id == connection_id)
     )
     db_conn = result.scalar_one_or_none()
-    if db_conn is None:
-        logger.warning("API 请求失败", endpoint="update_connection",
-                        connection_id=connection_id, reason="not_found")
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail={
-                "error_code": "NOT_FOUND",
-                "user_message": f"连接 {connection_id} 不存在或已删除",
-            },
-        )
+    # 不存在或不属于当前用户均返回 404
+    await verify_resource_ownership(db_conn, current_user, "连接")
+    assert db_conn is not None
 
     # 更新非空字段（password 特殊处理——不入库）
     update_data = body.model_dump(exclude_unset=True, exclude={"password"})
@@ -226,16 +221,9 @@ async def delete_connection(
         select(ConnectionConfigModel).where(ConnectionConfigModel.id == connection_id)
     )
     db_conn = result.scalar_one_or_none()
-    if db_conn is None:
-        logger.warning("API 请求失败", endpoint="delete_connection",
-                        connection_id=connection_id, reason="not_found")
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail={
-                "error_code": "NOT_FOUND",
-                "user_message": f"连接 {connection_id} 不存在或已删除",
-            },
-        )
+    # 不存在或不属于当前用户均返回 404
+    await verify_resource_ownership(db_conn, current_user, "连接")
+    assert db_conn is not None
 
     await session.delete(db_conn)
     await session.commit()
@@ -268,16 +256,9 @@ async def test_connection(
         select(ConnectionConfigModel).where(ConnectionConfigModel.id == connection_id)
     )
     db_conn = result.scalar_one_or_none()
-    if db_conn is None:
-        logger.warning("API 请求失败", endpoint="test_connection",
-                        connection_id=connection_id, reason="not_found")
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail={
-                "error_code": "NOT_FOUND",
-                "user_message": f"连接 {connection_id} 不存在或已删除",
-            },
-        )
+    # 不存在或不属于当前用户均返回 404
+    await verify_resource_ownership(db_conn, current_user, "连接")
+    assert db_conn is not None
 
     # 构建连接配置（密码从前端传入，不持久化）
     test_config = ConnectionCreateRequest(
@@ -367,16 +348,9 @@ async def get_metadata(
         select(ConnectionConfigModel).where(ConnectionConfigModel.id == connection_id)
     )
     db_conn = result.scalar_one_or_none()
-    if db_conn is None:
-        logger.warning("API 请求失败", endpoint="get_metadata",
-                        connection_id=connection_id, reason="not_found")
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail={
-                "error_code": "NOT_FOUND",
-                "user_message": f"连接 {connection_id} 不存在或已删除",
-            },
-        )
+    # 不存在或不属于当前用户均返回 404
+    await verify_resource_ownership(db_conn, current_user, "连接")
+    assert db_conn is not None
 
     # 构建连接配置
     config = ConnectionCreateRequest(

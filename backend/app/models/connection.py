@@ -69,6 +69,11 @@ class ConnectionConfigModel(Base):
     status: Mapped[str] = mapped_column(
         String(16), nullable=False, default="unknown",
     )
+    # 创建此连接的用户 ID（NULL = 历史遗留数据，仅管理员可见）
+    user_id: Mapped[str | None] = mapped_column(
+        String(36), nullable=True, default=None, index=True,
+        comment="创建此连接的用户 ID（NULL = 历史遗留数据）",
+    )
 
     def __repr__(self) -> str:
         """调试用字符串表示，不暴露敏感信息。"""

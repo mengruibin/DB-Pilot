@@ -7,6 +7,8 @@ FastAPI 认证依赖注入函数。
 
 from __future__ import annotations
 
+from typing import Any
+
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import select
@@ -98,3 +100,41 @@ async def get_current_admin_user(
             },
         )
     return current_user
+
+
+async def verify_resource_ownership(
+    resource: Any | None,
+    current_user: UserModel,
+    resource_name: str = "资源",
+) -> None:
+    """校验当前用户对资源的归属权。
+
+    所有用户（含 admin）一视同仁，只能访问自己的资源（user_id == 当前用户）。
+    不存在或无权限均返回 404，使用相同错误报文防止信息泄露。
+
+    Args:
+        resource: 数据库查询返回的 ORM 对象（None 表示不存在）。
+        current_user: 当前登录用户。
+        resource_name: 资源中文名，用于 404 报错信息。
+
+    Raises:
+        HTTPException 404: 资源不存在或不属于当前用户。
+    """
+    if resource is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "error_code": "NOT_FOUND",
+                "user_message": f"{resource_name} 不存在或已删除",
+            },
+        )
+    # 所有用户（含 admin）只能访问自己的资源
+    resource_user_id = getattr(resource, "user_id", None)
+    if resource_user_id != current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "error_code": "NOT_FOUND",
+                "user_message": f"{resource_name} 不存在或已删除",
+            },
+            )

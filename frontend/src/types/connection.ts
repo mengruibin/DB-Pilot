@@ -29,6 +29,8 @@ export interface ConnectionConfig {
   updated_at: string
   last_tested_at: string | null
   status: ConnectionStatusValue
+  /** 所属用户 ID（null = 历史遗留数据） */
+  user_id?: string
 }
 
 /** 创建连接请求体 */

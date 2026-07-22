@@ -31,9 +31,8 @@ from app.agent.sse_utils import format_sse
 
 # 复用 B-20 的 SSE 取消机制（report_id → asyncio.Event）
 from app.api.chat import _active_streams, _running_tasks  # type: ignore[attr-defined]  # noqa: F811
-from app.auth.dependencies import get_current_user
+from app.auth.dependencies import get_current_user, verify_resource_ownership
 from app.database import async_session_factory, get_session
-from app.models.user import UserModel
 from app.db.factory import AdapterFactory
 from app.engine.health_check import HealthCheckEngine
 from app.models.connection import ConnectionConfigModel
@@ -43,6 +42,7 @@ from app.models.schemas import (
     HealthReportListResponse,
     HealthReportResponse,
 )
+from app.models.user import UserModel
 
 logger = structlog.get_logger(__name__)
 
@@ -61,6 +61,7 @@ async def _load_and_create_adapter(
     connection_id: str,
     password: str | None,
     session: AsyncSession,
+    current_user: UserModel | None = None,
 ) -> tuple[Any, ConnectionCreateRequest]:
     """从 ORM 加载连接配置并创建目标数据库适配器实例。
 
@@ -68,12 +69,13 @@ async def _load_and_create_adapter(
         connection_id: 连接 ID。
         password: 前端传入的连接密码（非持久化）。
         session: 内部数据库会话。
+        current_user: 当前登录用户（用于所有权校验）。
 
     Returns:
         (adapter, config) 元组。
 
     Raises:
-        HTTPException: 连接不存在时返回 404。
+        HTTPException: 连接不存在或无权访问时返回 404。
     """
     result = await session.execute(
         select(ConnectionConfigModel).where(
@@ -81,6 +83,9 @@ async def _load_and_create_adapter(
         )
     )
     db_conn = result.scalar_one_or_none()
+    # 不存在或不属于当前用户均返回 404
+    if current_user:
+        await verify_resource_ownership(db_conn, current_user, "连接")
     if db_conn is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -118,6 +123,7 @@ async def _health_stream(
     check_items: list[str] | None,
     timeout_sec: int,
     password: str | None,
+    current_user: UserModel | None = None,
 ) -> AsyncGenerator[str, None]:
     """健康巡检 SSE 流主引擎——异步生成器，逐条 yield SSE 格式化字符串。
 
@@ -156,7 +162,7 @@ async def _health_stream(
         # Step 1: 加载连接配置 + 创建适配器
         async with async_session_factory() as db_session:
             adapter, config = await _load_and_create_adapter(
-                connection_id, password, db_session,
+                connection_id, password, db_session, current_user=current_user,
             )
             await adapter.connect(config)
 
@@ -195,6 +201,7 @@ async def _health_stream(
                         duration_sec=elapsed,
                         severity_counts=partial_counts,
                         categories=_build_categories(all_results),
+                        user_id=current_user.id if current_user else None,
                     )
                     return
 
@@ -256,6 +263,7 @@ async def _health_stream(
                 duration_sec=elapsed,
                 severity_counts=severity,
                 categories=categories,
+                user_id=current_user.id if current_user else None,
             )
 
             # AC-2：发送 health_result 事件
@@ -295,6 +303,7 @@ async def _health_stream(
                     duration_sec=elapsed_err,
                     severity_counts={"error": 0, "warning": 0, "pass": 0, "skipped": 0},
                     categories=[],
+                    user_id=current_user.id if current_user else None,
                 )
         except Exception as persist_err:
             logger.warning("异常报告持久化失败", report_id=report_id,
@@ -370,8 +379,13 @@ async def _persist_report(
     duration_sec: float,
     severity_counts: dict[str, int],
     categories: list[dict[str, Any]],
+    user_id: str | None = None,
 ) -> None:
-    """持久化健康巡检报告到 reports 表。"""
+    """持久化健康巡检报告到 reports 表。
+
+    Args:
+        user_id: 创建此报告的用户 ID（None = 历史遗留数据）。
+    """
     report = ReportModel(
         id=report_id,
         connection_id=connection_id,
@@ -381,6 +395,7 @@ async def _persist_report(
         duration_sec=round(duration_sec, 2),
         severity_counts=severity_counts,
         categories=categories,
+        user_id=user_id,
     )
     db_session.add(report)
     await db_session.commit()
@@ -407,6 +422,7 @@ async def health_check_stream(
         default=None, embed=True,
         description="连接密码（由前端 localStorage 持有）",
     ),
+    current_user: UserModel = Depends(get_current_user),
 ) -> StreamingResponse:
     """触发健康巡检，返回 SSE 流。
 
@@ -426,7 +442,10 @@ async def health_check_stream(
                 check_items=check_items, timeout_sec=timeout_sec)
 
     return StreamingResponse(
-        _health_stream(connection_id, check_items, timeout_sec, password),
+        _health_stream(
+            connection_id, check_items, timeout_sec, password,
+            current_user=current_user,
+        ),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -445,6 +464,7 @@ async def list_reports(
         description="每页条数（最大 100）",
     ),
     session: AsyncSession = Depends(get_session),  # noqa: B008
+    current_user: UserModel = Depends(get_current_user),
 ) -> Any:
     """获取健康巡检报告历史列表（分页）。"""
     logger.info("API 请求开始", endpoint="list_reports",
@@ -453,6 +473,10 @@ async def list_reports(
     # 构建查询
     query = select(ReportModel)
     count_query = select(func.count()).select_from(ReportModel)
+
+    # 所有用户只能看到自己的报告
+    query = query.where(ReportModel.user_id == current_user.id)
+    count_query = count_query.where(ReportModel.user_id == current_user.id)
 
     if connection_id:
         query = query.where(ReportModel.connection_id == connection_id)
@@ -496,17 +520,9 @@ async def get_report(
         select(ReportModel).where(ReportModel.id == report_id)
     )
     report = result.scalar_one_or_none()
-
-    if report is None:
-        logger.warning("API 请求失败", endpoint="get_report",
-                       report_id=report_id, reason="not_found")
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail={
-                "error_code": "NOT_FOUND",
-                "user_message": f"报告 {report_id} 不存在或已删除",
-            },
-        )
+    # 不存在或不属于当前用户均返回 404
+    await verify_resource_ownership(report, current_user, "报告")
+    assert report is not None
 
     logger.info("API 请求完成", endpoint="get_report",
                 report_id=report_id)
@@ -523,6 +539,7 @@ async def export_report(
     report_id: str,
     format: str = Query(default="html", alias="format", description="导出格式：html / pdf"),
     session: AsyncSession = Depends(get_session),  # noqa: B008
+    current_user: UserModel = Depends(get_current_user),
 ) -> Any:
     """导出健康巡检报告（HTML/PDF）。
 
@@ -553,16 +570,9 @@ async def export_report(
         select(ReportModel).where(ReportModel.id == report_id)
     )
     report = result.scalar_one_or_none()
-    if report is None:
-        logger.warning("API 请求失败", endpoint="export_report",
-                       report_id=report_id, reason="not_found")
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail={
-                "error_code": "NOT_FOUND",
-                "user_message": f"报告 {report_id} 不存在或已删除",
-            },
-        )
+    # 不存在或不属于当前用户均返回 404
+    await verify_resource_ownership(report, current_user, "报告")
+    assert report is not None
 
     # 计算环形图参数
     score = min(max(report.score or 0, 0), 100)

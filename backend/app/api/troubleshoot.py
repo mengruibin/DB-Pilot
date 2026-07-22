@@ -27,14 +27,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent.sse_utils import format_sse
 from app.agent.state import AgentState
-from app.auth.dependencies import get_current_user
 
 # 复用 B-20 的 SSE 取消机制
 from app.api.chat import _active_streams, _running_tasks  # type: ignore[attr-defined]  # noqa: F811
+from app.auth.dependencies import get_current_user, verify_resource_ownership
 from app.database import async_session_factory
 from app.models.connection import ConnectionConfigModel
-from app.models.user import UserModel
 from app.models.schemas import TroubleshootRequest
+from app.models.user import UserModel
 
 logger = structlog.get_logger(__name__)
 
@@ -52,6 +52,7 @@ async def _resolve_conn_config(
     session: AsyncSession,
     user_role: str = "readonly",
     trace_id: str = "",
+    current_user: UserModel | None = None,
 ) -> dict[str, Any]:
     """从 ORM 加载连接配置，组装为工具调用参数字典。
 
@@ -60,6 +61,7 @@ async def _resolve_conn_config(
         password: 连接密码。
         session: 数据库会话。
         user_role: 当前登录用户的角色（readonly / admin）。
+        current_user: 当前登录用户（用于所有权校验）。
     """
     result = await session.execute(
         select(ConnectionConfigModel).where(
@@ -67,6 +69,9 @@ async def _resolve_conn_config(
         )
     )
     conn = result.scalar_one_or_none()
+    # 不存在或不属于当前用户均返回 404
+    if current_user:
+        await verify_resource_ownership(conn, current_user, "连接")
     if conn is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -101,6 +106,7 @@ async def _troubleshoot_stream(
     connection_id: str,
     body: TroubleshootRequest,
     user_role: str = "readonly",
+    current_user: UserModel | None = None,
 ) -> AsyncGenerator[str, None]:
     """故障排查 SSE 流——由 LangGraph Agent 图自主决策工具调用。
 
@@ -136,6 +142,7 @@ async def _troubleshoot_stream(
             conn_config = await _resolve_conn_config(
                 connection_id, body.password, db,
                 user_role=user_role,
+                current_user=current_user,
             )
             logger.info("连接配置已解析",
                         connection_id=connection_id,
@@ -244,7 +251,11 @@ async def troubleshoot_stream(
                 user_role=current_user.role)
 
     return StreamingResponse(
-        _troubleshoot_stream(connection_id, body, user_role=current_user.role),
+        _troubleshoot_stream(
+            connection_id, body,
+            user_role=current_user.role,
+            current_user=current_user,
+        ),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

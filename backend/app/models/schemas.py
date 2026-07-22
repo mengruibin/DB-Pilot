@@ -237,6 +237,7 @@ class ConnectionResponse(BaseModel):
     updated_at: datetime = Field(..., description="更新时间")
     last_tested_at: datetime | None = Field(default=None, description="最后测试时间")
     status: str = Field(..., description="连接状态")
+    user_id: str | None = Field(default=None, description="所属用户 ID（null = 历史遗留数据）")
 
     model_config = {
         "from_attributes": True,  # 支持从 ORM 模型自动转换
@@ -276,6 +277,7 @@ class SessionResponse(BaseModel):
     status: str = Field(..., description="会话状态：active / idle / closed")
     message_count: int = Field(..., description="消息总数")
     tokens_used_total: int = Field(..., description="累计 token 消耗")
+    user_id: str | None = Field(default=None, description="所属用户 ID（null = 历史遗留数据）")
 
     model_config = {"from_attributes": True}
 
@@ -524,6 +526,7 @@ class HealthReportResponse(BaseModel):
         ...,
         description="检查项分类列表",
     )
+    user_id: str | None = Field(default=None, description="所属用户 ID（null = 历史遗留数据）")
 
     model_config = {"from_attributes": True}
 

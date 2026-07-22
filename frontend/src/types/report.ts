@@ -70,6 +70,8 @@ export interface HealthReport {
   duration_sec: number
   severity_counts: SeverityCounts
   categories: HealthReportCategory[]
+  /** 所属用户 ID（null = 历史遗留数据） */
+  user_id?: string
 }
 
 // ─── 故障排查 ───

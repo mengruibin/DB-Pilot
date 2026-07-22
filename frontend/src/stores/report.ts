@@ -149,6 +149,8 @@ export const useReportStore = defineStore('report', () => {
       const connectionStore = (await import('@/stores/connection')).useConnectionStore()
       const password = connectionStore.getPassword(connectionId)
 
+      // 注入 Authorization 头（与 http 客户端保持一致）
+      const token = localStorage.getItem('db-pilot:token')
       const response = await fetch(
         `/api/connections/${connectionId}/health-check`,
         {
@@ -157,6 +159,7 @@ export const useReportStore = defineStore('report', () => {
             'Content-Type': 'application/json',
             Accept: 'text/event-stream',
             'X-Request-ID': crypto.randomUUID(),
+            ...(token ? { Authorization: `Bearer ${token}` } : {}),
           },
           body: JSON.stringify({
             check_items: checkItems,

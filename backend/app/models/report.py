@@ -63,6 +63,11 @@ class ReportModel(Base):
         JSON, nullable=True, default=None,
         comment="检查项分类列表 JSON",
     )
+    # 创建此报告的用户 ID（NULL = 历史遗留数据，仅管理员可见）
+    user_id: Mapped[str | None] = mapped_column(
+        String(36), nullable=True, default=None, index=True,
+        comment="创建此报告的用户 ID（NULL = 历史遗留数据）",
+    )
 
     def __repr__(self) -> str:
         return (f"<Report id={self.id!r} status={self.status!r} "

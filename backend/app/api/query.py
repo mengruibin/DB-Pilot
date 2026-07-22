@@ -20,17 +20,17 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.auth.dependencies import get_current_user, verify_resource_ownership
 from app.database import get_session
 from app.db.factory import AdapterFactory
-from app.auth.dependencies import get_current_user
 from app.models.connection import ConnectionConfigModel
-from app.models.user import UserModel
 from app.models.schemas import (
     ConnectionCreateRequest,
     ExplainRequest,
     QueryRequest,
     SlowQueryListResponse,
 )
+from app.models.user import UserModel
 
 logger = structlog.get_logger(__name__)
 
@@ -45,6 +45,7 @@ async def _load_and_create_adapter(
     connection_id: str,
     password: str | None,
     session: AsyncSession,
+    current_user: UserModel | None = None,
 ) -> tuple[Any, ConnectionCreateRequest]:
     """从 ORM 加载连接配置并创建目标数据库适配器实例。
 
@@ -52,12 +53,13 @@ async def _load_and_create_adapter(
         connection_id: 连接 ID。
         password: 前端传入的连接密码（非持久化）。
         session: 内部数据库会话。
+        current_user: 当前登录用户（用于所有权校验）。
 
     Returns:
         (adapter, config) 元组，调用方负责 connect/disconnect。
 
     Raises:
-        HTTPException: 连接不存在时返回 404。
+        HTTPException: 连接不存在或无权访问时返回 404。
     """
     result = await session.execute(
         select(ConnectionConfigModel).where(
@@ -65,6 +67,9 @@ async def _load_and_create_adapter(
         )
     )
     db_conn = result.scalar_one_or_none()
+    # 不存在或不属于当前用户均返回 404
+    if current_user:
+        await verify_resource_ownership(db_conn, current_user, "连接")
     if db_conn is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -132,6 +137,7 @@ async def execute_query(
     try:
         adapter, config = await _load_and_create_adapter(
             connection_id, body.password, session,
+            current_user=current_user,
         )
 
         # AC-1：所有 SQL 经过 sql_auditor.audit() 校验后执行
@@ -236,6 +242,7 @@ async def execute_explain(
     try:
         adapter, config = await _load_and_create_adapter(
             connection_id, body.password, session,
+            current_user=current_user,
         )
 
         await adapter.connect(config)
@@ -353,6 +360,7 @@ async def list_slow_queries(
     try:
         adapter, config = await _load_and_create_adapter(
             connection_id, password, session,
+            current_user=current_user,
         )
 
         await adapter.connect(config)

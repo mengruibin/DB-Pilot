@@ -18,6 +18,8 @@ export interface Session {
   status: SessionStatus
   message_count: number
   tokens_used_total: number
+  /** 所属用户 ID（null = 历史遗留数据） */
+  user_id?: string
 }
 
 // ─── 消息 ───
