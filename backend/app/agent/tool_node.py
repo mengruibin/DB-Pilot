@@ -19,8 +19,9 @@ from __future__ import annotations
 import asyncio
 import json as _json
 import time
+import types
 from collections.abc import Mapping
-from typing import Any
+from typing import Any, get_origin, get_args
 
 import structlog
 from langchain_core.messages import AIMessage, ToolMessage
@@ -63,6 +64,51 @@ def _resolve_checks(tool_fn: Any) -> list:
             tool_name=tool_fn.name,
         )
     return checks
+
+
+def _is_list_type(annotation: Any) -> bool:
+    """判断类型注解中是否包含 list 类型（处理 Union 如 list[str] | None）。"""
+    origin = get_origin(annotation)
+    if origin is list:
+        return True
+    # list[str] | None → UnionType, args=(list[str], NoneType)
+    if origin is type(None) or origin is types.UnionType:  # noqa: E721
+        return any(_is_list_type(a) for a in get_args(annotation))
+    return False
+
+
+def _coerce_tool_args(tool_fn: Any, tool_args: dict[str, Any]) -> None:
+    """修正 LLM 工具调用参数的类型不匹配（就地修改）。
+
+    某些 LLM（如 DeepSeek 部分版本）在 function calling 中可能把数组参数
+    传成 JSON 字符串（如 '"[\"a\",\"b\"]"') 而非原生 list，
+    导致 Pydantic 校验失败。此函数检查工具 schema 中标为 list 的字段，
+    若实际传入的是字符串则尝试解析。
+
+    Args:
+        tool_fn: BaseTool 实例，用于读取 args_schema。
+        tool_args: 即将传给 ainvoke 的参数 dict（就地修改）。
+    """
+    schema = getattr(tool_fn, "args_schema", None)
+    if schema is None:
+        return
+    for field_name, field in schema.model_fields.items():
+        if field_name not in tool_args:
+            continue
+        val = tool_args[field_name]
+        if not isinstance(val, str):
+            continue
+        if not _is_list_type(field.annotation):
+            continue
+        # 字段标为 list 但值是字符串 → 尝试 JSON 解析
+        try:
+            tool_args[field_name] = _json.loads(val)
+        except (_json.JSONDecodeError, TypeError):
+            logger.debug(
+                "tool arg 类型修正失败",
+                field=field_name,
+                value_preview=str(val)[:80],
+            )
 
 
 async def _run_one_tool(
@@ -185,6 +231,9 @@ async def _run_one_tool(
             )
 
         # ── 5. 执行工具 ──
+        # 某些 LLM(如 DeepSeek)可能把数组参数串化成 JSON 字符串，
+        # 在 ainvoke 的 Pydantic 校验前做类型修正
+        _coerce_tool_args(tool_fn, tool_args)
         try:
             result = await tool_fn.ainvoke(tool_args)
             # ── 5.5. LLM 上下文窗口保护：截断大结果集 ──
