@@ -102,7 +102,11 @@ async function request<T>(url: string, options: RequestOptions = {}): Promise<T>
     // 必须放在错误体解析之后，优先使用后端的 user_message（如"用户名或密码错误"）
     if (response.status === 401) {
       localStorage.removeItem('db-pilot:token')
-      const userMsg = (errorBody?.user_message as string) || '登录已过期，请重新登录'
+      // 兼容平铺 {user_message: "..."} 和嵌套 {detail: {user_message: "..."}} 两种结构
+      const detail = errorBody?.detail as Record<string, unknown> | undefined
+      const userMsg = (errorBody?.user_message as string) ||
+        (detail?.user_message as string) ||
+        '登录已过期，请重新登录'
       // 仅非登录页跳转（避免登录失败时页面跳转）
       if (window.location.pathname !== '/login') {
         window.location.href = '/login'

@@ -170,34 +170,40 @@ async def get_slow_queries(
     password: Annotated[str, InjectedToolArg],
     time_range: Literal["1h", "6h", "24h", "7d"] = "1h",
     limit: int = 20,
-    user_role: Annotated[str, InjectedToolArg] = "readonly",  # 未显式传入时采用更保守的只读兜底
+    include_explain: bool = False,
+    user_role: Annotated[str, InjectedToolArg] = "readonly",
     ssl_enabled: Annotated[bool, InjectedToolArg] = False,
     ssl_ca_cert: Annotated[str | None, InjectedToolArg] = None,
 ) -> dict[str, Any]:
     """获取目标数据库在指定时间范围内的慢查询列表（含 SQL 文本、执行耗时、锁等待等）。
     适用于慢查询分析和查询性能优化。
-    若目标数据库未开启慢查询日志，返回空列表并附带 warning 说明。
+    若目标数据库未开启慢查询日志，返回空列表并附带开启指引；同时自动降级到
+    performance_schema 等替代方案。
 
     Args:
         time_range: 查询时间范围（1h=最近1小时 / 6h=最近6小时 / 24h=最近24小时 / 7d=最近7天）。
         limit: 最大返回条数（默认 20，上限 100）。
+        include_explain: 是否自动对慢查询执行 EXPLAIN（最多前 5 条最慢查询）。
 
     Returns:
-        成功: {
-            "items": [
-                {
-                    "sql_text": str,             // SQL 文本
-                    "query_time_sec": float,     // 执行耗时（秒）
-                    "lock_time_sec": float,      // 锁等待耗时（秒）
-                    "rows_examined": int,        // 扫描行数
-                    "rows_sent": int,            // 返回行数
-                    "executed_at": str           // 执行时间（ISO 8601）
-                }
-            ],
+        成功（日志开启）: {
+            "items": [{ "sql_text", "query_time_sec", "lock_time_sec",
+                        "rows_examined", "rows_sent", "executed_at",
+                        "explain_result"（可选） }],
             "total": int,
-            "summary": str
+            "summary": str,
+            "slow_log_enabled": true,
+            "fallback_used": false
         }
-        日志未启用: {"items": [], "warning": str, "total": 0, "summary": str}
+        日志未启用（降级成功）: {
+            "items": [...],
+            "total": int,
+            "warning": str,         // 降级说明
+            "slow_log_enabled": false,
+            "fallback_used": true
+        }
+        完全不可用: {"items": [], "warning": str, "total": 0, "summary": str,
+                      "slow_log_enabled": bool, "fallback_used": bool}
         失败: {"error": str, "detail": str}
     """
     try:
@@ -216,22 +222,42 @@ async def get_slow_queries(
         await adapter.connect(config, user_role=user_role)
 
         # SAFETY: 慢查询日志读取为只读操作，不修改数据库状态
-        result = await adapter.get_slow_queries(limit=limit, time_range=time_range)
+        result = await adapter.get_slow_queries(
+            limit=limit,
+            time_range=time_range,
+            include_explain=include_explain,
+        )
         await adapter.disconnect()
 
         items = result.get("items", [])
         warning = result.get("warning")
+        slow_log_enabled = result.get("slow_log_enabled", True)
+        fallback_used = result.get("fallback_used", False)
+
+        # 构建摘要
+        summary_parts = [f"找到 {len(items)} 条慢查询"]
+        if fallback_used:
+            summary_parts.append("（使用降级数据源）")
+        if warning:
+            summary_parts.append(f" 提示: {warning[:80]}")
 
         response: dict[str, Any] = {
             "items": items,
             "total": len(items),
-            "summary": f"找到 {len(items)} 条慢查询",
+            "summary": "".join(summary_parts),
+            "slow_log_enabled": slow_log_enabled,
+            "fallback_used": fallback_used,
         }
         if warning:
             response["warning"] = warning
 
         logger.info(
-            "工具执行成功", tool="get_slow_queries", connection_id=connection_id, total=len(items)
+            "工具执行成功",
+            tool="get_slow_queries",
+            connection_id=connection_id,
+            total=len(items),
+            slow_log_enabled=slow_log_enabled,
+            fallback_used=fallback_used,
         )
         return response
     except Exception as exc:

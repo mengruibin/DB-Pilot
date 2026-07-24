@@ -25,6 +25,7 @@ _ASYNCPG_AVAILABLE: bool = False
 _ASYNCPG_ERR: str | None = None
 try:
     import asyncpg  # noqa: F401 — 延迟到 connect() 中实际使用
+
     _ASYNCPG_AVAILABLE = True
 except ImportError as exc:
     _ASYNCPG_ERR = str(exc)
@@ -58,10 +59,7 @@ class PostgresAdapter(BaseAdapter):
             user_role: 用户角色（当前 PostgreSQL 适配器忽略此参数，保持标准模式）。
         """
         if not _ASYNCPG_AVAILABLE:
-            raise ImportError(
-                "无法加载 asyncpg 驱动。"
-                "请安装：pip install asyncpg"
-            )
+            raise ImportError("无法加载 asyncpg 驱动。请安装：pip install asyncpg")
 
         import asyncpg
 
@@ -84,20 +82,19 @@ class PostgresAdapter(BaseAdapter):
             async with self._pool.acquire() as conn:
                 await conn.execute("SELECT 1")
             self._connected = True
-            logger.info("PostgreSQL 连接成功",
-                        host=config.host, port=config.port,
-                        database=config.database)
+            logger.info(
+                "PostgreSQL 连接成功", host=config.host, port=config.port, database=config.database
+            )
             return True
 
         except Exception as exc:
             self._connected = False
-            logger.warning("PostgreSQL 连接失败",
-                           host=config.host, port=config.port,
-                           error=str(exc)[:100])
+            logger.warning(
+                "PostgreSQL 连接失败", host=config.host, port=config.port, error=str(exc)[:100]
+            )
             # SAFETY: 连接失败异常消息仅包含 host:port
             raise ConnectionError(
-                f"PostgreSQL 连接失败 [{config.host}:{config.port}]"
-                " — 请检查网络、用户名和密码"
+                f"PostgreSQL 连接失败 [{config.host}:{config.port}] — 请检查网络、用户名和密码"
             ) from exc
 
     async def disconnect(self) -> None:
@@ -142,10 +139,22 @@ class PostgresAdapter(BaseAdapter):
             param_values = list(params.values()) if params else []
             # 判断 SQL 类型：INSERT/UPDATE/DELETE 等写操作使用 execute() 获取影响行数
             sql_upper = sql.strip().upper()
-            is_write = any(sql_upper.startswith(kw) for kw in [
-                "INSERT", "UPDATE", "DELETE", "TRUNCATE", "CREATE",
-                "ALTER", "DROP", "GRANT", "REVOKE", "MERGE", "REPLACE",
-            ])
+            is_write = any(
+                sql_upper.startswith(kw)
+                for kw in [
+                    "INSERT",
+                    "UPDATE",
+                    "DELETE",
+                    "TRUNCATE",
+                    "CREATE",
+                    "ALTER",
+                    "DROP",
+                    "GRANT",
+                    "REVOKE",
+                    "MERGE",
+                    "REPLACE",
+                ]
+            )
 
             async with self._pool.acquire() as conn:
                 # 设置当前会话的 statement_timeout（30s 执行保护）
@@ -166,10 +175,13 @@ class PostgresAdapter(BaseAdapter):
                     affected = len(rows)
 
             elapsed = int((time.monotonic() - start) * 1000)
-            logger.debug("PostgreSQL 查询完成",
-                         sql=sql[:200], execution_time_ms=elapsed,
-                         rows_returned=len(rows),
-                         affected_rows=affected)
+            logger.debug(
+                "PostgreSQL 查询完成",
+                sql=sql[:200],
+                execution_time_ms=elapsed,
+                rows_returned=len(rows),
+                affected_rows=affected,
+            )
             return {
                 "columns": columns,
                 "rows": [list(row.values()) for row in rows],
@@ -191,9 +203,7 @@ class PostgresAdapter(BaseAdapter):
 
     async def get_databases(self) -> list[str]:
         """查询实例上的数据库列表（PostgreSQL 中为 datname）。"""
-        result = await self.execute(
-            "SELECT datname FROM pg_database WHERE datistemplate = false"
-        )
+        result = await self.execute("SELECT datname FROM pg_database WHERE datistemplate = false")
         return [row[0] for row in result["rows"]]
 
     async def get_tables(self, database: str) -> list[dict[str, Any]]:
@@ -212,12 +222,14 @@ class PostgresAdapter(BaseAdapter):
         result = await self.execute(sql)
         tables = []
         for row in result["rows"]:
-            tables.append({
-                "database": database,
-                "table_name": row[0],
-                "comment": row[1] or "",
-                "row_count_estimate": row[2],
-            })
+            tables.append(
+                {
+                    "database": database,
+                    "table_name": row[0],
+                    "comment": row[1] or "",
+                    "row_count_estimate": row[2],
+                }
+            )
         return tables
 
     async def get_columns(
@@ -257,13 +269,15 @@ class PostgresAdapter(BaseAdapter):
         result = await self.execute(sql, {"table": table})
         columns = []
         for row in result["rows"]:
-            columns.append({
-                "name": row[0],
-                "type": row[1],
-                "nullable": row[2] == "YES",
-                "is_primary": bool(row[3]),
-                "comment": row[4],
-            })
+            columns.append(
+                {
+                    "name": row[0],
+                    "type": row[1],
+                    "nullable": row[2] == "YES",
+                    "is_primary": bool(row[3]),
+                    "comment": row[4],
+                }
+            )
         return columns
 
     async def get_indexes(
@@ -291,14 +305,17 @@ class PostgresAdapter(BaseAdapter):
             is_unique = "UNIQUE" in str(idx_def).upper()
             # 提取括号内的列名
             import re
+
             col_match = re.search(r"\((.*?)\)", str(idx_def))
             columns = [c.strip() for c in col_match.group(1).split(",")] if col_match else []
-            indexes.append({
-                "name": row[0],
-                "columns": columns,
-                "is_unique": is_unique,
-                "type": row[2] or "BTREE",
-            })
+            indexes.append(
+                {
+                    "name": row[0],
+                    "columns": columns,
+                    "is_unique": is_unique,
+                    "type": row[2] or "BTREE",
+                }
+            )
         return indexes
 
     # ================== 诊断 ==================
@@ -307,6 +324,7 @@ class PostgresAdapter(BaseAdapter):
         self,
         limit: int = 20,
         time_range: str = "1h",
+        include_explain: bool = False,
     ) -> dict[str, Any]:
         """从 pg_stat_statements 扩展读取慢查询。
 
@@ -329,7 +347,7 @@ class PostgresAdapter(BaseAdapter):
             result = await self.execute(sql, {"limit": limit})
             items = []
             for row in result["rows"]:
-                items.append({
+                entry = {
                     "sql_text": row[0][:2000] if row[0] else "",
                     "query_time_sec": round(float(row[1] / 1000), 3) if row[1] else 0,
                     "total_time_sec": round(float(row[2] / 1000), 3) if row[2] else 0,
@@ -337,8 +355,21 @@ class PostgresAdapter(BaseAdapter):
                     "rows_examined": 0,
                     "rows_sent": row[4] or 0,
                     "executed_at": "",
-                })
-            return {"items": items, "total": len(items)}
+                }
+                # 可选执行 EXPLAIN
+                if include_explain and entry.get("sql_text"):
+                    try:
+                        explain_result = await self.explain(entry["sql_text"])
+                        entry["explain_result"] = explain_result.get("explain_output", "")
+                    except Exception:
+                        pass
+                items.append(entry)
+            return {
+                "items": items,
+                "total": len(items),
+                "slow_log_enabled": True,
+                "fallback_used": False,
+            }
 
         except Exception as exc:
             err_msg = str(exc).lower()
@@ -346,6 +377,9 @@ class PostgresAdapter(BaseAdapter):
                 logger.warning("慢查询日志不可访问", error=str(exc)[:100])
                 return {
                     "items": [],
+                    "total": 0,
+                    "slow_log_enabled": False,
+                    "fallback_used": False,
                     "warning": "pg_stat_statements 扩展未安装或权限不足，"
                     "请执行：CREATE EXTENSION pg_stat_statements;",
                 }
@@ -356,8 +390,21 @@ class PostgresAdapter(BaseAdapter):
 
         依据 AC-6：EXPLAIN (FORMAT JSON, ANALYZE false)
         仅获取执行计划，不实际执行查询。
+
+        SAFETY: 第二道防线 — 上游 SQLAuditCheck 已做完整 AST 审计，
+        此处处理 EXPLAIN 语句特有的安全问题：
+          - 检测多语句注入（; 分隔符）
+          - 转义单引号防注入破坏
+        PostgreSQL EXPLAIN 不支持参数化占位符（PREPARE 不支持 EXPLAIN），
+        因此安全拼接 + 预检是正确做法。
         """
-        result = await self.execute(f"EXPLAIN (FORMAT JSON, ANALYZE false) {sql}")
+        # 安全预检：拒绝多语句（第二道防线）
+        stripped = sql.strip().rstrip(";")
+        if ";" in stripped:
+            raise ValueError("多语句 SQL 无法执行 EXPLAIN（检测到未转义的分号）")
+        # 转义单引号，防止 EXPLAIN 格式被注入破坏
+        safe_sql = sql.replace("'", "''")
+        result = await self.execute(f"EXPLAIN (FORMAT JSON, ANALYZE false) {safe_sql}")
         logger.debug("PostgreSQL EXPLAIN 完成", sql=sql[:200])
         return {
             "explain_output": result["rows"][0][0] if result["rows"] else "",
@@ -402,6 +449,7 @@ class PostgresAdapter(BaseAdapter):
         usage_pct = round((total_val / max_val) * 100, 1) if max_val > 0 else 0.0
 
         import datetime
+
         return {
             "total_connections": max_val,
             "active_connections": active_val,
@@ -412,52 +460,137 @@ class PostgresAdapter(BaseAdapter):
             "sampled_at": datetime.datetime.now(datetime.UTC).isoformat(),
         }
 
-    async def get_lock_info(self) -> list[dict[str, Any]]:
+    async def get_lock_info(self) -> dict[str, Any]:
         """查询 pg_locks + pg_stat_activity 关联分析锁等待。
 
         依据 AC-7：关联 pg_locks 和 pg_stat_activity 识别阻塞事务。
         PRD §5.3：使用 pg_locks 检测死锁。
-        """
-        sql = """
-            SELECT
-                blocked.pid AS blocked_pid,
-                blocked.query AS blocked_query,
-                blocking.pid AS blocking_pid,
-                blocking.query AS blocking_query,
-                EXTRACT(EPOCH FROM (NOW() - blocked.query_start))::int AS elapsed_seconds
-            FROM pg_locks blocked_locks
-            JOIN pg_stat_activity blocked ON blocked.pid = blocked_locks.pid
-            JOIN pg_locks blocking_locks
-                ON blocking_locks.locktype = blocked_locks.locktype
-                AND blocking_locks.database = blocked_locks.database
-                AND blocking_locks.relation = blocked_locks.relation
-                AND blocking_locks.page = blocked_locks.page
-                AND blocking_locks.tuple = blocked_locks.tuple
-                AND blocking_locks.pid != blocked_locks.pid
-            JOIN pg_stat_activity blocking
-                ON blocking.pid = blocking_locks.pid
-            WHERE NOT blocked_locks.granted
-              AND blocked.backend_type = 'client backend'
-            GROUP BY blocked.pid, blocked.query, blocking.pid,
-                     blocking.query, blocked.query_start
-            ORDER BY elapsed_seconds DESC
+
+        Returns:
+            {held_locks: [...], waiting_locks: [...], total_held, total_waiting, summary}。
+            失败返回 {"error": ..., "detail": ...}。
         """
         try:
-            result = await self.execute(sql)
-            lock_list = []
-            for row in result["rows"]:
-                lock_list.append({
-                    "transaction_id": str(row[0]),
-                    "elapsed_seconds": row[4] or 0,
-                    "state": "LOCK WAIT",
-                    "query": row[1] or "",
-                    "blocking_transaction_id": str(row[2]),
-                    "blocking_query": row[3] or "",
-                })
-            return lock_list
+            # 查询等待锁（blocked）——未被授予的锁
+            waiting_sql = """
+                SELECT
+                    blocked.pid AS blocked_pid,
+                    blocked.query AS blocked_query,
+                    blocked.datname AS database_name,
+                    blocking.pid AS blocking_pid,
+                    blocking.query AS blocking_query,
+                    EXTRACT(EPOCH FROM (NOW() - blocked.query_start))::int AS elapsed_seconds,
+                    COALESCE(blocked.wait_event_type, '') AS wait_event_type
+                FROM pg_locks blocked_locks
+                JOIN pg_stat_activity blocked ON blocked.pid = blocked_locks.pid
+                JOIN pg_locks blocking_locks
+                    ON blocking_locks.locktype = blocked_locks.locktype
+                    AND blocking_locks.database = blocked_locks.database
+                    AND blocking_locks.relation = blocked_locks.relation
+                    AND blocking_locks.page = blocked_locks.page
+                    AND blocking_locks.tuple = blocked_locks.tuple
+                    AND blocking_locks.pid != blocked_locks.pid
+                JOIN pg_stat_activity blocking
+                    ON blocking.pid = blocking_locks.pid
+                WHERE NOT blocked_locks.granted
+                  AND blocked.backend_type = 'client backend'
+                GROUP BY blocked.pid, blocked.query, blocked.datname,
+                         blocking.pid, blocking.query, blocked.query_start,
+                         blocked.wait_event_type
+                ORDER BY elapsed_seconds DESC
+            """
+            waiting_result = await self.execute(waiting_sql)
+
+            # 查询持有锁（granted）——已授予且正在活跃的事务
+            held_sql = """
+                SELECT
+                    a.pid,
+                    a.query,
+                    a.datname,
+                    l.locktype,
+                    l.mode,
+                    EXTRACT(EPOCH FROM (NOW() - a.query_start))::int AS elapsed_seconds,
+                    l.relation::regclass::text AS relation_name
+                FROM pg_locks l
+                JOIN pg_stat_activity a ON a.pid = l.pid
+                WHERE l.granted = true
+                  AND a.backend_type = 'client backend'
+                  AND a.state = 'active'
+                  AND l.relation IS NOT NULL
+                ORDER BY elapsed_seconds DESC
+                LIMIT 50
+            """
+            held_result = await self.execute(held_sql)
+
+            waiting_locks = []
+            for row in waiting_result["rows"]:
+                waiting_locks.append(
+                    {
+                        "transaction_id": str(row[0]),
+                        "thread_id": str(row[0]),
+                        "table_name": str(row[2]) if row[2] else "",
+                        "lock_mode": str(row[6]) if row[6] else "Lock",
+                        "lock_type": "RECORD",
+                        "waiting_seconds": row[5] or 0,
+                        "elapsed_seconds": row[5] or 0,
+                        "query": row[1] or "",
+                        "blocking_transaction_id": str(row[3]),
+                        "blocking_thread_id": str(row[3]),
+                        "blocking_query": row[4] or "",
+                    }
+                )
+
+            held_locks = []
+            for row in held_result["rows"]:
+                held_locks.append(
+                    {
+                        "transaction_id": str(row[0]),
+                        "thread_id": str(row[0]),
+                        "table_name": str(row[6]) if row[6] else str(row[2]) if row[2] else "",
+                        "index_name": str(row[3]) if row[3] else "",
+                        "lock_mode": str(row[4]) if row[4] else "Lock",
+                        "lock_type": "RECORD",
+                        "elapsed_seconds": row[5] or 0,
+                        "query": row[1] or "",
+                    }
+                )
+
+            total_held = len(held_locks)
+            total_waiting = len(waiting_locks)
+
+            locked_tables = sorted(
+                set(lock["table_name"] for lock in held_locks + waiting_locks if lock["table_name"])
+            )
+
+            # 构建摘要
+            parts = []
+            if total_held > 0:
+                parts.append(f"持有锁: {total_held}")
+            if total_waiting > 0:
+                parts.append(f"等待锁: {total_waiting}")
+            if locked_tables:
+                tables_str = ", ".join(locked_tables[:5])
+                if len(locked_tables) > 5:
+                    tables_str += f" 等 {len(locked_tables)} 张表"
+                parts.append(f"涉及表: {tables_str}")
+            summary = " | ".join(parts) + "。" if parts else "无锁等待"
+
+            return {
+                "held_locks": held_locks,
+                "waiting_locks": waiting_locks,
+                "total_held": total_held,
+                "total_waiting": total_waiting,
+                "summary": summary,
+            }
         except Exception:
-            # 权限不足时返回空列表
-            return []
+            # 权限不足时返回空结构
+            return {
+                "held_locks": [],
+                "waiting_locks": [],
+                "total_held": 0,
+                "total_waiting": 0,
+                "summary": "无法获取锁信息（可能是权限不足）",
+            }
 
     async def get_replication_status(self) -> dict[str, Any]:
         """查询 pg_stat_replication 获取主从复制状态。
@@ -549,6 +682,7 @@ class PostgresAdapter(BaseAdapter):
             bp_hit = round((blks_hit_val / max(total, 1)) * 100, 2)
 
         import datetime
+
         return {
             "qps": 0.0,
             "tps": tps,
@@ -569,6 +703,8 @@ class PostgresAdapter(BaseAdapter):
         - supports_replication: True（pg_stat_replication）
         - supports_table_spaces: True（pg_tablespace）
         - supports_json_type: True
+        - supports_lock_analysis: True（pg_locks + pg_stat_activity）
+        - supports_kill_transaction: True（pg_terminate_backend）
         """
         return AdapterCapabilities(
             supports_explain=True,
@@ -576,4 +712,6 @@ class PostgresAdapter(BaseAdapter):
             supports_replication=True,
             supports_table_spaces=True,
             supports_json_type=True,
+            supports_lock_analysis=True,
+            supports_kill_transaction=True,
         )

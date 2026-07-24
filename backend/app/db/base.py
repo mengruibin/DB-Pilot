@@ -21,6 +21,7 @@ from app.models.schemas import ConnectionCreateRequest
 # 默认全部 False，由具体适配器按需覆盖。
 # =============================================================================
 
+
 @dataclass
 class AdapterCapabilities:
     """适配器能力声明。
@@ -39,6 +40,10 @@ class AdapterCapabilities:
     """是否支持表空间信息查询"""
     supports_json_type: bool = False
     """是否支持 JSON 数据类型"""
+    supports_lock_analysis: bool = False
+    """是否支持细粒度锁信息查询（表名、锁模式、行键值）"""
+    supports_kill_transaction: bool = False
+    """是否支持主动终止连接（KILL CONNECTION / pg_terminate_backend）"""
 
 
 # =============================================================================
@@ -46,6 +51,7 @@ class AdapterCapabilities:
 # 每个方法对应一个 PRD §6.2 定义的能力。
 # 全部为 async def（AGENTS.md §技术栈约束：所有 DB I/O 必须原生异步）。
 # =============================================================================
+
 
 class BaseAdapter(ABC):
     """数据库适配器抽象基类。
@@ -172,15 +178,18 @@ class BaseAdapter(ABC):
         self,
         limit: int = 20,
         time_range: str = "1h",
+        include_explain: bool = False,
     ) -> dict[str, Any]:
         """获取慢查询列表。
 
         Args:
             limit: 最大返回条数（默认 20，上限 100）。
             time_range: 时间范围（1h/6h/24h/7d）。
+            include_explain: 是否自动对慢查询执行 EXPLAIN（最多前 5 条）。
 
         Returns:
-            {"items": [...], "total": int}。
+            {"items": [...], "total": int, "slow_log_enabled": bool,
+             "fallback_used": bool, "warning": str | None}。
             若慢查询日志未启用，返回 {"items": [], "warning": "..."}（不崩溃）。
         """
 
@@ -206,12 +215,21 @@ class BaseAdapter(ABC):
         """
 
     @abstractmethod
-    async def get_lock_info(self) -> list[dict[str, Any]]:
+    async def get_lock_info(self) -> dict[str, Any]:
         """获取当前锁等待信息。
 
         Returns:
-            [{transaction_id, user, host, elapsed_seconds, state, query,
-              blocking_transaction_id, ...}, ...]。
+            {
+                "held_locks": [{"transaction_id", "thread_id", "table_name",
+                                "index_name", "lock_mode", "lock_type",
+                                "elapsed_seconds", "query"}, ...],
+                "waiting_locks": [{"transaction_id", "thread_id", "table_name",
+                                   "index_name", "lock_mode", "lock_type",
+                                   "waiting_seconds", "blocking_transaction_id",
+                                   "blocking_thread_id", "query"}, ...],
+                "total_held": int, "total_waiting": int, "summary": str
+            }
+            失败返回 {"error": str, "detail": str}。
         """
 
     @abstractmethod

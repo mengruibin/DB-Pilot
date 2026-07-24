@@ -20,9 +20,11 @@ from app.agent.tools.diagnosis import explain_query, get_slow_queries
 from app.agent.tools.health import run_health_check
 from app.agent.tools.query import describe_table, execute_sql, list_tables
 from app.agent.tools.troubleshoot import (
+    analyze_locks,
     check_connections,
     check_locks,
     check_replication,
+    kill_transaction,
 )
 
 # =============================================================================
@@ -40,6 +42,8 @@ AGENT_TOOLS = [
     # 故障排查类工具
     check_connections,  # 检查连接池状态
     check_locks,  # 检查锁等待情况
+    analyze_locks,  # 查询指定事务的详细锁信息
+    kill_transaction,  # 终止指定线程的事务（需用户确认）
     check_replication,  # 检查主从复制状态
     # 健康巡检类工具
     run_health_check,  # 执行 20 项健康巡检

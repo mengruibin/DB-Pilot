@@ -159,6 +159,9 @@ async def run_health_check(
         await adapter.disconnect()
 
         # 组装返回结构
+        correlation_notes = final_report.get("correlation_notes", [])
+        fix_suggestions = final_report.get("fix_suggestions", [])
+
         report = {
             "score": final_report.get("score", 100),
             "severity_counts": final_report.get(
@@ -173,15 +176,25 @@ async def run_health_check(
                 for cat_name, items in categories.items()
             ],
         }
+        # 关联分析
+        if correlation_notes:
+            report["correlation_notes"] = correlation_notes
+        # 一键修复建议
+        if fix_suggestions:
+            report["fix_suggestions"] = fix_suggestions
+
         score = report["score"]
         severity = report.get("severity_counts", {})
         error_count = severity.get("error", 0)
         warning_count = severity.get("warning", 0)
         pass_count = severity.get("pass", 0)
-        report["summary"] = (
+        summary = (
             f"健康评分: {score}/100"
             f"（{error_count} 项异常, {warning_count} 项警告, {pass_count} 项通过）"
         )
+        if correlation_notes:
+            summary += " 关联分析: " + " ".join(correlation_notes[:2])
+        report["summary"] = summary
         logger.info(
             "工具执行成功", tool="run_health_check", connection_id=connection_id, score=score
         )

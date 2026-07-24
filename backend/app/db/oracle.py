@@ -26,6 +26,7 @@ _ORACLEDB_AVAILABLE: bool = False
 _ORACLEDB_ERR: str | None = None
 try:
     import oracledb  # noqa: F401 — 延迟到 connect() 中实际使用
+
     _ORACLEDB_AVAILABLE = True
 except ImportError as exc:
     _ORACLEDB_ERR = str(exc)
@@ -60,10 +61,7 @@ class OracleAdapter(BaseAdapter):
             user_role: 用户角色（当前 Oracle 适配器忽略此参数，保持标准模式）。
         """
         if not _ORACLEDB_AVAILABLE:
-            raise ImportError(
-                "无法加载 oracledb 驱动。"
-                "请安装：pip install oracledb>=2.0"
-            )
+            raise ImportError("无法加载 oracledb 驱动。请安装：pip install oracledb>=2.0")
 
         import oracledb
 
@@ -80,20 +78,19 @@ class OracleAdapter(BaseAdapter):
                 dsn=dsn,
             )
             self._connected = True
-            logger.info("Oracle 连接成功",
-                        host=config.host, port=config.port,
-                        database=config.database)
+            logger.info(
+                "Oracle 连接成功", host=config.host, port=config.port, database=config.database
+            )
             return True
 
         except Exception as exc:
             self._connected = False
-            logger.warning("Oracle 连接失败",
-                           host=config.host, port=config.port,
-                           error=str(exc)[:100])
+            logger.warning(
+                "Oracle 连接失败", host=config.host, port=config.port, error=str(exc)[:100]
+            )
             # SAFETY: 连接失败异常消息仅包含 host:port
             raise ConnectionError(
-                f"Oracle 连接失败 [{config.host}:{config.port}]"
-                " — 请检查网络、用户名和密码"
+                f"Oracle 连接失败 [{config.host}:{config.port}] — 请检查网络、用户名和密码"
             ) from exc
 
     async def disconnect(self) -> None:
@@ -152,10 +149,13 @@ class OracleAdapter(BaseAdapter):
                     columns = []
 
             elapsed = int((time.monotonic() - start) * 1000)
-            logger.debug("Oracle 查询完成",
-                         sql=sql[:200], execution_time_ms=elapsed,
-                         rows_returned=len(rows),
-                         affected_rows=affected)
+            logger.debug(
+                "Oracle 查询完成",
+                sql=sql[:200],
+                execution_time_ms=elapsed,
+                rows_returned=len(rows),
+                affected_rows=affected,
+            )
             return {
                 "columns": columns,
                 "rows": [list(row) for row in rows],
@@ -177,9 +177,7 @@ class OracleAdapter(BaseAdapter):
 
     async def get_databases(self) -> list[str]:
         """查询实例中的可插拔数据库（PDB）或用户 schema 列表。"""
-        result = await self.execute(
-            "SELECT username FROM all_users ORDER BY username"
-        )
+        result = await self.execute("SELECT username FROM all_users ORDER BY username")
         return [row[0] for row in result["rows"]]
 
     async def get_tables(self, database: str) -> list[dict[str, Any]]:
@@ -200,12 +198,14 @@ class OracleAdapter(BaseAdapter):
         result = await self.execute(sql, {"owner": database})
         tables = []
         for row in result["rows"]:
-            tables.append({
-                "database": database,
-                "table_name": row[0],
-                "comment": row[1] or "",
-                "row_count_estimate": row[2] or 0,
-            })
+            tables.append(
+                {
+                    "database": database,
+                    "table_name": row[0],
+                    "comment": row[1] or "",
+                    "row_count_estimate": row[2] or 0,
+                }
+            )
         return tables
 
     async def get_columns(
@@ -250,13 +250,15 @@ class OracleAdapter(BaseAdapter):
         result = await self.execute(sql, {"owner": database, "table": table})
         columns = []
         for row in result["rows"]:
-            columns.append({
-                "name": row[0],
-                "type": row[1],
-                "nullable": row[2] == "Y",
-                "is_primary": bool(row[3]),
-                "comment": row[4],
-            })
+            columns.append(
+                {
+                    "name": row[0],
+                    "type": row[1],
+                    "nullable": row[2] == "Y",
+                    "is_primary": bool(row[3]),
+                    "comment": row[4],
+                }
+            )
         return columns
 
     async def get_indexes(
@@ -299,6 +301,7 @@ class OracleAdapter(BaseAdapter):
         self,
         limit: int = 20,
         time_range: str = "1h",
+        include_explain: bool = False,
     ) -> dict[str, Any]:
         """慢查询检索返回静态提示。
 
@@ -307,6 +310,9 @@ class OracleAdapter(BaseAdapter):
         """
         return {
             "items": [],
+            "total": 0,
+            "slow_log_enabled": False,
+            "fallback_used": False,
             "warning": "Oracle slow query retrieval requires AWR license; not auto-retrieved",
         }
 
@@ -315,8 +321,17 @@ class OracleAdapter(BaseAdapter):
 
         依据 AC-7：Oracle 标准执行计划获取方式。
         """
-        # 使用计划表名（默认 PLAN_TABLE）
-        plan_sql = f"EXPLAIN PLAN FOR {sql}"
+        # SAFETY: 第二道防线 — 上游 SQLAuditCheck 已做完整 AST 审计，
+        # 此处处理 EXPLAIN 语句特有的安全问题：
+        #   - 检测多语句注入（; 分隔符）
+        #   - 转义单引号防注入破坏
+        # Oracle EXPLAIN PLAN FOR 不支持参数化占位符，
+        # 因此安全拼接 + 预检是正确做法。
+        stripped = sql.strip().rstrip(";")
+        if ";" in stripped:
+            raise ValueError("多语句 SQL 无法执行 EXPLAIN（检测到未转义的分号）")
+        safe_sql = sql.replace("'", "''")
+        plan_sql = f"EXPLAIN PLAN FOR {safe_sql}"
         await self.execute(plan_sql)
 
         # 从计划表读取执行计划
@@ -365,6 +380,7 @@ class OracleAdapter(BaseAdapter):
         usage_pct = round((total_val / max_val) * 100, 1) if max_val > 0 else 0.0
 
         import datetime
+
         return {
             "total_connections": max_val,
             "active_connections": active_val,
@@ -375,34 +391,66 @@ class OracleAdapter(BaseAdapter):
             "sampled_at": datetime.datetime.now(datetime.UTC).isoformat(),
         }
 
-    async def get_lock_info(self) -> list[dict[str, Any]]:
-        """从 V$LOCK + V$SESSION 获取锁等待信息。"""
-        sql = """
-            SELECT
-                blocked.sid AS blocked_sid,
-                blocked.blocking_session AS blocking_sid,
-                blocked.event,
-                blocked.seconds_in_wait AS elapsed_seconds,
-                blocked.sql_id
-            FROM v$session blocked
-            WHERE blocked.blocking_session IS NOT NULL
-              AND blocked.username IS NOT NULL
-            ORDER BY blocked.seconds_in_wait DESC
+    async def get_lock_info(self) -> dict[str, Any]:
+        """从 V$LOCK + V$SESSION 获取锁等待信息。
+
+        Returns:
+            {held_locks: [...], waiting_locks: [...], total_held, total_waiting, summary}。
+            失败返回 {"error": ..., "detail": ...}。
         """
         try:
+            sql = """
+                SELECT
+                    blocked.sid AS blocked_sid,
+                    blocked.serial# AS blocked_serial,
+                    blocked.blocking_session AS blocking_sid,
+                    blocked.event,
+                    blocked.seconds_in_wait AS elapsed_seconds,
+                    blocked.sql_id,
+                    blocked.username,
+                    blocked.machine
+                FROM v$session blocked
+                WHERE blocked.blocking_session IS NOT NULL
+                  AND blocked.username IS NOT NULL
+                ORDER BY blocked.seconds_in_wait DESC
+            """
             result = await self.execute(sql)
-            lock_list = []
+
+            waiting_locks = []
             for row in result["rows"]:
-                lock_list.append({
-                    "transaction_id": str(row[0]),
-                    "elapsed_seconds": row[3] or 0,
-                    "state": "LOCK WAIT",
-                    "query": f"SQL_ID: {row[4] or ''}" if row[4] else "",
-                    "blocking_transaction_id": str(row[1]),
-                })
-            return lock_list
+                waiting_locks.append(
+                    {
+                        "transaction_id": str(row[0]),
+                        "thread_id": f"{row[0]},{row[1]}" if row[1] else str(row[0]),
+                        "table_name": "",
+                        "lock_mode": str(row[3]) if row[3] else "Lock",
+                        "lock_type": "RECORD",
+                        "waiting_seconds": row[4] or 0,
+                        "elapsed_seconds": row[4] or 0,
+                        "query": row[5] and f"SQL_ID: {row[5]}" or "",
+                        "blocking_transaction_id": str(row[2]),
+                        "blocking_thread_id": str(row[2]),
+                    }
+                )
+
+            total_waiting = len(waiting_locks)
+            summary = f"等待锁: {total_waiting}。" if total_waiting > 0 else "无锁等待"
+
+            return {
+                "held_locks": [],
+                "waiting_locks": waiting_locks,
+                "total_held": 0,
+                "total_waiting": total_waiting,
+                "summary": summary,
+            }
         except Exception:
-            return []
+            return {
+                "held_locks": [],
+                "waiting_locks": [],
+                "total_held": 0,
+                "total_waiting": 0,
+                "summary": "无法获取锁信息（可能是权限不足）",
+            }
 
     async def get_replication_status(self) -> dict[str, Any]:
         """Oracle 复制状态暂不支持自动检测。"""
@@ -441,11 +489,14 @@ class OracleAdapter(BaseAdapter):
 
         logical_reads = stats_map.get("db block gets", 0) + stats_map.get("consistent gets", 0)
         physical_reads = stats_map.get("physical reads", 0)
-        bp_hit = round(
-            (1 - physical_reads / max(logical_reads, 1)) * 100, 2
-        ) if logical_reads > 0 else 100.0
+        bp_hit = (
+            round((1 - physical_reads / max(logical_reads, 1)) * 100, 2)
+            if logical_reads > 0
+            else 100.0
+        )
 
         import datetime
+
         return {
             "qps": 0.0,
             "tps": tps,
@@ -466,6 +517,8 @@ class OracleAdapter(BaseAdapter):
         - supports_replication: False（Data Guard 需额外配置）
         - supports_table_spaces: True（v$tablespace 可用）
         - supports_json_type: True（Oracle 12c+ JSON）
+        - supports_lock_analysis: False（v$lock 需额外权限）
+        - supports_kill_transaction: False（ALTER SYSTEM KILL SESSION 需权限）
         """
         return AdapterCapabilities(
             supports_explain=True,
@@ -473,4 +526,6 @@ class OracleAdapter(BaseAdapter):
             supports_replication=False,
             supports_table_spaces=True,
             supports_json_type=True,
+            supports_lock_analysis=False,
+            supports_kill_transaction=False,
         )

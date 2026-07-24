@@ -43,6 +43,7 @@ class CheckItem:
         suggestion: 未达标时的建议文本。
         check_fn: 异步检查函数，接收 adapter 并返回检查结果。
     """
+
     category: str
     name: str
     threshold: str | None
@@ -56,18 +57,33 @@ class CheckItem:
 
 
 async def _check_usage(adapter: BaseAdapter) -> dict[str, Any]:
-    """检查 1：连接数使用率。"""
+    """检查 1：连接数使用率。
+
+    增强：查询当前 max_connections 配置值，给出具体建议。
+    """
     data = await adapter.get_connections_status()
     usage = float(data.get("usage_percent", 0))
-    total = data.get("total_connections", 0)
+    max_conn = data.get("total_connections", 200)
     active = data.get("active_connections", 0)
-    value = f"{active}/{total} ({usage}%)"
+    value = f"{active}/{max_conn} ({usage}%)"
+    fix_sql = None
     if usage > 95:
-        return {"status": "error", "value": value,
-                "suggestion": "连接数即将耗尽，请检查连接泄漏或增加 max_connections"}
+        recommended = max(round(max_conn * 1.5), max_conn + 50)
+        fix_sql = f"SET GLOBAL max_connections = {recommended}; -- 当前 {max_conn}"
+        return {
+            "status": "error",
+            "value": value,
+            "suggestion": (
+                f"连接数即将耗尽（当前 max_connections={max_conn}），建议增加到 {recommended}"
+            ),
+            "fix_sql": fix_sql,
+        }
     if usage > 80:
-        return {"status": "warning", "value": value,
-                "suggestion": "连接使用率偏高，建议排查闲置连接"}
+        return {
+            "status": "warning",
+            "value": value,
+            "suggestion": f"连接使用率偏高（max_connections={max_conn}），建议排查闲置连接",
+        }
     return {"status": "pass", "value": value, "suggestion": None}
 
 
@@ -77,11 +93,17 @@ async def _check_waiting(adapter: BaseAdapter) -> dict[str, Any]:
     waiting = int(data.get("waiting_connections", 0))
     value = f"{waiting}"
     if waiting > 10:
-        return {"status": "error", "value": value,
-                "suggestion": "大量连接在等待，可能存在连接池耗尽或死锁"}
+        return {
+            "status": "error",
+            "value": value,
+            "suggestion": "大量连接在等待，可能存在连接池耗尽或死锁",
+        }
     if waiting > 0:
-        return {"status": "warning", "value": value,
-                "suggestion": "存在等待连接的请求，建议检查连接池配置"}
+        return {
+            "status": "warning",
+            "value": value,
+            "suggestion": "存在等待连接的请求，建议检查连接池配置",
+        }
     return {"status": "pass", "value": value, "suggestion": None}
 
 
@@ -91,11 +113,17 @@ async def _check_aborted(adapter: BaseAdapter) -> dict[str, Any]:
     rate = float(data.get("aborted_connections_rate", 0))
     value = f"{rate}%"
     if rate > 10:
-        return {"status": "error", "value": value,
-                "suggestion": "连接异常率过高，检查网络稳定性或密码错误"}
+        return {
+            "status": "error",
+            "value": value,
+            "suggestion": "连接异常率过高，检查网络稳定性或密码错误",
+        }
     if rate > 5:
-        return {"status": "warning", "value": value,
-                "suggestion": "连接异常率偏高，建议检查认证日志"}
+        return {
+            "status": "warning",
+            "value": value,
+            "suggestion": "连接异常率偏高，建议检查认证日志",
+        }
     return {"status": "pass", "value": value, "suggestion": None}
 
 
@@ -118,8 +146,11 @@ async def _check_idle_ratio(adapter: BaseAdapter) -> dict[str, Any]:
     ratio = (idle / max(total, 1)) * 100
     value = f"空闲 {idle} ({ratio:.1f}%)"
     if ratio < 10 and total > 0:
-        return {"status": "warning", "value": value,
-                "suggestion": "空闲连接太少，连接池可能配置不足"}
+        return {
+            "status": "warning",
+            "value": value,
+            "suggestion": "空闲连接太少，连接池可能配置不足",
+        }
     return {"status": "pass", "value": value, "suggestion": None}
 
 
@@ -131,11 +162,17 @@ async def _check_active_ratio(adapter: BaseAdapter) -> dict[str, Any]:
     ratio = (active / max(total, 1)) * 100
     value = f"活跃 {active}/{total} ({ratio:.1f}%)"
     if ratio > 90:
-        return {"status": "error", "value": value,
-                "suggestion": "活跃连接占比过高，应用可能无法获取新连接"}
+        return {
+            "status": "error",
+            "value": value,
+            "suggestion": "活跃连接占比过高，应用可能无法获取新连接",
+        }
     if ratio > 70:
-        return {"status": "warning", "value": value,
-                "suggestion": "活跃连接占比较高，建议检查应用连接池设置"}
+        return {
+            "status": "warning",
+            "value": value,
+            "suggestion": "活跃连接占比较高，建议检查应用连接池设置",
+        }
     return {"status": "pass", "value": value, "suggestion": None}
 
 
@@ -150,11 +187,13 @@ async def _check_replication_delay(adapter: BaseAdapter) -> dict[str, Any]:
     delay = repl.get("delay_seconds")
     value = f"{delay}s" if delay is not None else "未知"
     if delay is not None and delay > 60:
-        return {"status": "error", "value": value,
-                "suggestion": "主从延迟严重，检查从库 IO/SQL 线程或网络带宽"}
+        return {
+            "status": "error",
+            "value": value,
+            "suggestion": "主从延迟严重，检查从库 IO/SQL 线程或网络带宽",
+        }
     if delay is not None and delay > 10:
-        return {"status": "warning", "value": value,
-                "suggestion": "主从延迟偏高，建议排查从库负载"}
+        return {"status": "warning", "value": value, "suggestion": "主从延迟偏高，建议排查从库负载"}
     return {"status": "pass", "value": value, "suggestion": None}
 
 
@@ -169,8 +208,11 @@ async def _check_io_thread(adapter: BaseAdapter) -> dict[str, Any]:
     running = repl.get("io_thread_running", False)
     value = "运行中" if running else "已停止"
     if not running:
-        return {"status": "error", "value": value,
-                "suggestion": "IO 线程停止，从库无法接收主库的 binlog"}
+        return {
+            "status": "error",
+            "value": value,
+            "suggestion": "IO 线程停止，从库无法接收主库的 binlog",
+        }
     return {"status": "pass", "value": value, "suggestion": None}
 
 
@@ -185,8 +227,11 @@ async def _check_sql_thread(adapter: BaseAdapter) -> dict[str, Any]:
     running = repl.get("sql_thread_running", False)
     value = "运行中" if running else "已停止"
     if not running:
-        return {"status": "error", "value": value,
-                "suggestion": "SQL 线程停止，从库无法 replay 主库的变更"}
+        return {
+            "status": "error",
+            "value": value,
+            "suggestion": "SQL 线程停止，从库无法 replay 主库的变更",
+        }
     return {"status": "pass", "value": value, "suggestion": None}
 
 
@@ -196,8 +241,11 @@ async def _check_qps(adapter: BaseAdapter) -> dict[str, Any]:
     qps = metrics.get("qps", 0)
     value = f"{qps:.2f}/s"
     if qps > 5000:
-        return {"status": "warning", "value": value,
-                "suggestion": "QPS 超过 5000，考虑读写分离或缓存"}
+        return {
+            "status": "warning",
+            "value": value,
+            "suggestion": "QPS 超过 5000，考虑读写分离或缓存",
+        }
     return {"status": "pass", "value": value, "suggestion": None}
 
 
@@ -207,22 +255,50 @@ async def _check_tps(adapter: BaseAdapter) -> dict[str, Any]:
     tps = metrics.get("tps", 0)
     value = f"{tps:.2f}/s"
     if tps > 2000:
-        return {"status": "warning", "value": value,
-                "suggestion": "TPS 超过 2000，考虑优化写入或分库"}
+        return {
+            "status": "warning",
+            "value": value,
+            "suggestion": "TPS 超过 2000，考虑优化写入或分库",
+        }
     return {"status": "pass", "value": value, "suggestion": None}
 
 
 async def _check_bp_hit(adapter: BaseAdapter) -> dict[str, Any]:
-    """检查 12：缓冲池命中率。"""
+    """检查 12：缓冲池命中率。
+
+    增强：查询当前 innodb_buffer_pool_size 配置值，给出具体建议和修复 SQL。
+    """
     metrics = await adapter.get_metrics()
     hit = float(metrics.get("buffer_pool_hit_rate", 100))
     value = f"{hit:.2f}%"
+    fix_sql = None
     if hit < 90:
-        return {"status": "error", "value": value,
-                "suggestion": "缓冲池命中率过低，增加 innodb_buffer_pool_size"}
+        # 查询当前缓冲池大小（仅 MySQL 支持）
+        current_size_mb = "未知"
+        try:
+            bp_result = await adapter.execute("SHOW VARIABLES LIKE 'innodb_buffer_pool_size'")
+            if bp_result["rows"]:
+                raw_size = int(bp_result["rows"][0][1])
+                current_size_mb = f"{raw_size // 1048576}MB"
+                # 建议当前值的 2 倍，至少 256MB
+                recommended_mb = max(raw_size // 1048576 * 2, 256)
+                fix_sql = (
+                    f"SET GLOBAL innodb_buffer_pool_size = {recommended_mb * 1048576}"
+                    f"; -- {recommended_mb}MB"
+                )
+        except Exception:
+            pass
+        suggestion = (
+            f"缓冲池命中率 {hit:.2f}%（当前 innodb_buffer_pool_size={current_size_mb}，"
+            f"建议调整为更大的值）"
+        )
+        return {"status": "error", "value": value, "suggestion": suggestion, "fix_sql": fix_sql}
     if hit < 95:
-        return {"status": "warning", "value": value,
-                "suggestion": "缓冲池命中率偏低，考虑优化查询或增加内存"}
+        return {
+            "status": "warning",
+            "value": value,
+            "suggestion": "缓冲池命中率偏低，考虑优化查询或增加内存",
+        }
     return {"status": "pass", "value": value, "suggestion": None}
 
 
@@ -232,11 +308,17 @@ async def _check_slow_ratio(adapter: BaseAdapter) -> dict[str, Any]:
     ratio = float(metrics.get("slow_query_ratio", 0))
     value = f"{ratio:.4f}%"
     if ratio > 10:
-        return {"status": "error", "value": value,
-                "suggestion": "慢查询占比过高，逐一分析并优化索引"}
+        return {
+            "status": "error",
+            "value": value,
+            "suggestion": "慢查询占比过高，逐一分析并优化索引",
+        }
     if ratio > 5:
-        return {"status": "warning", "value": value,
-                "suggestion": "存在慢查询，建议分析 slow_query_log"}
+        return {
+            "status": "warning",
+            "value": value,
+            "suggestion": "存在慢查询，建议分析 slow_query_log",
+        }
     return {"status": "pass", "value": value, "suggestion": None}
 
 
@@ -258,11 +340,13 @@ async def _check_slow_count(adapter: BaseAdapter) -> dict[str, Any]:
     count = len(items)
     value = f"{count} 条（最近 1h）"
     if count > 50:
-        return {"status": "error", "value": value,
-                "suggestion": "大量慢查询，严重影响数据库性能"}
+        return {"status": "error", "value": value, "suggestion": "大量慢查询，严重影响数据库性能"}
     if count > 5:
-        return {"status": "warning", "value": value,
-                "suggestion": "存在慢查询，建议逐一分析执行计划"}
+        return {
+            "status": "warning",
+            "value": value,
+            "suggestion": "存在慢查询，建议逐一分析执行计划",
+        }
     if slow.get("warning"):
         return {"status": "pass", "value": slow["warning"], "suggestion": None}
     return {"status": "pass", "value": value, "suggestion": None}
@@ -282,11 +366,17 @@ async def _check_slow_max(adapter: BaseAdapter) -> dict[str, Any]:
     sql = slowest.get("sql_text", "")[:80]
     value = f"{sec}s — {sql}"
     if sec > 10:
-        return {"status": "error", "value": value,
-                "suggestion": "存在超长慢查询，建议立即分析并优化"}
+        return {
+            "status": "error",
+            "value": value,
+            "suggestion": "存在超长慢查询，建议立即分析并优化",
+        }
     if sec > 2:
-        return {"status": "warning", "value": value,
-                "suggestion": "存在耗时超 2s 的查询，建议检查执行计划"}
+        return {
+            "status": "warning",
+            "value": value,
+            "suggestion": "存在耗时超 2s 的查询，建议检查执行计划",
+        }
     return {"status": "pass", "value": value, "suggestion": None}
 
 
@@ -299,15 +389,41 @@ async def _check_table_spaces(adapter: BaseAdapter) -> dict[str, Any]:
 
 
 async def _check_tmp_tables(adapter: BaseAdapter) -> dict[str, Any]:
-    """检查 18：临时表磁盘使用率。"""
+    """检查 18：临时表磁盘使用率。
+
+    增强：查询当前 tmp_table_size 和 max_heap_table_size 配置值。
+    """
     metrics = await adapter.get_metrics()
     tmp_val = metrics.get("tmp_disk_tables_ratio", 0)
     if tmp_val:
         ratio = float(tmp_val) * 100
         value = f"{ratio:.2f}%"
+        fix_sql = None
         if ratio > 30:
-            return {"status": "warning", "value": value,
-                    "suggestion": "磁盘临时表占比高，增加 tmp_table_size 或优化查询"}
+            # 查询当前临时表配置（仅 MySQL 支持）
+            tmp_size = tmp_table_size_current = "未知"
+            try:
+                t_result = await adapter.execute("SHOW VARIABLES LIKE 'tmp_table_size'")
+                h_result = await adapter.execute("SHOW VARIABLES LIKE 'max_heap_table_size'")
+                if t_result["rows"]:
+                    raw = int(t_result["rows"][0][1])
+                    tmp_size = f"{raw // 1024}KB"
+                if h_result["rows"]:
+                    raw_h = int(h_result["rows"][0][1])
+                    tmp_table_size_current = f"{raw_h // 1024}KB"
+                fix_sql = "SET GLOBAL tmp_table_size = 33554432; -- 32MB"
+            except Exception:
+                pass
+            return {
+                "status": "warning",
+                "value": value,
+                "suggestion": (
+                    f"磁盘临时表占比高（tmp_table_size={tmp_size}，"
+                    f"max_heap_table_size={tmp_table_size_current}），"
+                    "建议增加 tmp_table_size 或优化查询"
+                ),
+                "fix_sql": fix_sql,
+            }
         return {"status": "pass", "value": value, "suggestion": None}
     return {"status": "pass", "value": "N/A", "suggestion": None}
 
@@ -323,11 +439,17 @@ async def _check_availability(adapter: BaseAdapter) -> dict[str, Any]:
         ok = await adapter.test_connection()
         if ok:
             return {"status": "pass", "value": "可达", "suggestion": None}
-        return {"status": "error", "value": "不可达",
-                "suggestion": "数据库无法响应心跳，检查服务状态"}
+        return {
+            "status": "error",
+            "value": "不可达",
+            "suggestion": "数据库无法响应心跳，检查服务状态",
+        }
     except Exception:
-        return {"status": "error", "value": "不可达",
-                "suggestion": "数据库连接异常，检查网络和数据库服务"}
+        return {
+            "status": "error",
+            "value": "不可达",
+            "suggestion": "数据库连接异常，检查网络和数据库服务",
+        }
 
 
 # =============================================================================
@@ -336,52 +458,139 @@ async def _check_availability(adapter: BaseAdapter) -> dict[str, Any]:
 
 _CHECK_REGISTRY: list[CheckItem] = [
     # ── 连接类 (6项) ──
-    CheckItem(category="连接", name="连接数使用率",
-              threshold="<80%", suggestion=None, check_fn=_check_usage),
-    CheckItem(category="连接", name="等待连接数",
-              threshold="0", suggestion=None, check_fn=_check_waiting),
-    CheckItem(category="连接", name="连接异常率",
-              threshold="<5%", suggestion=None, check_fn=_check_aborted),
-    CheckItem(category="连接", name="连接详情",
-              threshold=None, suggestion=None, check_fn=_check_connections_detail),
-    CheckItem(category="连接", name="空闲连接占比",
-              threshold=">10%", suggestion=None, check_fn=_check_idle_ratio),
-    CheckItem(category="连接", name="活跃连接占比",
-              threshold="<70%", suggestion=None, check_fn=_check_active_ratio),
+    CheckItem(
+        category="连接",
+        name="连接数使用率",
+        threshold="<80%",
+        suggestion=None,
+        check_fn=_check_usage,
+    ),
+    CheckItem(
+        category="连接", name="等待连接数", threshold="0", suggestion=None, check_fn=_check_waiting
+    ),
+    CheckItem(
+        category="连接",
+        name="连接异常率",
+        threshold="<5%",
+        suggestion=None,
+        check_fn=_check_aborted,
+    ),
+    CheckItem(
+        category="连接",
+        name="连接详情",
+        threshold=None,
+        suggestion=None,
+        check_fn=_check_connections_detail,
+    ),
+    CheckItem(
+        category="连接",
+        name="空闲连接占比",
+        threshold=">10%",
+        suggestion=None,
+        check_fn=_check_idle_ratio,
+    ),
+    CheckItem(
+        category="连接",
+        name="活跃连接占比",
+        threshold="<70%",
+        suggestion=None,
+        check_fn=_check_active_ratio,
+    ),
     # ── 复制类 (3项) ──
-    CheckItem(category="复制", name="主从延迟",
-              threshold="<10s", suggestion=None, check_fn=_check_replication_delay),
-    CheckItem(category="复制", name="IO 线程状态",
-              threshold="running", suggestion=None, check_fn=_check_io_thread),
-    CheckItem(category="复制", name="SQL 线程状态",
-              threshold="running", suggestion=None, check_fn=_check_sql_thread),
+    CheckItem(
+        category="复制",
+        name="主从延迟",
+        threshold="<10s",
+        suggestion=None,
+        check_fn=_check_replication_delay,
+    ),
+    CheckItem(
+        category="复制",
+        name="IO 线程状态",
+        threshold="running",
+        suggestion=None,
+        check_fn=_check_io_thread,
+    ),
+    CheckItem(
+        category="复制",
+        name="SQL 线程状态",
+        threshold="running",
+        suggestion=None,
+        check_fn=_check_sql_thread,
+    ),
     # ── 性能类 (5项) ──
-    CheckItem(category="性能", name="QPS",
-              threshold="<5000/s", suggestion=None, check_fn=_check_qps),
-    CheckItem(category="性能", name="TPS",
-              threshold="<2000/s", suggestion=None, check_fn=_check_tps),
-    CheckItem(category="性能", name="缓冲池命中率",
-              threshold=">95%", suggestion="增加 innodb_buffer_pool_size",
-              check_fn=_check_bp_hit),
-    CheckItem(category="性能", name="慢查询占比",
-              threshold="<5%", suggestion=None, check_fn=_check_slow_ratio),
-    CheckItem(category="性能", name="数据库运行时间",
-              threshold=None, suggestion=None, check_fn=_check_uptime),
+    CheckItem(
+        category="性能", name="QPS", threshold="<5000/s", suggestion=None, check_fn=_check_qps
+    ),
+    CheckItem(
+        category="性能", name="TPS", threshold="<2000/s", suggestion=None, check_fn=_check_tps
+    ),
+    CheckItem(
+        category="性能",
+        name="缓冲池命中率",
+        threshold=">95%",
+        suggestion="增加 innodb_buffer_pool_size",
+        check_fn=_check_bp_hit,
+    ),
+    CheckItem(
+        category="性能",
+        name="慢查询占比",
+        threshold="<5%",
+        suggestion=None,
+        check_fn=_check_slow_ratio,
+    ),
+    CheckItem(
+        category="性能",
+        name="数据库运行时间",
+        threshold=None,
+        suggestion=None,
+        check_fn=_check_uptime,
+    ),
     # ── 慢查询类 (2项) ──
-    CheckItem(category="慢查询", name="慢查询数量",
-              threshold="<5/h", suggestion=None, check_fn=_check_slow_count),
-    CheckItem(category="慢查询", name="最慢查询耗时",
-              threshold="<2s", suggestion=None, check_fn=_check_slow_max),
+    CheckItem(
+        category="慢查询",
+        name="慢查询数量",
+        threshold="<5/h",
+        suggestion=None,
+        check_fn=_check_slow_count,
+    ),
+    CheckItem(
+        category="慢查询",
+        name="最慢查询耗时",
+        threshold="<2s",
+        suggestion=None,
+        check_fn=_check_slow_max,
+    ),
     # ── 存储类 (2项) ──
-    CheckItem(category="存储", name="表空间使用",
-              threshold=None, suggestion=None, check_fn=_check_table_spaces),
-    CheckItem(category="存储", name="临时表磁盘使用率",
-              threshold="<30%", suggestion=None, check_fn=_check_tmp_tables),
+    CheckItem(
+        category="存储",
+        name="表空间使用",
+        threshold=None,
+        suggestion=None,
+        check_fn=_check_table_spaces,
+    ),
+    CheckItem(
+        category="存储",
+        name="临时表磁盘使用率",
+        threshold="<30%",
+        suggestion=None,
+        check_fn=_check_tmp_tables,
+    ),
     # ── 安全类 (2项) ──
-    CheckItem(category="安全", name="SSL 加密检查",
-              threshold="按配置", suggestion=None, check_fn=_check_ssl),
-    CheckItem(category="安全", name="数据库可用性",
-              threshold="可达", suggestion=None, check_fn=_check_availability),
+    CheckItem(
+        category="安全",
+        name="SSL 加密检查",
+        threshold="按配置",
+        suggestion=None,
+        check_fn=_check_ssl,
+    ),
+    CheckItem(
+        category="安全",
+        name="数据库可用性",
+        threshold="可达",
+        suggestion=None,
+        check_fn=_check_availability,
+    ),
 ]
 
 
@@ -442,10 +651,12 @@ class HealthCheckEngine:
                 status = raw.get("status", "error")
                 value = raw.get("value", "N/A")
                 suggestion = raw.get("suggestion") or check.suggestion
+                fix_sql = raw.get("fix_sql")
             except Exception:
                 status = "error"
                 value = "检查异常"
                 suggestion = f"{check.name} 执行时发生异常，请人工排查"
+                fix_sql = None
 
             result = {
                 "current": current,
@@ -456,10 +667,10 @@ class HealthCheckEngine:
                 "value": value,
                 "threshold": check.threshold or "N/A",
                 "suggestion": suggestion,
+                "fix_sql": fix_sql,
             }
             result_store.append(result)
-            logger.info("健康检查完成", item=check.name, status=status,
-                         category=check.category)
+            logger.info("健康检查完成", item=check.name, status=status, category=check.category)
             yield result
 
         report = self._build_report(result_store, total)
@@ -475,16 +686,70 @@ class HealthCheckEngine:
         matched = [c for c in self._registry if c.name.lower() in name_set]
         return matched if matched else self._registry
 
+    @staticmethod
+    def _correlate_results(results: list[dict[str, Any]]) -> list[str]:
+        """跨检查项关联分析，推断根因。
+
+        基于硬编码规则引擎，不依赖 LLM。
+        """
+        notes: list[str] = []
+        # 构建快速查找字典
+        by_name: dict[str, dict] = {}
+        for r in results:
+            by_name[r.get("item", "")] = r
+
+        def _status(item_name: str) -> str:
+            return by_name.get(item_name, {}).get("status", "")
+
+        bp_status = _status("缓冲池命中率")
+        usage_status = _status("连接数使用率")
+        slow_count_status = _status("慢查询数量")
+        slow_ratio_status = _status("慢查询占比")
+        wait_status = _status("等待连接数")
+
+        # 规则 1：缓冲池命中率低 + 连接数正常 = 内存配置不足
+        if bp_status in ("error", "warning") and usage_status == "pass":
+            notes.append(
+                "连接数正常但缓冲池命中率偏低，根因可能是内存配置不足，"
+                "建议优先增加 innodb_buffer_pool_size。"
+            )
+
+        # 规则 2：缓冲池命中率低 + 慢查询多 = 内存不足导致磁盘 I/O 增加
+        if bp_status in ("error", "warning") and (
+            slow_count_status in ("error", "warning") or slow_ratio_status in ("error", "warning")
+        ):
+            notes.append(
+                "缓冲池命中率偏低与慢查询过多存在关联，"
+                "表数据无法完全缓存到内存中，导致频繁磁盘 I/O 引发慢查询。"
+            )
+
+        # 规则 3：等待连接多 + 连接使用率高 = 连接池耗尽
+        if wait_status in ("error", "warning") and usage_status in ("error", "warning"):
+            notes.append(
+                "连接使用率偏高且存在连接等待，确认连接池已近耗尽。"
+                "建议检查连接泄漏并增加 max_connections。"
+            )
+
+        # 规则 4：慢查询数量多 + 连接使用率高 = 慢查询占满线程
+        if slow_count_status in ("error", "warning") and usage_status in ("error", "warning"):
+            notes.append(
+                "大量慢查询可能占满数据库连接线程，导致并发连接数升高。"
+                "建议优先优化慢查询 SQL 和索引。"
+            )
+
+        return notes
+
     def _build_report(
         self,
         results: list[dict[str, Any]],
         total: int,
     ) -> dict[str, Any]:
-        """从检查结果列表构建汇总报告。"""
+        """从检查结果列表构建汇总报告（含关联分析和修复建议）。"""
         error_count = 0
         warning_count = 0
         pass_count = 0
         skipped_count = 0
+        fix_suggestions: list[str] = []
         for r in results:
             s = r.get("status", "")
             if s == "pass":
@@ -495,16 +760,28 @@ class HealthCheckEngine:
                 error_count += 1
             else:
                 skipped_count += 1
+            # 收集 fix_sql
+            fix_sql = r.get("fix_sql")
+            if fix_sql:
+                item_name = r.get("item", "")
+                fix_suggestions.append(f"[{item_name}] {fix_sql}")
 
         # 评分：skipped 不计入分母（全部 skipped 视为健康 100 分）
         denominator = total - skipped_count
-        score = math.floor(
-            (pass_count / denominator) * 100
-        ) if denominator > 0 else 100
+        score = math.floor((pass_count / denominator) * 100) if denominator > 0 else 100
 
-        logger.info("健康巡检报告", score=score,
-                     error=error_count, warning=warning_count,
-                     pass_count=pass_count, skipped=skipped_count)
+        # 关联分析
+        correlation_notes = self._correlate_results(results)
+
+        logger.info(
+            "健康巡检报告",
+            score=score,
+            error=error_count,
+            warning=warning_count,
+            pass_count=pass_count,
+            skipped=skipped_count,
+            correlations=len(correlation_notes),
+        )
 
         return {
             "score": score,
@@ -514,4 +791,6 @@ class HealthCheckEngine:
                 "pass": pass_count,
                 "skipped": skipped_count,
             },
+            "correlation_notes": correlation_notes,
+            "fix_suggestions": fix_suggestions,
         }
