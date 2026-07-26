@@ -68,7 +68,7 @@ class SafetyCheck(ABC):
 class SQLAuditCheck(SafetyCheck):
     """SQL 审计护栏（含只读角色权限拦截）。
 
-    对 execute_sql / explain_query 工具中传入的 SQL 执行 sqlglot 审计，
+    对 execute_readonly_sql / explain_query 工具中传入的 SQL 执行 sqlglot 审计，
     同时负责非 admin 角色的只读权限拦截（通过 _ADMIN_ONLY_STATEMENTS）。
     不再需要独立的 ReadOnlyCheck 护栏。
 
@@ -147,7 +147,7 @@ class ConnectionLimitCheck(SafetyCheck):
         conn_config: dict[str, Any],
     ) -> SafetyResult:
         """检查是否超出查询次数限制。"""
-        if tool_name in ("execute_sql", "explain_query"):
+        if tool_name in ("execute_readonly_sql", "explain_query"):
             self._query_count += 1
             if self._query_count > self._max_queries:
                 return SafetyResult(
@@ -189,7 +189,7 @@ class RowEstimationCheck(SafetyCheck):
     查询成本、额外操作），用硬编码规则引擎评估，超阈值即阻断。
     不依赖 .env 配置，所有阈值在 explain_estimator.py 中 Code Review 管理。
 
-    该检查仅对 execute_sql 工具生效（DDL 已被 SQLAuditCheck 拦截）。
+    该检查仅对 execute_readonly_sql / explain_query 工具生效（DDL 已被 SQLAuditCheck 拦截）。
     EXPLAIN 失败时降级放行，不阻断正常业务。
     """
 

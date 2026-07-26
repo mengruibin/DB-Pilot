@@ -111,8 +111,8 @@ class TestInferMessageType:
         assert self._func(state) == "general"
 
     def test_query(self):
-        """调用 execute_sql → query。"""
-        state = _make_state(["execute_sql"])
+        """调用 execute_readonly_sql → query。"""
+        state = _make_state(["execute_readonly_sql"])
         assert self._func(state) == "query"
 
     def test_query_list_tables(self):
@@ -157,17 +157,17 @@ class TestInferMessageType:
 
     def test_priority_health_check(self):
         """多工具调用时，health_check 优先级最高。"""
-        state = _make_state(["execute_sql", "run_health_check"])
+        state = _make_state(["execute_readonly_sql", "run_health_check"])
         assert self._func(state) == "health_check"
 
     def test_priority_troubleshoot(self):
         """多工具调用时，troubleshoot 优先级高于 diagnosis 和 query。"""
-        state = _make_state(["execute_sql", "explain_query", "check_locks"])
+        state = _make_state(["execute_readonly_sql", "explain_query", "check_locks"])
         assert self._func(state) == "troubleshoot"
 
     def test_priority_diagnosis(self):
         """多工具调用时，diagnosis 优先级高于 query。"""
-        state = _make_state(["execute_sql", "explain_query"])
+        state = _make_state(["execute_readonly_sql", "explain_query"])
         assert self._func(state) == "diagnosis"
 
     def test_unknown_tool_fallback(self):

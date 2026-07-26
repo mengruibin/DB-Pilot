@@ -466,7 +466,7 @@ def _infer_message_type(state: dict[str, Any]) -> str:
         return "troubleshoot"
     if tools_called & {"explain_query", "get_slow_queries"}:
         return "diagnosis"
-    if tools_called & {"execute_sql", "list_tables", "describe_table"}:
+    if tools_called & {"execute_readonly_sql", "execute_write_sql", "list_tables", "describe_table"}:
         return "query"
     return "general"
 

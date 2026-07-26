@@ -18,7 +18,12 @@ from typing import Any
 
 from app.agent.tools.diagnosis import explain_query, get_slow_queries
 from app.agent.tools.health import run_health_check
-from app.agent.tools.query import describe_table, execute_sql, list_tables
+from app.agent.tools.query import (
+    describe_table,
+    execute_readonly_sql,
+    execute_write_sql,
+    list_tables,
+)
 from app.agent.tools.troubleshoot import (
     analyze_locks,
     check_connections,
@@ -35,7 +40,8 @@ AGENT_TOOLS = [
     # 查询类工具
     list_tables,  # 获取数据库中所有表
     describe_table,  # 获取指定表的结构
-    execute_sql,  # 执行 SQL 语句（读写由审计和角色控制）
+    execute_readonly_sql,  # 执行只读 SQL 查询（SELECT / SHOW / EXPLAIN 等）
+    execute_write_sql,  # 执行写 SQL（INSERT / UPDATE / DELETE，需用户确认）
     # 诊断类工具
     get_slow_queries,  # 获取慢查询日志
     explain_query,  # 分析 SQL 执行计划

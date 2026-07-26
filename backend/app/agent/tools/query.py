@@ -300,41 +300,35 @@ async def describe_table(
 
 
 # =============================================================================
-# execute_sql：执行 SQL 语句（读写由审计和角色控制）
+# _run_sql：SQL 执行核心实现（内部函数，不注册为工具）
 # =============================================================================
 
 
-@tool(
-    extras={
-        "needs_sql_audit": True,
-        "needs_write_confirmation": True,
-        "needs_row_estimation": True,
-    }
-)
-async def execute_sql(
-    connection_id: Annotated[str, InjectedToolArg],
-    db_type: Annotated[str, InjectedToolArg],
-    host: Annotated[str, InjectedToolArg],
-    port: Annotated[int, InjectedToolArg],
-    database: Annotated[str, InjectedToolArg],
-    user: Annotated[str, InjectedToolArg],
-    password: Annotated[str, InjectedToolArg],
+async def _run_sql(
     sql: str,
-    user_role: Annotated[str, InjectedToolArg] = "readonly",  # 未显式传入时采用更保守的只读兜底
-    ssl_enabled: Annotated[bool, InjectedToolArg] = False,
-    ssl_ca_cert: Annotated[str | None, InjectedToolArg] = None,
+    connection_id: str,
+    db_type: str,
+    host: str,
+    port: int,
+    database: str,
+    user: str,
+    password: str,
+    user_role: str = "readonly",
+    ssl_enabled: bool = False,
+    ssl_ca_cert: str | None = None,
+    tool_name: str = "_run_sql",
 ) -> dict[str, Any]:
-    """执行 SQL 语句并返回查询结果。
+    """执行 SQL 语句并返回查询结果（内部函数，由 execute_readonly_sql / execute_write_sql 调用）。
 
     安全约束：
       - 写操作（INSERT/UPDATE/DELETE）仅在当前用户角色为 admin 时允许
       - readonly 角色仅可执行 SELECT/SHOW/DESC/EXPLAIN 等只读语句
-      - SQL 安全审计由上游 tool_node 安全护栏层统一负责，工具内部不再重复审计
       - 结果中的敏感列（password、token、phone 等）自动以 "***" 掩码
       - 不支持多条语句批处理
 
     Args:
         sql: 要执行的 SQL 语句。
+        tool_name: 调用方工具名（用于日志区分）。
 
     Returns:
         成功: {
@@ -355,8 +349,6 @@ async def execute_sql(
         }
     """
     # Step 1: 判断本次 SQL 是否为只读（用于返回值和日志）
-    # SAFETY: SQL 安全审计由上游 tool_node._run_one_tool 中的
-    # SQLAuditCheck 在工具执行前统一拦截，此处不再重复审计。
     is_readonly = bool(_IS_READONLY_SQL.match(sql))
 
     # Step 2: 执行查询
@@ -409,7 +401,7 @@ async def execute_sql(
             sql_type = sql.strip().split()[0].upper() if sql.strip() else "UNKNOWN"
             logger.info(
                 "写操作执行成功",
-                tool="execute_sql",
+                tool=tool_name,
                 connection_id=connection_id,
                 sql_type=sql_type,
                 affected_rows=result.get("total_rows", 0),
@@ -418,7 +410,7 @@ async def execute_sql(
         else:
             logger.info(
                 "工具执行成功",
-                tool="execute_sql",
+                tool=tool_name,
                 connection_id=connection_id,
                 total_rows=result.get("total_rows", 0),
                 audit_status="passed",
@@ -444,7 +436,7 @@ async def execute_sql(
         parsed = parse_db_error(exc, db_type, sql)
         logger.warning(
             "SQL 执行失败",
-            tool="execute_sql",
+            tool=tool_name,
             connection_id=connection_id,
             database=database,
             error_type=parsed.error_type,
@@ -457,3 +449,87 @@ async def execute_sql(
             "suggestion": parsed.suggestion,
             "audit_status": "execution_error",
         }
+
+
+# =============================================================================
+# execute_readonly_sql：执行只读 SQL 查询
+# =============================================================================
+
+
+@tool(
+    extras={
+        "needs_sql_audit": True,
+        "needs_row_estimation": True,
+    },
+)
+async def execute_readonly_sql(
+    sql: str,
+    connection_id: Annotated[str, InjectedToolArg],
+    db_type: Annotated[str, InjectedToolArg],
+    host: Annotated[str, InjectedToolArg],
+    port: Annotated[int, InjectedToolArg],
+    database: Annotated[str, InjectedToolArg],
+    user: Annotated[str, InjectedToolArg],
+    password: Annotated[str, InjectedToolArg],
+    user_role: Annotated[str, InjectedToolArg] = "readonly",
+    ssl_enabled: Annotated[bool, InjectedToolArg] = False,
+    ssl_ca_cert: Annotated[str | None, InjectedToolArg] = None,
+) -> dict[str, Any]:
+    """执行只读 SQL 查询（SELECT / SHOW / DESCRIBE / EXPLAIN / WITH）。
+    写操作（INSERT / UPDATE / DELETE）请使用 execute_write_sql 工具。
+    安全审计由 tool_node 安全护栏层在工具执行前统一检查。
+
+    Args:
+        sql: 要执行的只读 SQL 语句。
+
+    Returns:
+        同 _run_sql（成功时返回 columns/rows/total_rows 等字段）。
+    """
+    return await _run_sql(
+        sql, connection_id, db_type, host, port, database,
+        user, password, user_role=user_role,
+        ssl_enabled=ssl_enabled, ssl_ca_cert=ssl_ca_cert,
+        tool_name="execute_readonly_sql",
+    )
+
+
+# =============================================================================
+# execute_write_sql：执行写 SQL（需用户确认）
+# =============================================================================
+
+
+@tool(
+    extras={
+        "needs_write_confirmation": True,
+        "confirm_category": "sql_write",
+    },
+)
+async def execute_write_sql(
+    sql: str,
+    connection_id: Annotated[str, InjectedToolArg],
+    db_type: Annotated[str, InjectedToolArg],
+    host: Annotated[str, InjectedToolArg],
+    port: Annotated[int, InjectedToolArg],
+    database: Annotated[str, InjectedToolArg],
+    user: Annotated[str, InjectedToolArg],
+    password: Annotated[str, InjectedToolArg],
+    user_role: Annotated[str, InjectedToolArg] = "readonly",
+    ssl_enabled: Annotated[bool, InjectedToolArg] = False,
+    ssl_ca_cert: Annotated[str | None, InjectedToolArg] = None,
+) -> dict[str, Any]:
+    """执行写 SQL 语句（INSERT / UPDATE / DELETE）。
+    执行前系统会请求用户确认，用户批准后才会实际执行。
+    只读查询（SELECT / SHOW / DESCRIBE / EXPLAIN）请使用 execute_readonly_sql 工具。
+
+    Args:
+        sql: 要执行的写 SQL 语句。
+
+    Returns:
+        同 _run_sql（成功时返回 columns/rows/total_rows 等字段）。
+    """
+    return await _run_sql(
+        sql, connection_id, db_type, host, port, database,
+        user, password, user_role=user_role,
+        ssl_enabled=ssl_enabled, ssl_ca_cert=ssl_ca_cert,
+        tool_name="execute_write_sql",
+    )

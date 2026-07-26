@@ -347,36 +347,85 @@ async def agent_node(state: AgentState) -> dict[str, Any]:
 
 
 # =============================================================================
-# 写操作确认节点
+# 危险操作确认节点（通用化：needs_write_confirmation 即确认，无额外条件）
 # =============================================================================
+
+# 连接注入参数集合（confirm_node 阶段尚未注入，过滤以保持 details 干净）
+_CONN_INJECTED_PARAMS = frozenset({
+    "connection_id", "db_type", "host", "port", "database",
+    "user", "password", "ssl_enabled", "ssl_ca_cert", "user_role",
+})
+
+
+def _build_confirmable_action(tc: Any, extras: dict[str, Any]) -> dict[str, Any]:
+    """从工具调用构建通用"需确认操作"记录。
+
+    needs_write_confirmation == True → 无条件确认，
+    不再检查 sql 或 is_write_dml()。新增工具只需声明 extras 即可接入确认流程。
+
+    Args:
+        tc: LangChain ToolCall 字典（含 id/name/args）。
+        extras: 工具声明的 extras 字典。
+
+    Returns:
+        {tool_call_id, tool, category, description, details}。
+    """
+    tool_name = tc["name"]
+    raw_args = dict(tc["args"])
+
+    # 过滤连接注入参数（保持 description/details 干净）
+    key_args: dict[str, Any] = {
+        k: v for k, v in raw_args.items() if k not in _CONN_INJECTED_PARAMS
+    }
+
+    # 自动生成人类可读描述
+    parts: list[str] = []
+    for k, v in key_args.items():
+        v_str = str(v)
+        if len(v_str) > 80:
+            v_str = v_str[:77] + "..."
+        parts.append(f"{k}={v_str}")
+    arg_desc = ", ".join(parts)
+    description = tool_name + (f": {arg_desc}" if arg_desc else "")
+
+    return {
+        "tool_call_id": tc["id"],
+        "tool": tool_name,
+        "category": extras.get("confirm_category", "generic"),
+        "description": description,
+        "details": key_args,
+    }
 
 
 async def confirm_node(state: AgentState) -> dict[str, Any]:
-    """写操作确认节点——在 safe_tools_node 之前检测写 SQL，必要时 interrupt() 暂停。
+    """通用危险操作确认节点——声明了 needs_write_confirmation 的工具即触发确认。
 
     图结构位置：agent_node → confirm_node → safe_tools_node
 
     逻辑：
     1. 读取最后一条 AIMessage.tool_calls
-    2. 通过 TOOL_REGISTRY.extras 判断哪些工具需要写确认
-    3. 通过 is_write_dml() 判断 SQL 是否为写 DML
-    4. 如有写操作 → interrupt() 暂停图，等待用户决策
-    5. 用户决策后（interrupt() 返回）：
+    2. 通过 TOOL_REGISTRY.extras 判断哪些工具声明了 needs_write_confirmation
+    3. 声明了该标志的工具 → interrupt() 暂停图，等待用户决策
+    4. 用户决策后（interrupt() 返回）：
        - 拒绝的 tool_calls → 从 AIMessage 移除 + 生成 ToolMessage
-       - 批准的 tool_calls → 保留（含所有只读工具）
-    6. 如无写操作 → 直接透传 return {}
+       - 批准的 tool_calls → 保留（含所有未声明标志的工具）
+    5. 无任何工具声明 needs_write_confirmation → 直接透传 return {}
+
+    与旧逻辑的区别：
+      - 不再依赖 sql 参数或 is_write_dml() 判断
+      - 不再区分"写 SQL"和"非 SQL 危险操作"
+      - 新增工具只需声明 needs_write_confirmation 即可接入确认流程
 
     幂等性保证：
       - 第一次执行：interrupt() 暂停，等待决策
       - 第二次执行（resume）：interrupt() 返回决策值，继续处理
-      - 无写操作时：return {} 直接透传，无副作用
+      - 无危险操作时：return {} 直接透传，无副作用
 
     Returns:
         包含 messages（替换后的 AIMessage + ToolMessage 列表）和 sse_events 的更新 dict。
-        无写操作时返回 {}（无修改）。
+        无危险操作时返回 {}（无修改）。
     """
     from app.agent.tools.registry import TOOL_REGISTRY  # noqa: I001
-    from app.engine.sql_auditor import is_write_dml
 
     run_id = state.get("run_id", "")
     messages = state.get("messages", [])
@@ -387,52 +436,47 @@ async def confirm_node(state: AgentState) -> dict[str, Any]:
 
     tool_calls = last_msg.tool_calls
 
-    # ── 分类：需要确认的写操作 vs 安全的工具调用 ──
+    # ── 分类：声明了 needs_write_confirmation 的需确认，其余安全 ──
     writes: list[dict[str, Any]] = []
     safe: list[Any] = []
     for tc in tool_calls:
         tool_fn = TOOL_REGISTRY.get(tc["name"])
         extras = getattr(tool_fn, "extras", None) or {}
         if extras.get("needs_write_confirmation"):
-            sql = tc["args"].get("sql", "")
-            if sql and is_write_dml(sql):
-                writes.append({
-                    "tool_call_id": tc["id"],
-                    "tool": tc["name"],
-                    "sql": sql,
-                })
-                continue
-        safe.append(tc)
+            writes.append(_build_confirmable_action(tc, extras))
+        else:
+            safe.append(tc)
 
     if not writes:
-        logger.info("confirm_node: 无写操作，直接透传", run_id=run_id)
+        logger.info("confirm_node: 无需确认的操作，直接透传", run_id=run_id)
         return {}
 
-    # ====== 有写操作，需要用户确认 ======
-    # ── 审计日志：逐条打印每条写操作详情 ──
+    # ====== 有危险操作，需要用户确认 ======
+    # ── 审计日志：逐条打印每条操作详情 ──
     logger.warning(
-        "【安全审计】检测到写操作，等待用户确认",
+        "【安全审计】检测到危险操作，等待用户确认",
         run_id=run_id,
         write_count=len(writes),
         safe_count=len(safe),
     )
     for w in writes:
         logger.warning(
-            "【安全审计】写操作详情",
+            "【安全审计】操作详情",
             run_id=run_id,
             tool_call_id=w["tool_call_id"],
             tool=w["tool"],
-            sql=w["sql"],
+            category=w["category"],
+            description=w["description"],
         )
     # 控制台打印（运维审计追踪）
     print(f"\n{'='*60}")
-    print(f"[SECURITY AUDIT] 检测到 {len(writes)} 条写操作 | 同时携带 {len(safe)} 条只读工具")
+    print(f"[SECURITY AUDIT] 检测到 {len(writes)} 条危险操作 | 同时携带 {len(safe)} 条安全工具")
     for w in writes:
-        print(f"  ├─ [{w['tool']}] {w['sql'][:120]}")
+        print(f"  ├─ [{w['tool']}]({w['category']}) {w['description'][:120]}")
     if safe:
-        print(f"  └─ 只读工具 {len(safe)} 个: {[s['name'] for s in safe]}")
+        print(f"  └─ 安全工具 {len(safe)} 个: {[s['name'] for s in safe]}")
     else:
-        print(f"  └─ 无只读工具")
+        print(f"  └─ 无安全工具")
     print(f"{'='*60}\n")
 
     # interrupt() 第一次执行：暂停图，将 payload 返回给调用方
@@ -459,19 +503,19 @@ async def confirm_node(state: AgentState) -> dict[str, Any]:
         tool_call_id = w["tool_call_id"]
         if tool_call_id in approved_ids:
             logger.warning(
-                "【安全审计】写操作已批准",
+                "【安全审计】操作已批准",
                 run_id=run_id,
                 tool_call_id=tool_call_id,
                 tool=w["tool"],
-                sql=w["sql"],
+                description=w["description"],
             )
         elif tool_call_id in denied_ids:
             logger.warning(
-                "【安全审计】写操作已拒绝",
+                "【安全审计】操作已拒绝",
                 run_id=run_id,
                 tool_call_id=tool_call_id,
                 tool=w["tool"],
-                sql=w["sql"],
+                description=w["description"],
             )
     # 控制台打印
     print(f"\n{'='*60}")
@@ -479,10 +523,10 @@ async def confirm_node(state: AgentState) -> dict[str, Any]:
     for w in writes:
         tid = w["tool_call_id"]
         status = "✅ 已批准" if tid in approved_ids else ("❌ 已拒绝" if tid in denied_ids else "⏭️ 未处理")
-        print(f"  {status} [{w['tool']}] {w['sql'][:120]}")
+        print(f"  {status} [{w['tool']}]({w['category']}) {w['description'][:120]}")
     print(f"{'='*60}\n")
 
-    # 保留批准的写 + 所有只读工具
+    # 保留批准的写 + 所有安全工具
     kept_calls = [
         tc for tc in tool_calls
         if tc["id"] in approved_ids or tc in safe
@@ -495,16 +539,20 @@ async def confirm_node(state: AgentState) -> dict[str, Any]:
 
     for tc in tool_calls:
         if tc["id"] in denied_ids:
-            sql_preview = tc["args"].get("sql", "")[:100]
+            # 从 writes 中查找对应的描述
+            desc = next(
+                (w["description"] for w in writes if w["tool_call_id"] == tc["id"]),
+                tc["name"],
+            )
             denied_msgs.append(ToolMessage(
-                content=f"写操作已被用户取消: {sql_preview}",
+                content=f"操作已被用户取消: {desc}",
                 tool_call_id=tc["id"],
                 name=tc["name"],
             ))
             sse_events.append({
                 "type": "tool_result",
                 "tool": tc["name"],
-                "summary": "用户取消了写操作",
+                "summary": "用户取消了操作",
                 "tool_call_id": tc["id"],
                 "agent_run_id": run_id,
                 "iteration": iteration,
@@ -682,9 +730,9 @@ def _build_system_prompt(state: AgentState) -> str:
         "系统会并行执行它们，显著提升整体响应速度。\n"
         "8. 最终用中文给出清晰完整的总结回答\n"
         "9. 如果工具返回错误，分析原因并尝试换一种方式解决\n"
-        "10. 如果用户要求插入、更新或删除数据，使用 execute_sql 工具执行写操作。"
+        "10. 如果用户要求插入、更新或删除数据，使用 execute_write_sql 工具执行写操作。"
         "写操作执行前系统会请求用户确认，如被用户拒绝请告知用户操作已取消。"
-        "如被安全策略拦截（权限不足），请告知用户当前角色的限制。\n"
+        "只读查询（SELECT / SHOW / DESCRIBE / EXPLAIN）请使用 execute_readonly_sql 工具。\n"
         "## 对话历史\n"
         f"{conversation_history}"
     )

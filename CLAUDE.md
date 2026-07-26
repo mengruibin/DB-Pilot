@@ -69,6 +69,7 @@ npx vue-tsc --noEmit
   → (api/chat.py) 解析连接、构建 AgentState (scoped to connection)
   → (agent/graph.py) LangGraph StateGraph (双通道流式):
       agent_node (LLM bind_tools → 决策工具调用或最终回答)
+        → confirm_node (无条件规则：声明 needs_write_confirmation 的工具即 interrupt 等待用户确认)
         → tools_node (安全护栏 → 连接注入 → 工具并行执行 → 脱敏，最多 5 个并发) → agent_node (ReAct 循环, ≤10 轮)
         → END (is_complete=True)
   → SSE 流式返回 12+ 种事件类型 (messages/updates 双通道)
@@ -121,9 +122,11 @@ frontend/
 
 3. **推理与回答分离** — 模型原生 `reasoning_content` 字段（DeepSeek/GLM 等支持）→ 作为独立 SSE `reasoning` 事件推送。普通 content 采用"乐观渲染+收编"模式：一律以 `stage="thinking"` 发射，`is_complete` 时若未检测到工具调用则发送 `stage_change("answer")` 触发前端收编。
 
-4. **Security** — 工具执行前经 SafeToolNode：连接配置注入 → 工具查找（读取 `extras` 元数据决定安全检查项）→ 安全护栏链 → 执行 → 结果脱敏。护栏链包括两层：
-   - SQLAuditCheck（sqlglot 审计拦截 DROP/ALTER/TRUNCATE 等危险 DDL）
-   - RowEstimationCheck（EXPLAIN 多维度评估，根据规则引擎阻断大查询或发出警告，失败时降级放行）
+4. **Security** — 工具执行前经两层安全关卡：
+   - **confirm_node**（图节点，在 agent_node 之后、safe_tools_node 之前）：检查 `needs_write_confirmation` 声明的工具 → `interrupt()` 暂停图等待用户确认。采用**无条件规则**：工具声明了 `needs_write_confirmation` 即触发确认，不再依赖 `sql` 参数或 `is_write_dml()` 判断。
+   - **SafeToolNode**（工具执行时）：连接配置注入 → 工具查找（读取 `extras` 元数据决定安全检查项）→ 安全护栏链 → 执行 → 结果脱敏。护栏链包括两层：
+     - SQLAuditCheck（sqlglot 审计拦截 DROP/ALTER/TRUNCATE 等危险 DDL）
+     - RowEstimationCheck（EXPLAIN 多维度评估，根据规则引擎阻断大查询或发出警告，失败时降级放行）
 
 5. **并行工具执行** — 当 LLM 在同一轮返回多个 `tool_calls` 时，SafeToolNode 用 `asyncio.gather(return_exceptions=True)` 并发执行它们。总耗时 ≈ 最慢工具而非耗时之和。通过 `asyncio.Semaphore` 限制最大并发数（默认 5），防止 DB 连接池耗尽。前端的 `onToolResult` 匹配从 `findLastRunningToolCall()` 改为 `tool_call_id` 精确匹配，支持并行安全的结果关联。SSE 事件中的 `tool_call` 和 `tool_result` 均携带 `tool_call_id` 字段用于前后端关联。
 
@@ -133,7 +136,7 @@ frontend/
 
 8. **Observability** — structlog 结构化日志 + X-Request-ID 全链路追踪 + trace_iterations 记录每轮 ReAct 决策轨迹。
 
-9. **EXPLAIN 多维度安全评估** — 在执行 `execute_sql` 前通过 EXPLAIN 获取 5 维标准化指标（访问方式、扫描行数、返回行数、查询成本、额外操作），用硬编码规则引擎（6 条 CRITICAL + 5 条 WARNING）逐条评估。CRITICAL 命中则阻断并告知 LLM 改写，WARNING 仅告警。所有阈值在 `explain_estimator.py` 中硬编码管理，不依赖 .env 配置。EXPLAIN 失败时降级放行，不阻断正常业务。同时执行后对结果自动截断（200 行 / 80K 字符），防止 LLM 上下文窗口溢出。
+9. **EXPLAIN 多维度安全评估** — 在执行 `execute_readonly_sql` 前通过 EXPLAIN 获取 5 维标准化指标（访问方式、扫描行数、返回行数、查询成本、额外操作），用硬编码规则引擎（6 条 CRITICAL + 5 条 WARNING）逐条评估。CRITICAL 命中则阻断并告知 LLM 改写，WARNING 仅告警。所有阈值在 `explain_estimator.py` 中硬编码管理，不依赖 .env 配置。`execute_write_sql` 不走自动安全护栏（用户确认即安全屏障），被拒绝的操作由 ToolMessage 返回给 LLM。EXPLAIN 失败时降级放行，不阻断正常业务。同时执行后对结果自动截断（200 行 / 80K 字符），防止 LLM 上下文窗口溢出。
 
 ### Frontend 设计系统
 
@@ -152,27 +155,46 @@ frontend/
     └─ 最终回答（绿调，Markdown 渲染 + 打字光标）
 ```
 
-#### 写操作确认卡片（内联设计）
+#### 危险操作确认卡片（内联设计，category 分类渲染）
 
-写操作确认采用**内联卡片**而非模态弹窗，自然嵌入消息流中，不遮挡界面：
+确认卡片采用**内联卡片**而非模态弹窗，自然嵌入消息流中，不遮挡界面。  
+按 `confirm_category` 分类渲染三种风格的确认卡片：
 
 ```
-消息列表
-  → ... 工具调用卡片（显示"等待用户审批"）
-  → ┌───────────────────────────────────────┐
-    │ ✎ 需要确认执行写操作                   │
-    │ ┌─ SQL 代码块 ──────────────────────┐  │
-    │ │ INSERT INTO users ...              │  │
-    │ └────────────────────────────────────┘  │
-    │          [取消]   [确认执行 (1.5s)]      │
-    └───────────────────────────────────────┘
+┌── sql_write ──────────────────────────────┐
+│ ✎ 需要确认执行写操作                       │
+│ ┌─ SQL 代码块（语法高亮）────────────────┐ │
+│ │ INSERT INTO users ...                   │ │
+│ └─────────────────────────────────────────┘ │
+│          [取消]   [确认执行 (1.5s)]         │
+└────────────────────────────────────────────┘
+
+┌── connection_kill ─────────────────────────┐
+│ ⚠ 需要确认终止数据库连接                   │
+│ ┌─ 连接详情 ────────────────────────────┐  │
+│ │ 线程 ID     │ 12345                    │  │
+│ │ 已运行时长  │ 3600s                    │  │
+│ │ 当前 SQL    │ SELECT sleep(...)        │  │
+│ └────────────────────────────────────────┘  │
+│ ⚡ 此操作不可逆，将立即断开该连接            │
+│          [取消]   [确认终止 (1.5s)]          │
+└────────────────────────────────────────────┘
+
+┌── generic（降级兜底）──────────────────────┐
+│ ℹ 需要确认执行操作                          │
+│ 工具: some_new_tool                         │
+│ ┌─ 参数详情 ────────────────────────────┐  │
+│ │ param_a   │ value_a                    │  │
+│ └────────────────────────────────────────┘  │
+│          [取消]   [确认执行 (1.5s)]          │
+└────────────────────────────────────────────┘
 ```
 
-- 深色主题强调色：浅绿 `#4ADE80`
-- 浅色主题强调色：浅蓝 `#60A5FA`
-- 左侧 3px 强调色边框，与 AI 响应卡片同宽同风格
-- 响应式：由 `chatStore.pendingConfirm` 驱动，`isWaitingApproval` computed 自动判断
-- 1.5s 冷却按钮防误触，冷却中为描边样式，结束后填充强调色
+- **`sql_write`**：蓝色铅笔图标 + `--confirm-accent` 强调色 + SQL 语法高亮代码块 + "确认执行"
+- **`connection_kill`**：红色三角警告图标 + `--confirm-danger` 强调色 + 线程详情表 + "此操作不可逆"提示 + "确认终止"
+- **`generic`**：灰色信息圆图标 + `--confirm-generic` 强调色 + key-value 参数表 + "确认执行"（未知类别降级兜底）
+- 所有类别共用响应式逻辑：`chatStore.pendingConfirm` 驱动、`isWaitingApproval` computed 自动判断、1.5s 冷却防误触
+- 后端新增工具只需声明 `needs_write_confirmation` + `confirm_category` 即可自动接入确认流程
 
 设计 token 在 `App.vue` CSS 变量中定义，支持 **深色/浅色** 双主题（通过 `[data-theme="light"]` 切换）。核心变量以 `--chat-*` 和 `--confirm-*` 前缀命名。字体：Satoshi（正文）+ JetBrains Mono（代码）。
 
@@ -180,19 +202,20 @@ frontend/
 
 所有 Agent 工具集中注册在 `app/agent/tools/registry.py`，新增工具只需在此注册，无需修改 graph.py：
 
-| 工具 | 功能 |
-|------|------|
-| `list_tables` | 列出数据库中所有表 |
-| `describe_table` | 获取指定表结构 |
-| `run_query` | 执行只读 SQL 查询 |
-| `get_slow_queries` | 获取慢查询日志（支持日志检测、performance_schema 降级、EXPLAIN 联动） |
-| `explain_query` | 分析 SQL 执行计划 |
-| `check_connections` | 检查连接池状态 |
-| `check_locks` | 检查锁等待（返回完整锁拓扑：表名/锁模式/锁类型，区分 held/waiting） |
-| `analyze_locks` | 查询指定事务/线程的详细锁信息（锁模式、等待链、根阻塞者） |
-| `kill_transaction` | 终止指定线程的连接（需用户确认，自动验证） |
-| `check_replication` | 检查主从复制状态 |
-| `run_health_check` | 执行 20 项健康巡检（含关联分析、一键修复建议） |
+| 工具 | 功能 | 安全声明 |
+|------|------|----------|
+| `list_tables` | 列出数据库中所有表 | — |
+| `describe_table` | 获取指定表结构 | — |
+| `execute_readonly_sql` | 执行只读 SQL 查询（SELECT / SHOW / EXPLAIN） | `needs_sql_audit`, `needs_row_estimation` |
+| `execute_write_sql` | 执行写 SQL（INSERT / UPDATE / DELETE，需用户确认） | `needs_write_confirmation`, `confirm_category: sql_write` |
+| `get_slow_queries` | 获取慢查询日志（支持日志检测、performance_schema 降级、EXPLAIN 联动） | — |
+| `explain_query` | 分析 SQL 执行计划 | `needs_sql_audit` |
+| `check_connections` | 检查连接池状态 | — |
+| `check_locks` | 检查锁等待（返回完整锁拓扑：表名/锁模式/锁类型，区分 held/waiting） | — |
+| `analyze_locks` | 查询指定事务/线程的详细锁信息（锁模式、等待链、根阻塞者） | — |
+| `kill_transaction` | 终止指定线程的连接（需用户确认，自动验证） | `needs_write_confirmation`, `confirm_category: connection_kill` |
+| `check_replication` | 检查主从复制状态 | — |
+| `run_health_check` | 执行 20 项健康巡检（含关联分析、一键修复建议） | — |
 
 ### Key Conventions
 
@@ -203,14 +226,15 @@ frontend/
 - 所有 `@tool` 函数返回 Python 原生类型（dict/list/str），禁止返回 ORM 实例
 - 连接密码仅存于内存 state，不持久化到数据库
 - SQL 审计默认拦截 DROP/ALTER/TRUNCATE/CREATE/GRANT/REVOKE，多语句直接拦截
-- **EXPLAIN 安全评估**：`execute_sql` 工具声明 `needs_row_estimation: True` 触发 RowEstimationCheck，通过 EXPLAIN 提取多维度指标并用规则引擎评估。阈值硬编码在 `explain_estimator.py`，不依赖 .env
+- **EXPLAIN 安全评估**：`execute_readonly_sql` 工具声明 `needs_row_estimation: True` 触发 RowEstimationCheck，通过 EXPLAIN 提取多维度指标并用规则引擎评估。`execute_write_sql` 不走自动安全护栏。阈值硬编码在 `explain_estimator.py`，不依赖 .env
 - **结果截断**：所有工具返回结果在序列化为 ToolMessage 前经 `truncate_result_for_llm()` 处理，最大 200 行 / 80K 字符，防止 LLM 上下文窗口溢出。截断时附带 `_truncated`、`_original_total_rows` 元信息
 - **并行工具执行**：SafeToolNode 用 `asyncio.gather()` 并发执行同轮 `tool_calls`，受 `AGENT_MAX_CONCURRENT_TOOLS`（默认 5）限制。SSE 事件的 `tool_call` / `tool_result` 均携带 `tool_call_id` 供前端精确匹配
 - 前端 `onToolResult` 匹配策略：优先用 `tool_call_id` 从 `Map` O(1) 查找，回退到 `tool` 名匹配。`MessageList.vue` 的 `pairToolSteps()` 将 `tool_call` 与对应 `tool_result` 配对渲染
+- **读写 SQL 工具分离**：`execute_sql` 已拆分为 `execute_readonly_sql`（只读查询，带 SQLAuditCheck + RowEstimationCheck 安全护栏）和 `execute_write_sql`（写操作，带 `needs_write_confirmation` 用户确认屏障）。`execute_write_sql` 不声明 `needs_sql_audit` / `needs_row_estimation`，用户确认即安全屏障。LLM 错将写 SQL 发给 `execute_readonly_sql` 时，非 admin 用户会被 SQLAuditCheck 拦截
 - **写操作确认 UI**：采用内联卡片非模态弹窗，`WriteConfirmation.vue` 组件根据 `chatStore.pendingConfirm` 渲染。tool_call 卡片通过 `isWaitingApproval` computed 响应式判断是否等待审批，显示时钟图标 + "等待用户审批"（由 `pendingConfirm.writes` 驱动，无需手动同步 `stepStatus`）。深色主题强调色浅绿 `#4ADE80`，浅色主题浅蓝 `#60A5FA`，变量定义在 `App.vue` 的 `--confirm-*` CSS 变量中
 - **MySQL 版本检测**：`MySQLAdapter.connect()` 自动执行 `SELECT VERSION()` 检测 MySQL/MariaDB 版本，存储为 `_db_vendor` 和 `_version_int`，供 `is_mariadb()` / `get_db_version()` 查询
 - **check_locks 返回结构**：返回 `{held_locks, waiting_locks, total_held, total_waiting, summary}`，每个锁记录含 `table_name`、`lock_mode`、`lock_type`。MySQL 8.0+ 走 `performance_schema.data_locks`，5.7/MariaDB 走 `SHOW ENGINE INNODB STATUS` 回退
 - **get_slow_queries 降级方案**：慢查询日志未开启时返回开启指引 `SET GLOBAL slow_query_log = ON`；日志不可用时自动降级到 `performance_schema.events_statements_summary_by_digest`。返回 `slow_log_enabled` 和 `fallback_used` 标识数据来源
 - **run_health_check 关联分析**：检查结果包含 `correlation_notes`（跨项关联分析列表）和 `fix_suggestions`（可执行修复 SQL 命令），从"发现问题"升级到"解决问题"
 - **EXPLAIN 安全拼接**：适配器 `explain()` 方法增加多语句检测和单引号转义，作为 `SQLAuditCheck` 之后的第二道防线（EXPLAIN 不支持参数化占位符）
-- **confirm_node 限制**：当前 `confirm_node` 仅对带 `sql` 参数且 `is_write_dml()` 返回 True 的工具触发中断确认。对于 `kill_transaction` 等无 `sql` 参数的危险工具，即使声明 `needs_write_confirmation=True` 也无法触发确认流程，需后续扩展确认机制
+- **confirm_node 通用确认机制**：`confirm_node` 采用**无条件规则**——工具声明 `needs_write_confirmation: True` 即触发 `interrupt()` 等待用户确认，不再检查 `sql` 参数或 `is_write_dml()`。`execute_write_sql` 和 `kill_transaction` 均通过此机制触发确认。前端按 `confirm_category`（`sql_write` / `connection_kill` / `generic`）分类渲染对应的确认卡片。新增危险操作工具只需在 `@tool(extras={...})` 中声明 `needs_write_confirmation` + `confirm_category` 即可接入确认流程

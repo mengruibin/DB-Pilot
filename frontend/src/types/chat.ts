@@ -291,16 +291,26 @@ export type SSEEvent =
   | DoneEvent
   | StageChangeEvent
 
-/** 写操作确认请求事件（来自 confirm_node interrupt） */
+/** 确认操作类别（前端按此分类渲染 UI） */
+export type ConfirmCategory = 'sql_write' | 'connection_kill' | 'generic'
+
+/** 单条需确认操作（与后端 _build_confirmable_action 返回值对应） */
+export interface ConfirmableWrite {
+  tool_call_id: string
+  tool: string
+  category: ConfirmCategory
+  /** 人类可读的操作描述 */
+  description: string
+  /** 工具特异性结构化数据（如 {sql: "...", thread_id: "..."}） */
+  details: Record<string, unknown>
+}
+
+/** 危险操作确认请求事件（来自 confirm_node interrupt） */
 export interface ConfirmRequiredEvent {
   type: 'confirm_required'
-  /** 需要用户确认的写操作列表 */
-  writes: Array<{
-    tool_call_id: string
-    tool: string
-    sql: string
-  }>
-  /** 同批次中无需确认的只读工具数量 */
+  /** 需要用户确认的危险操作列表 */
+  writes: ConfirmableWrite[]
+  /** 同批次中无需确认的安全工具数量 */
   safe_tool_count: number
   /** 当前会话 ID（供恢复请求使用） */
   session_id: string

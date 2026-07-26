@@ -185,9 +185,15 @@ export const useChatStore = defineStore('chat', () => {
   let msgCounter = 0
   // 内部：tool_call_id → tool_call message 快速查找表（并行安全匹配用）
   const toolCallMap = new Map<string, StoreMessage>()
-  /** 当前待用户确认的写操作（非空时显示确认对话框） */
+  /** 当前待用户确认的危险操作（非空时显示确认对话框） */
   const pendingConfirm = ref<{
-    writes: Array<{ tool_call_id: string; tool: string; sql: string }>
+    writes: Array<{
+      tool_call_id: string
+      tool: string
+      category: import('@/types/chat').ConfirmCategory
+      description: string
+      details: Record<string, unknown>
+    }>
   } | null>(null)
 
   /** SSE 流是否因写操作确认而中断（等待用户决策） */

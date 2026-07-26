@@ -829,7 +829,7 @@ async def _analyze_pg_locks(
 # =============================================================================
 
 
-@tool(extras={"needs_write_confirmation": True})
+@tool(extras={"needs_write_confirmation": True, "confirm_category": "connection_kill"})
 async def kill_transaction(
     connection_id: Annotated[str, InjectedToolArg],
     db_type: Annotated[str, InjectedToolArg],
