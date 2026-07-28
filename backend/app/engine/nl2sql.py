@@ -190,6 +190,7 @@ async def generate_sql(
     previous_error: str | None = None,
     previous_sql: str | None = None,
     adapter: Any | None = None,
+    user_role: str = "readonly",
 ) -> dict[str, Any]:
     """将自然语言转换为 SQL 查询。
 
@@ -216,6 +217,9 @@ async def generate_sql(
         previous_sql: 上一次生成的 SQL，与 previous_error 配合使用。
         adapter: 可选的数据库适配器实例（已连接）。
             提供后将自动对生成的 SQL 执行 EXPLAIN 性能审计。
+        user_role: 用户角色（readonly / admin），影响 Prompt 生成
+            和 SQL 审计策略。readonly 用户仅允许 SELECT；
+            admin 允许 DML（INSERT/UPDATE/DELETE），仍禁止 DDL。
 
     Returns:
         成功：{"sql": "...", "explanation": "...",
@@ -239,6 +243,7 @@ async def generate_sql(
             conversation_history=conversation_history,
             previous_error=previous_error,
             previous_sql=previous_sql,
+            user_role=user_role,
         )
 
         # Step 2: 调用 LLM（通过标准 LangChain Chat 模型）
@@ -266,7 +271,7 @@ async def generate_sql(
 
         # Step 4: SQL 安全审计
         # SAFETY: 不跳过 SQL 审计（AGENTS.md §安全与合规红线）
-        audit_result = audit(sql, db_type=db_type, user_role="readonly")
+        audit_result = audit(sql, db_type=db_type, user_role=user_role)
 
         if not audit_result.passed:
             logger.warning("NL2SQL 审计拦截", connection_id=connection_id,

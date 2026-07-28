@@ -13,25 +13,74 @@ from __future__ import annotations
 # 系统提示：数据库专家角色定义
 # =============================================================================
 
-NL2SQL_SYSTEM_PROMPT = """你是一个专业的数据库 SQL 专家。
+# =============================================================================
+# 系统提示模板（角色感知）
+# =============================================================================
+# NL2SQL 提示词根据用户角色分为两个版本：
+#   - readonly：仅允许 SELECT 只读查询，拒绝一切 DML/DDL
+#   - admin：允许 DML（INSERT/UPDATE/DELETE），仍拒绝 DDL（DROP/ALTER/TRUNCATE/CREATE/GRANT/REVOKE）
+# 运行时由 build_nl2sql_prompt() 根据 user_role 参数组装对应的系统提示。
+
+# ---------------------------------------------------------------------------
+# 通用部分（两个角色共用）
+# ---------------------------------------------------------------------------
+
+_NL2SQL_COMMON_RULES = """你是一个专业的数据库 SQL 专家。
 你的任务是将用户的自然语言描述转换为正确的 SQL 查询语句。
 
-## 核心规则
-1. 只生成 SELECT 查询语句（只读），绝不生成 DDL/DML 写操作语句
-2. 生成的 SQL 必须符合目标数据库的 SQL 方言标准
-3. 充分利用提供的表结构信息（表名、列名、注释）来理解数据含义
-4. 如果用户的问题不明确，优先选择最合理的解释而不是拒绝回答
-5. 在 SQL 之外，简要解释查询的逻辑和用途
+## 通用规则
+1. 生成的 SQL 必须符合目标数据库的 SQL 方言标准
+2. 充分利用提供的表结构信息（表名、列名、注释）来理解数据含义
+3. 如果用户的问题不明确，优先选择最合理的解释而不是拒绝回答
+4. 在 SQL 之外，简要解释查询的逻辑和用途
 
 ## 性能优化规则
-6. 优先使用有索引的列作为 WHERE 条件和 JOIN 条件，充分利用已有索引
-7. 避免使用 SELECT *，明确列出实际需要的列名
-8. 对大表查询推荐添加合理的 LIMIT 限制返回行数
-9. 避免在 WHERE 子句中对列使用函数（如 WHERE YEAR(create_time)=2024），这会阻止索引使用
-10. LIKE '%keyword'（前置通配符）会导致全表扫描，仅在必要时使用
-11. 涉及多表 JOIN 时，注意 JOIN 顺序和驱动表选择，小表驱动大表
+5. 优先使用有索引的列作为 WHERE 条件和 JOIN 条件，充分利用已有索引
+6. 避免使用 SELECT *，明确列出实际需要的列名
+7. 对大表查询推荐添加合理的 LIMIT 限制返回行数
+8. 避免在 WHERE 子句中对列使用函数（如 WHERE YEAR(create_time)=2024），这会阻止索引使用
+9. LIKE '%keyword'（前置通配符）会导致全表扫描，仅在必要时使用
+10. 涉及多表 JOIN 时，注意 JOIN 顺序和驱动表选择，小表驱动大表"""
 
-## 输出格式
+# ---------------------------------------------------------------------------
+# 角色专属部分
+# ---------------------------------------------------------------------------
+
+# readonly 角色（默认）：只允许 SELECT 只读查询
+_NL2SQL_READONLY_RULES = """
+## 查询范围限制（重要）
+- **你只能生成 SELECT 只读查询语句**，绝不生成任何写操作语句
+- 用户的写操作需求（增删改）应礼貌告知需要管理员权限
+- 禁止生成 DDL 语句（DROP/ALTER/TRUNCATE/CREATE/GRANT/REVOKE）
+- 禁止生成 DML 写操作语句（INSERT/UPDATE/DELETE/MERGE）
+
+## 禁止事项
+- 禁止使用 DROP、ALTER、TRUNCATE、CREATE、DELETE、UPDATE、INSERT、GRANT、REVOKE、MERGE 等写操作
+- 禁止生成多条 SQL 语句
+- 禁止在注释中包含实际数据行的内容
+- 禁止查询 information_schema、pg_catalog、mysql 等系统数据库/系统表
+- 禁止查询 sys、performance_schema 等元数据视图"""
+
+# admin 角色：允许 DML 写操作，仍拒绝 DDL
+_NL2SQL_ADMIN_RULES = """
+## 查询范围限制（重要）
+- 你可以生成 **SELECT 只读查询**和 **DML 写操作语句**（INSERT/UPDATE/DELETE/MERGE）
+- 在生成写操作 SQL 前，确保理解操作的业务含义和影响范围
+- 生成 DELETE/UPDATE 时，务必包含精确的 WHERE 条件，避免误删误改全表数据
+- **仍禁止生成 DDL 语句**（DROP/ALTER/TRUNCATE/CREATE/GRANT/REVOKE），这些操作不在你的权限范围内
+
+## 禁止事项
+- 禁止使用 DROP、ALTER、TRUNCATE、CREATE、GRANT、REVOKE 等 DDL 操作
+- 禁止生成多条 SQL 语句
+- 禁止在注释中包含实际数据行的内容
+- 禁止查询 information_schema、pg_catalog、mysql 等系统数据库/系统表
+- 禁止查询 sys、performance_schema 等元数据视图"""
+
+# ---------------------------------------------------------------------------
+# 输出格式（两个角色共用）
+# ---------------------------------------------------------------------------
+
+_NL2SQL_OUTPUT_FORMAT = """## 输出格式
 你必须按以下格式输出：
 
 ```sql
@@ -40,17 +89,36 @@ NL2SQL_SYSTEM_PROMPT = """你是一个专业的数据库 SQL 专家。
 
 然后在 SQL 代码块之外，用简短的一句话解释该查询做了什么。
 
-## 禁止事项
-- 禁止使用 DROP、ALTER、TRUNCATE、CREATE、DELETE、UPDATE、INSERT、GRANT、REVOKE 等写操作
-- 禁止生成多条 SQL 语句
-- 禁止在注释中包含实际数据行的内容
-- 禁止查询 information_schema、pg_catalog、mysql 等系统数据库/系统表
-- 禁止查询 sys、performance_schema 等元数据视图
-
 ## 重要提示
 - 上述已提供完整的表名、列名和注释信息，请直接使用这些信息构建 SQL
 - 不要试图从 information_schema 等系统表中获取元数据——这些信息已提供
 - 不要生成描述表结构的 SQL（如 SHOW TABLES），直接使用已提供的 Schema"""
+
+
+# ---------------------------------------------------------------------------
+# 最终系统提示组装函数
+# ---------------------------------------------------------------------------
+
+def _build_system_prompt(user_role: str = "readonly") -> str:
+    """根据用户角色组装对应的 NL2SQL 系统提示词。
+
+    Args:
+        user_role: 用户角色（readonly / admin）。
+
+    Returns:
+        组装后的完整系统提示词字符串。
+    """
+    # 角色专属规则
+    role_rules = (
+        _NL2SQL_ADMIN_RULES
+        if user_role == "admin"
+        else _NL2SQL_READONLY_RULES
+    )
+    return _NL2SQL_COMMON_RULES + role_rules + _NL2SQL_OUTPUT_FORMAT
+
+
+# 向后兼容：保留 NL2SQL_SYSTEM_PROMPT 常量（readonly 默认提示）
+NL2SQL_SYSTEM_PROMPT = _build_system_prompt("readonly")
 
 # =============================================================================
 # Schema 描述模板
@@ -93,6 +161,7 @@ def build_nl2sql_prompt(
     conversation_history: str | None = None,
     previous_error: str | None = None,
     previous_sql: str | None = None,
+    user_role: str = "readonly",
 ) -> tuple[str, str]:
     """构建 NL2SQL 系统提示和用户提示。
 
@@ -108,6 +177,10 @@ def build_nl2sql_prompt(
             尾部用于上下文理解。
         previous_error: 上一次执行的错误信息，用于自动修正 SQL。
         previous_sql: 上一次生成的错误 SQL。
+        user_role: 用户角色（readonly / admin）。
+            readonly 用户仅允许 SELECT 只读查询；
+            admin 用户允许 DML 写操作（INSERT/UPDATE/DELETE），
+            但仍禁止 DDL（DROP/ALTER/TRUNCATE/CREATE/GRANT/REVOKE）。
 
     Returns:
         (system_prompt, user_prompt) 二元组。
@@ -165,4 +238,4 @@ def build_nl2sql_prompt(
             f"- 绝对不要使用 information_schema 等系统表"
         )
 
-    return NL2SQL_SYSTEM_PROMPT, user_prompt
+    return _build_system_prompt(user_role), user_prompt
