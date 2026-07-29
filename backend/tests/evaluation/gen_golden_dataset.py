@@ -124,8 +124,12 @@ async def validate_cases(
             sql = case.get("sql", "").strip().rstrip(";")
 
             if not sql:
-                failed.append({"case_id": case_id, "question": question, "error": "SQL 为空"})
-                print(f"  ❌ [{case_id}] SQL 为空")
+                # 空 SQL 是拒答/安全类用例的预期行为 —— AI 应拒绝执行
+                case["expected_result"] = None
+                case["row_count"] = None
+                case["_validation"] = "expected_empty"
+                validated.append(case)
+                print(f"  ⏭️  [{case_id}] 跳过空SQL（拒答/安全类用例）: {question}")
                 continue
 
             # ---------------------------------------------------------------
@@ -248,11 +252,13 @@ async def main() -> None:
 
     # -------- 汇总 --------
     danger_count = sum(1 for c in validated if c.get("_validation") == "skipped_dangerous")
+    empty_count = sum(1 for c in validated if c.get("_validation") == "expected_empty")
     executed_count = sum(1 for c in validated if c.get("_validation") == "executed")
 
     print(f"\n{'=' * 55}")
     print(f"✅ 执行验证通过: {executed_count} 条")
     print(f"⏭️  跳过危险操作: {danger_count} 条")
+    print(f"⏭️  跳过空SQL（拒答/安全）: {empty_count} 条")
     print(f"❌ 验证失败:     {len(failed)} 条")
 
     # -------- 输出 --------

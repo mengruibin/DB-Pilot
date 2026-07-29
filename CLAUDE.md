@@ -27,6 +27,15 @@ pytest backend/tests/ -v
 # 运行单个测试
 pytest backend/tests/test_sql_auditor.py -v
 
+# Text-to-SQL 业务查询评测（需后端运行 + 数据库连接）
+cd backend/tests/evaluation && python gen_golden_dataset.py   # 预构建黄金数据集
+cd backend/tests/evaluation && python eval_agent.py           # 执行评测并生成报告
+
+# 运维场景评测（工具调用链验证）
+cd backend/tests/evaluation && python eval_ops_agent.py                         # 全量运行
+cd backend/tests/evaluation && python eval_ops_agent.py --ids OP-001,OP-006     # 指定用例
+cd backend/tests/evaluation && python eval_ops_agent.py --cases 10              # 前10条
+
 # 数据库迁移（Alembic）
 cd backend && alembic upgrade head
 cd backend && alembic revision --autogenerate -m "description"
@@ -99,6 +108,7 @@ backend/
 │   └── prompts/              # Prompt 模板（Python 字面量，不含运行时变量）
 ├── alembic/                  # 数据库迁移（versions/ 目录有 4 个迁移）
 └── tests/                    # pytest 测试（conftest + sql_auditor + adapter 集成测试）
+    └── evaluation/           # Agent 评测：text_to_sql_evaluation（业务查询）+ ops_evaluation（运维场景）
 
 frontend/
 ├── src/
@@ -238,3 +248,25 @@ frontend/
 - **run_health_check 关联分析**：检查结果包含 `correlation_notes`（跨项关联分析列表）和 `fix_suggestions`（可执行修复 SQL 命令），从"发现问题"升级到"解决问题"
 - **EXPLAIN 安全拼接**：适配器 `explain()` 方法增加多语句检测和单引号转义，作为 `SQLAuditCheck` 之后的第二道防线（EXPLAIN 不支持参数化占位符）
 - **confirm_node 通用确认机制**：`confirm_node` 采用**无条件规则**——工具声明 `needs_write_confirmation: True` 即触发 `interrupt()` 等待用户确认，不再检查 `sql` 参数或 `is_write_dml()`。`execute_write_sql` 和 `kill_transaction` 均通过此机制触发确认。前端按 `confirm_category`（`sql_write` / `connection_kill` / `generic`）分类渲染对应的确认卡片。新增危险操作工具只需在 `@tool(extras={...})` 中声明 `needs_write_confirmation` + `confirm_category` 即可接入确认流程
+
+### Agent 评测体系
+
+DB-Pilot 有两套独立评测脚本，均位于 `backend/tests/evaluation/`：
+
+**text-to-sql 评测（eval_agent.py）：**
+- 测评集：`text_to_sql_evaluation.json`（30 条用例，6 类：基础聚合/分组排序/复杂条件/时间函数/嵌套子查询/拒答安全）
+- 黄金数据集：`gen_golden_dataset.py` 预执行 SQL 生成 `golden_dataset.json`
+- 匹配方式：规范化 SQL 字符串匹配 + 结果集语义比对（Level 1 子集 / Level 2 重叠）
+- 安全用例：用危险前缀黑名单判断 Agent 是否正确拒绝
+- 报告：HTML/JSON 含 KPI 卡片（通过率/SQL 精确匹配率/结果匹配率/安全拒绝率等）
+
+**运维场景评测（eval_ops_agent.py）：**
+- 测评集：`ops_evaluation.json`（26 条用例，8 类：性能诊断/连接管理/锁分析/复制监控/健康巡检/协同诊断/危险操作确认/拒答安全）
+- 三层评测维度：
+  - L1 工具选择 — Agent 是否调用了正确的工具（集合匹配 + 禁用工具黑名单）
+  - L2 参数正确性 — 工具参数字段级比对（精确/子串/范围三种匹配模式）
+  - L3 调用顺序 — 多步推理时工具调用顺序 LCS 最长公共子序列验证
+- 危险操作确认：检测 `confirm_required` SSE 事件是否正确触发
+- 输出不依赖固定结果集（运维工具返回动态系统状态），评判**过程合理性**而非结果一致性
+- 复用 `eval_agent.py` 的 `EvalConfig` / `APIClient` 等组件
+- 前置条件：后端服务运行中 + 数据库连接已在前端创建（通过 `EVAL_CONN_NAME` 匹配或取第一个可用连接）
