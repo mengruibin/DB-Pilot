@@ -512,8 +512,8 @@ class MySQLAdapter(BaseAdapter):
         stripped = sql.strip().rstrip(";")
         if ";" in stripped:
             raise ValueError("多语句 SQL 无法执行 EXPLAIN（检测到未转义的分号）")
-        # 转义单引号，防止 EXPLAIN 格式被注入破坏
-        safe_sql = sql.replace("\\", "\\\\").replace("'", "\\'")
+        # 转义单引号（SQL 标准双单引号转义），防止 EXPLAIN 格式被注入破坏
+        safe_sql = sql.replace("'", "''")
         result = await self.execute(f"EXPLAIN FORMAT=JSON {safe_sql}")
         return {
             "explain_output": result["rows"][0][0] if result["rows"] else "",
