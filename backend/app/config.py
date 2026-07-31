@@ -76,6 +76,27 @@ class Settings(BaseSettings):
         "示例：mysql+aiomysql://root:password@127.0.0.1:3306/db_pilot",
     )
 
+    # ==================== Checkpointer（PostgreSQL） ====================
+    CHECKPOINT_DB_URL: str = Field(
+        default="",
+        description="LangGraph AsyncPostgresSaver 连接串（psycopg 格式）。"
+        "checkpointer-redis-migration-plan（PostgreSQL 方案）。"
+        "示例：postgresql://user:password@127.0.0.1:5432/db_pilot_checkpoint",
+    )
+    CHECKPOINT_RETENTION_DAYS: int | None = Field(
+        default=3,
+        ge=1,
+        description="checkpoint 过期保留天数。超过该天数未访问的会话上下文"
+        "会被清理（基于 checkpoint JSONB 的 ts 字段）。"
+        "设为 None 表示永不清理。",
+    )
+    CHECKPOINT_CLEANUP_INTERVAL_HOURS: int = Field(
+        default=24,
+        ge=1,
+        description="checkpoint 周期清理间隔（小时）。服务启动时清理一次，"
+        "此后每间隔该时长后台清理一次过期 checkpoint。",
+    )
+
     # ==================== 服务端 ====================
     SERVER_HOST: str = Field(
         default="127.0.0.1",

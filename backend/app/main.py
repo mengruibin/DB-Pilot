@@ -19,6 +19,8 @@ DB-Pilot FastAPI 应用工厂。
 
 from __future__ import annotations
 
+import asyncio
+import sys
 import time
 import uuid
 from collections.abc import AsyncGenerator
@@ -28,6 +30,21 @@ from typing import TYPE_CHECKING
 import structlog
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+
+# Windows：psycopg 异步模式不兼容默认的 ProactorEventLoop，必须使用
+# SelectorEventLoop（checkpointer-redis-migration-plan）。
+# uvicorn 0.51 在 Windows 硬编码返回 ProactorEventLoop，忽略事件循环策略，
+# 因此需要显式通过 --loop 传入自定义 loop factory。
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
+
+def selector_loop_factory() -> asyncio.AbstractEventLoop:
+    """Windows 下 psycopg 异步模式要求 SelectorEventLoop。
+
+    uvicorn 启动参数：--loop app.main:selector_loop_factory
+    """
+    return asyncio.SelectorEventLoop()
 
 from app.config import settings
 from app.correlation import set_trace_id
@@ -157,12 +174,20 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # 启动
     configure_logging()
     _session_manager.start()  # B-24：启动后台会话清理任务
+    from app.agent.graph import init_checkpointer, start_checkpoint_cleanup
+
+    await init_checkpointer()  # 初始化 PG checkpointer 连接池 + 建表 + 启动清理
+    start_checkpoint_cleanup()  # 启动 checkpoint 周期清理后台任务
     logger.info("服务启动", version=app.version)
 
     yield
 
     # 关闭
     await _session_manager.stop()  # B-24：停止后台会话清理任务
+    from app.agent.graph import close_checkpointer, stop_checkpoint_cleanup
+
+    await stop_checkpoint_cleanup()  # 停止 checkpoint 周期清理后台任务
+    await close_checkpointer()  # 关闭 PG checkpointer 连接池
     logger.info("服务关闭")
     app.state.started = False
 

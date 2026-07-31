@@ -24,6 +24,8 @@ dependencies = [
     "fastapi>=0.115.0",           # REST + SSE API 框架（PRD §6.1）
     "uvicorn[standard]>=0.30.0",  # ASGI 服务器
     "langgraph>=0.3.0",           # Agent 状态图编排（PRD §6.1）
+    "langgraph-checkpoint-postgres>=3.1.0",  # PG checkpointer（checkpointer-redis-migration-plan）
+    "psycopg[binary]>=3.3.0",  # psycopg 二进制模式，自带 libpq>=10（SCRAM 认证）
     "sqlalchemy>=2.0.0",         # 内部 ORM（会话/连接配置持久化，PRD §6.1）
     "pydantic>=2.0",             # 请求/响应模型 + 配置管理（PRD §6.1）
     "pydantic-settings>=2.0",    # 从 .env/环境变量加载 Settings

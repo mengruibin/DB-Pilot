@@ -32,15 +32,22 @@ LLM 自主决定调用哪些工具、以什么顺序调用、何时停止并给�
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import logging
 import time
 from typing import Any, Literal
 
 import structlog
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from langgraph.checkpoint.base import BaseCheckpointSaver
+from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.graph import END, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.types import interrupt
+from psycopg import AsyncConnection
+from psycopg.rows import DictRow, dict_row
+from psycopg_pool import AsyncConnectionPool
 
 from app.agent.models import build_chat_model
 from app.agent.state import AgentState
@@ -351,10 +358,20 @@ async def agent_node(state: AgentState) -> dict[str, Any]:
 # =============================================================================
 
 # 连接注入参数集合（confirm_node 阶段尚未注入，过滤以保持 details 干净）
-_CONN_INJECTED_PARAMS = frozenset({
-    "connection_id", "db_type", "host", "port", "database",
-    "user", "password", "ssl_enabled", "ssl_ca_cert", "user_role",
-})
+_CONN_INJECTED_PARAMS = frozenset(
+    {
+        "connection_id",
+        "db_type",
+        "host",
+        "port",
+        "database",
+        "user",
+        "password",
+        "ssl_enabled",
+        "ssl_ca_cert",
+        "user_role",
+    }
+)
 
 
 def _build_confirmable_action(tc: Any, extras: dict[str, Any]) -> dict[str, Any]:
@@ -374,9 +391,7 @@ def _build_confirmable_action(tc: Any, extras: dict[str, Any]) -> dict[str, Any]
     raw_args = dict(tc["args"])
 
     # 过滤连接注入参数（保持 description/details 干净）
-    key_args: dict[str, Any] = {
-        k: v for k, v in raw_args.items() if k not in _CONN_INJECTED_PARAMS
-    }
+    key_args: dict[str, Any] = {k: v for k, v in raw_args.items() if k not in _CONN_INJECTED_PARAMS}
 
     # 自动生成人类可读描述
     parts: list[str] = []
@@ -469,7 +484,7 @@ async def confirm_node(state: AgentState) -> dict[str, Any]:
             description=w["description"],
         )
     # 控制台打印（运维审计追踪）
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"[SECURITY AUDIT] 检测到 {len(writes)} 条危险操作 | 同时携带 {len(safe)} 条安全工具")
     for w in writes:
         print(f"  ├─ [{w['tool']}]({w['category']}) {w['description'][:120]}")
@@ -477,16 +492,18 @@ async def confirm_node(state: AgentState) -> dict[str, Any]:
         print(f"  └─ 安全工具 {len(safe)} 个: {[s['name'] for s in safe]}")
     else:
         print(f"  └─ 无安全工具")
-    print(f"{'='*60}\n")
+    print(f"{'=' * 60}\n")
 
     # interrupt() 第一次执行：暂停图，将 payload 返回给调用方
     # interrupt() 第二次执行（resume）：返回 Command(resume=...) 中的值
-    decision = interrupt({
-        "type": "confirm_required",
-        "writes": writes,
-        "safe_tool_count": len(safe),
-        "session_id": state.get("session_id", ""),  # 供前端恢复请求时使用
-    })
+    decision = interrupt(
+        {
+            "type": "confirm_required",
+            "writes": writes,
+            "safe_tool_count": len(safe),
+            "session_id": state.get("session_id", ""),  # 供前端恢复请求时使用
+        }
+    )
 
     # ====== 处理用户决策（interrupt() 恢复后执行） ======
     approved_ids: set[str] = set(decision.get("approved_tool_call_ids", []))
@@ -518,19 +535,20 @@ async def confirm_node(state: AgentState) -> dict[str, Any]:
                 description=w["description"],
             )
     # 控制台打印
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"[SECURITY AUDIT] 用户决策结果: 批准 {len(approved_ids)} / 拒绝 {len(denied_ids)}")
     for w in writes:
         tid = w["tool_call_id"]
-        status = "✅ 已批准" if tid in approved_ids else ("❌ 已拒绝" if tid in denied_ids else "⏭️ 未处理")
+        status = (
+            "✅ 已批准"
+            if tid in approved_ids
+            else ("❌ 已拒绝" if tid in denied_ids else "⏭️ 未处理")
+        )
         print(f"  {status} [{w['tool']}]({w['category']}) {w['description'][:120]}")
-    print(f"{'='*60}\n")
+    print(f"{'=' * 60}\n")
 
     # 保留批准的写 + 所有安全工具
-    kept_calls = [
-        tc for tc in tool_calls
-        if tc["id"] in approved_ids or tc in safe
-    ]
+    kept_calls = [tc for tc in tool_calls if tc["id"] in approved_ids or tc in safe]
 
     # 为被拒绝的工具生成 ToolMessage 和 SSE 事件
     denied_msgs: list[ToolMessage] = []
@@ -544,20 +562,24 @@ async def confirm_node(state: AgentState) -> dict[str, Any]:
                 (w["description"] for w in writes if w["tool_call_id"] == tc["id"]),
                 tc["name"],
             )
-            denied_msgs.append(ToolMessage(
-                content=f"操作已被用户取消: {desc}",
-                tool_call_id=tc["id"],
-                name=tc["name"],
-            ))
-            sse_events.append({
-                "type": "tool_result",
-                "tool": tc["name"],
-                "summary": "用户取消了操作",
-                "tool_call_id": tc["id"],
-                "agent_run_id": run_id,
-                "iteration": iteration,
-                "safety_checks_passed": False,
-            })
+            denied_msgs.append(
+                ToolMessage(
+                    content=f"操作已被用户取消: {desc}",
+                    tool_call_id=tc["id"],
+                    name=tc["name"],
+                )
+            )
+            sse_events.append(
+                {
+                    "type": "tool_result",
+                    "tool": tc["name"],
+                    "summary": "用户取消了操作",
+                    "tool_call_id": tc["id"],
+                    "agent_run_id": run_id,
+                    "iteration": iteration,
+                    "safety_checks_passed": False,
+                }
+            )
 
     # 替换原始 AIMessage（相同 id → add_messages reducer 进行替换而非追加）
     modified_aimsg = AIMessage(
@@ -568,13 +590,15 @@ async def confirm_node(state: AgentState) -> dict[str, Any]:
 
     # trace 记录
     trace_iterations = list(state.get("trace_iterations", []))
-    trace_iterations.append({
-        "iteration": len(trace_iterations) + 1,
-        "node": "confirm",
-        "writes_detected": len(writes),
-        "approved": len(approved_ids),
-        "denied": len(denied_ids),
-    })
+    trace_iterations.append(
+        {
+            "iteration": len(trace_iterations) + 1,
+            "node": "confirm",
+            "writes_detected": len(writes),
+            "approved": len(approved_ids),
+            "denied": len(denied_ids),
+        }
+    )
 
     return {
         "messages": [modified_aimsg] + denied_msgs,
@@ -588,7 +612,9 @@ async def confirm_node(state: AgentState) -> dict[str, Any]:
 # =============================================================================
 
 
-def build_agent_graph() -> CompiledStateGraph:
+def build_agent_graph(
+    checkpointer: BaseCheckpointSaver | None = None,
+) -> CompiledStateGraph:
     """构建 Agent 状态图（2026-07 重构：移除了意图分类 + format_response）。
 
     图结构：
@@ -601,8 +627,8 @@ def build_agent_graph() -> CompiledStateGraph:
     外部通过 graph.astream(initial_state, stream_mode=["updates", "messages"]) 执行，
     从 state["sse_events"] 读取 SSE 事件并序列化为 SSE 流。
 
-    MemorySaver checkpointer 在每次 node 完成后自动保存完整 state 快照，
-    支持调试时查询任意 checkpoint。
+    AsyncPostgresSaver checkpointer 通过 PostgreSQL 持久化保存 state 快照，
+    支持进程重启后恢复中断的图（confirm/resume 跨重启）。
 
     变更（2026-07-04）：
       移除了 classify_node（原本在入口之前做 5 分类），
@@ -619,8 +645,18 @@ def build_agent_graph() -> CompiledStateGraph:
       新增 confirm_node（写操作确认），位于 agent_node 和 safe_tools_node 之间。
       agent → route → confirm → route → tools/agent
 
+    变更（2026-07-31）：
+      MemorySaver → AsyncRedisSaver → AsyncPostgresSaver
+      （checkpointer-redis-migration-plan）。最终选择 PostgreSQL 持久化，
+      社区 Redis 包依赖 RedisJSON/RediSearch 模块，普通 Redis 无法运行。
+
+    Args:
+        checkpointer: 可选的 checkpointer 实例。为 None 时使用 MemorySaver
+            （内存态，测试/未初始化场景）。生产环境由 init_checkpointer()
+            创建 AsyncPostgresSaver 并重建图。
+
     Returns:
-        编译后的 LangGraph 图，可直接执行。
+        编译后的 LangGraph 图实例。
     """
     from langgraph.checkpoint.memory import MemorySaver  # noqa: I001
 
@@ -659,31 +695,195 @@ def build_agent_graph() -> CompiledStateGraph:
     # ── tools → agent（结果返回，继续决策） ──
     workflow.add_edge("tools", "agent")
 
-    # ── 编译图（MemorySaver 自动保存 checkpoint 快照） ──
-    checkpointer = MemorySaver()
+    # ── 编译图（AsyncRedisSaver 持久化 checkpoint 到 Redis） ──
+    if checkpointer is None:
+        # 默认使用 MemorySaver（内存态）：
+        # - 测试场景不需要外部依赖
+        # - 生产环境由 init_checkpointer() 创建 AsyncPostgresSaver 并重建图
+        checkpointer = MemorySaver()
     return workflow.compile(checkpointer=checkpointer)
 
 
 # =============================================================================
-# 模块级图实例单例（含 MemorySaver checkpointer）
+# 模块级图实例单例（含 AsyncPostgresSaver checkpointer）
 # =============================================================================
 
 _agent_graph: CompiledStateGraph | None = None
+_checkpointer: AsyncPostgresSaver | None = None
+# 泛型参数化必须为 AsyncConnection[DictRow]（与 connection_class 一致），
+# 否则 AsyncPostgresSaver.__init__ 类型不兼容（Conn 要求 DictRow）
+_pool: AsyncConnectionPool[AsyncConnection[DictRow]] | None = None
 
 
 def get_agent_graph() -> CompiledStateGraph:
-    """返回模块级单例 Agent 图（含 checkpointer）。
+    """返回模块级单例 Agent 图（含 PG checkpointer）。
 
     必须复用同一个实例才能跨 HTTP 请求恢复 interrupt() 暂停的图。
-    MemorySaver 在内存中保存 checkpoint 快照，供中断后恢复使用。
+    AsyncPostgresSaver 通过 PostgreSQL 持久化 checkpoint，支持进程重启后恢复。
 
     Returns:
         编译后的 LangGraph 图实例（模块级缓存）。
     """
     global _agent_graph
     if _agent_graph is None:
-        _agent_graph = build_agent_graph()
+        # 若 init_checkpointer() 尚未执行（如测试环境），退化为 MemorySaver
+        _agent_graph = build_agent_graph(_checkpointer)
     return _agent_graph
+
+
+def get_checkpointer() -> AsyncPostgresSaver | None:
+    """获取模块级 AsyncPostgresSaver 实例。"""
+    return _checkpointer
+
+
+async def init_checkpointer() -> None:
+    """初始化 PG checkpointer（checkpointer-redis-migration-plan Task 5）。
+
+    在 FastAPI 启动时调用：
+      1. 创建 psycopg AsyncConnectionPool
+      2. 构建 AsyncPostgresSaver 并 setup()（建表）
+      3. 执行过期 checkpoint 清理（CHECKPOINT_RETENTION_DAYS）
+      4. 用 PG saver 重建 Agent 图
+    """
+    global _agent_graph, _checkpointer, _pool
+    if _pool is not None:
+        return  # 已初始化
+
+    if not settings.CHECKPOINT_DB_URL:
+        logger.warning("CHECKPOINT_DB_URL 未配置，checkpoint 使用 MemorySaver（重启丢失）")
+        return
+
+    try:
+        _pool = AsyncConnectionPool(
+            settings.CHECKPOINT_DB_URL,
+            open=False,
+            timeout=30,
+            max_size=10,
+            # 显式参数化泛型为 AsyncConnection[DictRow]：
+            # AsyncPostgresSaver.__init__ 期望 Conn = AsyncConnection[DictRow]，
+            # 且内部 _cursor 按列名访问行。仅靠 kwargs["row_factory"] 不改
+            # 泛型推断（默认 TupleRow），必须用 connection_class 绑定。
+            connection_class=AsyncConnection[DictRow],
+            kwargs={
+                # autocommit 必须开启：LangGraph 迁移建索引用 CREATE INDEX CONCURRENTLY，
+                # 该语句不能在事务块内执行（checkpointer-redis-migration-plan）
+                "autocommit": True,
+                # 关闭服务端预处理语句缓存，与官方 from_conn_string 配置一致
+                "prepare_threshold": 0,
+                # 行工厂 dict_row，与 connection_class 保持一致
+                "row_factory": dict_row,
+            },
+        )
+        await _pool.open()
+        _checkpointer = AsyncPostgresSaver(_pool)
+        await _checkpointer.setup()  # 建表 + 迁移（幂等）
+        await _cleanup_old_checkpoints()
+        # 用 PG saver 重建图
+        _agent_graph = build_agent_graph(_checkpointer)
+        logger.info(
+            "PG checkpointer 初始化完成",
+            db_url=settings.CHECKPOINT_DB_URL.split("@")[-1],
+        )
+    except Exception as exc:
+        logger.error("PG checkpointer 初始化失败，降级为 MemorySaver", error=str(exc))
+        if _pool is not None:
+            await _pool.close()
+            _pool = None
+        _checkpointer = None
+
+
+async def _cleanup_old_checkpoints() -> None:
+    """清理超过 CHECKPOINT_RETENTION_DAYS 未更新的 checkpoint。
+
+    LangGraph PG 表无 created_at 列，基于 checkpoint JSONB 的 ts 字段（ISO 8601）
+    判断最后更新时间。同时清理孤儿 checkpoint_blobs / checkpoint_writes 行。
+    """
+    days = settings.CHECKPOINT_RETENTION_DAYS
+    if days is None:
+        return
+    if _pool is None:
+        return
+    try:
+        async with _pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(
+                """
+                DELETE FROM checkpoints
+                WHERE (checkpoint->>'ts')::timestamptz < NOW() - make_interval(days => %s)
+                """,
+                (days,),
+            )
+            # 清理孤儿 blobs / writes
+            await cur.execute(
+                "DELETE FROM checkpoint_blobs "
+                "WHERE thread_id NOT IN (SELECT thread_id FROM checkpoints)"
+            )
+            await cur.execute(
+                "DELETE FROM checkpoint_writes "
+                "WHERE thread_id NOT IN (SELECT thread_id FROM checkpoints)"
+            )
+        logger.info("checkpoint 过期清理完成", retention_days=days)
+    except Exception as exc:
+        logger.warning("checkpoint 过期清理失败（不影响启动）", error=str(exc))
+
+
+async def close_checkpointer() -> None:
+    """关闭 PG 连接池（checkpointer-redis-migration-plan Task 5）。
+
+    应在 FastAPI shutdown 事件中调用以释放 PostgreSQL 连接。
+    """
+    global _agent_graph, _checkpointer, _pool
+    if _pool is not None:
+        await _pool.close()
+    _pool = None
+    _checkpointer = None
+    _agent_graph = None
+
+
+# =============================================================================
+# 后台周期清理任务
+# PostgreSQL 无原生 TTL，需应用层定时 DELETE 过期 checkpoint。
+# 主流方案：asyncio 后台任务，每 CHECKPOINT_CLEANUP_INTERVAL_HOURS 执行一次。
+# =============================================================================
+
+_cleanup_task: asyncio.Task | None = None
+
+
+async def checkpoint_cleanup_loop() -> None:
+    """后台循环：按配置间隔周期清理过期 checkpoint。"""
+    interval_seconds = settings.CHECKPOINT_CLEANUP_INTERVAL_HOURS * 3600
+    while True:
+        try:
+            await asyncio.sleep(interval_seconds)
+            await _cleanup_old_checkpoints()
+        except asyncio.CancelledError:
+            break
+        except Exception as exc:
+            logger.warning("checkpoint 周期清理异常（下个周期重试）", error=str(exc))
+
+
+def start_checkpoint_cleanup() -> None:
+    """启动后台周期清理任务（FastAPI lifespan startup 调用）。
+
+    仅当 PG 已初始化（_pool 存在）时启动；未配置则跳过。
+    """
+    global _cleanup_task
+    if _cleanup_task is not None or _pool is None:
+        return
+    _cleanup_task = asyncio.create_task(checkpoint_cleanup_loop())
+    logger.info(
+        "checkpoint 周期清理任务已启动",
+        interval_hours=settings.CHECKPOINT_CLEANUP_INTERVAL_HOURS,
+    )
+
+
+async def stop_checkpoint_cleanup() -> None:
+    """停止后台周期清理任务（FastAPI lifespan shutdown 调用）。"""
+    global _cleanup_task
+    if _cleanup_task is not None:
+        _cleanup_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await _cleanup_task
+        _cleanup_task = None
 
 
 # =============================================================================
@@ -707,7 +907,15 @@ def _build_system_prompt(state: AgentState) -> str:
     database = conn_config.get("database", "未知")
     host = conn_config.get("host", "")
     port = conn_config.get("port", "")
-    conversation_history = state.get("conversation_history") or "（无历史）"
+    # 如果 checkpointer 已有完整历史（messages 列表 > 1），
+    # 说明 LLM 能从结构化消息列表中获取完整上下文，无需 DB 文本注入。
+    # DB conversation_history 仅作为冷启动 fallback（全新会话 / 迁移后首次）。
+    # checkpointer-redis-migration-plan Task 4
+    existing_messages = state.get("messages", [])
+    if len(existing_messages) > 1:
+        conversation_history = "（已有完整对话上下文，详见消息历史）"
+    else:
+        conversation_history = state.get("conversation_history") or "（无历史）"
 
     return (
         "你是 DB-Pilot，一个专业的数据库运维 AI 助手。\n\n"

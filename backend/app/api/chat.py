@@ -34,6 +34,7 @@ from langchain_core.runnables import RunnableConfig
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.agent.graph import get_checkpointer
 from app.agent.sse_utils import format_sse
 from app.agent.state import AgentState
 from app.auth.dependencies import get_current_user, verify_resource_ownership
@@ -818,7 +819,9 @@ async def _stream_events(
             # 检查 graph state 中的 interrupts 列表，如有则发射 confirm_required 事件。
             graph_interrupted = False
             if not body.resume:
-                state_snapshot = graph.get_state(config)
+                # 必须用异步 aget_state：AsyncPostgresSaver 的同步 get_state()
+                # 从主线程调用会抛 "Synchronous calls only allowed from different thread"
+                state_snapshot = await graph.aget_state(config)
                 if state_snapshot and state_snapshot.interrupts:
                     graph_interrupted = True
                     # 缓存中断前的思考过程，供恢复流完整持久化
@@ -1323,5 +1326,23 @@ async def delete_session(
     # 删除会话（消息通过 CASCADE 自动删除）
     await db_session.delete(session)
     await db_session.commit()
+
+    # 事件驱动联动：删除 LangGraph checkpoint thread（PG）
+    # thread_id == session.id（graph 调用时 config thread_id=session.id）
+    # PG 无原生 TTL，若不在业务事件点清理，checkpoint 会变孤儿数据
+    checkpointer = get_checkpointer()
+    if checkpointer is not None and hasattr(checkpointer, "adelete_thread"):
+        try:
+            await checkpointer.adelete_thread(session_id)
+            logger.info("checkpoint thread 已联动删除", session_id=session_id)
+        except Exception as exc:
+            # 不阻断会话删除：checkpoint 删除失败仅告警（定时清理兜底）
+            logger.warning(
+                "checkpoint thread 联动删除失败（定时清理兜底）",
+                session_id=session_id,
+                error=str(exc),
+            )
+    else:
+        logger.debug("checkpointer 未初始化（MemorySaver 模式），跳过 thread 联动删除")
 
     logger.info("API 请求完成", endpoint="delete_session", session_id=session_id)

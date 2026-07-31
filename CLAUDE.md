@@ -12,7 +12,9 @@ DB-Pilot 是一个基于大语言模型（LLM）的 **AI 数据库运维助手**
 
 ```bash
 # 启动开发服务器（hot-reload）
-cd backend && uv run uvicorn app.main:app --reload --port 8000
+# Windows 必须加 --loop app.main:selector_loop_factory：psycopg 异步模式
+# 不兼容 ProactorEventLoop（uvicorn 0.51 在 Windows 硬编码 ProactorEventLoop）
+cd backend && uv run uvicorn app.main:app --reload --port 8000 --loop app.main:selector_loop_factory
 
 # 代码检查（Ruff）
 ruff check backend/app/

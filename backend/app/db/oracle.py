@@ -25,7 +25,7 @@ logger = structlog.get_logger("app.db.oracle")
 _ORACLEDB_AVAILABLE: bool = False
 _ORACLEDB_ERR: str | None = None
 try:
-    import oracledb  # noqa: F401 — 延迟到 connect() 中实际使用
+    import oracledb  # type: ignore  # noqa: F401 — 可选懒加载驱动，connect() 才真正 import
 
     _ORACLEDB_AVAILABLE = True
 except ImportError as exc:

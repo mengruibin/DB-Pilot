@@ -24,7 +24,7 @@ logger = structlog.get_logger("app.db.postgresql")
 _ASYNCPG_AVAILABLE: bool = False
 _ASYNCPG_ERR: str | None = None
 try:
-    import asyncpg  # noqa: F401 — 延迟到 connect() 中实际使用
+    import asyncpg  # type: ignore  # noqa: F401 — 可选懒加载驱动，connect() 才真正 import
 
     _ASYNCPG_AVAILABLE = True
 except ImportError as exc:
