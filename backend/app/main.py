@@ -174,19 +174,17 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # 启动
     configure_logging()
     _session_manager.start()  # B-24：启动后台会话清理任务
-    from app.agent.graph import init_checkpointer, start_checkpoint_cleanup
+    from app.agent.graph import init_checkpointer
 
-    await init_checkpointer()  # 初始化 PG checkpointer 连接池 + 建表 + 启动清理
-    start_checkpoint_cleanup()  # 启动 checkpoint 周期清理后台任务
+    await init_checkpointer()  # 初始化 PG checkpointer 连接池 + 建表
     logger.info("服务启动", version=app.version)
 
     yield
 
     # 关闭
     await _session_manager.stop()  # B-24：停止后台会话清理任务
-    from app.agent.graph import close_checkpointer, stop_checkpoint_cleanup
+    from app.agent.graph import close_checkpointer
 
-    await stop_checkpoint_cleanup()  # 停止 checkpoint 周期清理后台任务
     await close_checkpointer()  # 关闭 PG checkpointer 连接池
     logger.info("服务关闭")
     app.state.started = False

@@ -32,8 +32,6 @@ LLM 自主决定调用哪些工具、以什么顺序调用、何时停止并给�
 
 from __future__ import annotations
 
-import asyncio
-import contextlib
 import logging
 import time
 from typing import Any, Literal
@@ -742,8 +740,7 @@ async def init_checkpointer() -> None:
     在 FastAPI 启动时调用：
       1. 创建 psycopg AsyncConnectionPool
       2. 构建 AsyncPostgresSaver 并 setup()（建表）
-      3. 执行过期 checkpoint 清理（CHECKPOINT_RETENTION_DAYS）
-      4. 用 PG saver 重建 Agent 图
+      3. 用 PG saver 重建 Agent 图
     """
     global _agent_graph, _checkpointer, _pool
     if _pool is not None:
@@ -777,7 +774,6 @@ async def init_checkpointer() -> None:
         await _pool.open()
         _checkpointer = AsyncPostgresSaver(_pool)
         await _checkpointer.setup()  # 建表 + 迁移（幂等）
-        await _cleanup_old_checkpoints()
         # 用 PG saver 重建图
         _agent_graph = build_agent_graph(_checkpointer)
         logger.info(
@@ -792,40 +788,6 @@ async def init_checkpointer() -> None:
         _checkpointer = None
 
 
-async def _cleanup_old_checkpoints() -> None:
-    """清理超过 CHECKPOINT_RETENTION_DAYS 未更新的 checkpoint。
-
-    LangGraph PG 表无 created_at 列，基于 checkpoint JSONB 的 ts 字段（ISO 8601）
-    判断最后更新时间。同时清理孤儿 checkpoint_blobs / checkpoint_writes 行。
-    """
-    days = settings.CHECKPOINT_RETENTION_DAYS
-    if days is None:
-        return
-    if _pool is None:
-        return
-    try:
-        async with _pool.connection() as conn, conn.cursor() as cur:
-            await cur.execute(
-                """
-                DELETE FROM checkpoints
-                WHERE (checkpoint->>'ts')::timestamptz < NOW() - make_interval(days => %s)
-                """,
-                (days,),
-            )
-            # 清理孤儿 blobs / writes
-            await cur.execute(
-                "DELETE FROM checkpoint_blobs "
-                "WHERE thread_id NOT IN (SELECT thread_id FROM checkpoints)"
-            )
-            await cur.execute(
-                "DELETE FROM checkpoint_writes "
-                "WHERE thread_id NOT IN (SELECT thread_id FROM checkpoints)"
-            )
-        logger.info("checkpoint 过期清理完成", retention_days=days)
-    except Exception as exc:
-        logger.warning("checkpoint 过期清理失败（不影响启动）", error=str(exc))
-
-
 async def close_checkpointer() -> None:
     """关闭 PG 连接池（checkpointer-redis-migration-plan Task 5）。
 
@@ -837,53 +799,6 @@ async def close_checkpointer() -> None:
     _pool = None
     _checkpointer = None
     _agent_graph = None
-
-
-# =============================================================================
-# 后台周期清理任务
-# PostgreSQL 无原生 TTL，需应用层定时 DELETE 过期 checkpoint。
-# 主流方案：asyncio 后台任务，每 CHECKPOINT_CLEANUP_INTERVAL_HOURS 执行一次。
-# =============================================================================
-
-_cleanup_task: asyncio.Task | None = None
-
-
-async def checkpoint_cleanup_loop() -> None:
-    """后台循环：按配置间隔周期清理过期 checkpoint。"""
-    interval_seconds = settings.CHECKPOINT_CLEANUP_INTERVAL_HOURS * 3600
-    while True:
-        try:
-            await asyncio.sleep(interval_seconds)
-            await _cleanup_old_checkpoints()
-        except asyncio.CancelledError:
-            break
-        except Exception as exc:
-            logger.warning("checkpoint 周期清理异常（下个周期重试）", error=str(exc))
-
-
-def start_checkpoint_cleanup() -> None:
-    """启动后台周期清理任务（FastAPI lifespan startup 调用）。
-
-    仅当 PG 已初始化（_pool 存在）时启动；未配置则跳过。
-    """
-    global _cleanup_task
-    if _cleanup_task is not None or _pool is None:
-        return
-    _cleanup_task = asyncio.create_task(checkpoint_cleanup_loop())
-    logger.info(
-        "checkpoint 周期清理任务已启动",
-        interval_hours=settings.CHECKPOINT_CLEANUP_INTERVAL_HOURS,
-    )
-
-
-async def stop_checkpoint_cleanup() -> None:
-    """停止后台周期清理任务（FastAPI lifespan shutdown 调用）。"""
-    global _cleanup_task
-    if _cleanup_task is not None:
-        _cleanup_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await _cleanup_task
-        _cleanup_task = None
 
 
 # =============================================================================
