@@ -24,7 +24,7 @@ class ExplainMetrics:
     """从 EXPLAIN 输出中提取的标准化评估指标。
 
     Attributes:
-        access_pattern: 访问方式（FULL_SCAN / INDEX_SCAN / INDEX_LOOKUP / CONST / UNKNOWN）。
+        access_pattern: 访问方式（FULL_SCAN / FULL_INDEX_SCAN / INDEX_RANGE / INDEX_LOOKUP / CONST / UNKNOWN）。
         estimated_rows_examined: 预估扫描行数（数据库 IO 负载指标）。
         estimated_rows_output: 预估返回行数（网络传输 + LLM 上下文负载指标）。
         row_width_bytes: 单行字节宽度（0 表示未知）。
@@ -409,15 +409,14 @@ def _classify_oracle_operation(operation: str) -> str:
         归一化的操作类型："FULL_SCAN" / "INDEX_SCAN" / "INDEX_LOOKUP" / "CONST" / "UNKNOWN"。
     """
     op_upper = operation.strip().upper()
-    # 按照文档中的分类规则
     if "TABLE ACCESS FULL" in op_upper:
         return "FULL_SCAN"
     if "INDEX FULL SCAN" in op_upper:
-        return "INDEX_SCAN"
+        return "FULL_INDEX_SCAN"
     if "INDEX RANGE SCAN" in op_upper:
-        return "INDEX_SCAN"
+        return "INDEX_RANGE"
     if "INDEX SKIP SCAN" in op_upper:
-        return "INDEX_SCAN"
+        return "INDEX_RANGE"
     if "INDEX UNIQUE SCAN" in op_upper:
         return "INDEX_LOOKUP"
     if "TABLE ACCESS BY INDEX ROWID" in op_upper:
@@ -594,15 +593,15 @@ def _parse_oracle_explain(text: str) -> dict | None:
 # MySQL access_type → access_pattern 映射
 _MYSQL_ACCESS_MAP: dict[str, str] = {
     "ALL": "FULL_SCAN",
-    "INDEX_MERGE": "FULL_SCAN",
-    "INDEX": "INDEX_SCAN",
-    "RANGE": "INDEX_SCAN",
+    "INDEX": "FULL_INDEX_SCAN",        # 全索引扫描（遍历整个索引树，介于 ALL 和 RANGE 之间）
+    "INDEX_MERGE": "INDEX_RANGE",      # 多索引合并（虽需优化但性能远好于全表扫）
+    "RANGE": "INDEX_RANGE",
+    "INDEX_SUBQUERY": "INDEX_RANGE",
     "REF": "INDEX_LOOKUP",
     "EQ_REF": "INDEX_LOOKUP",
     "FULLTEXT": "INDEX_LOOKUP",
     "REF_OR_NULL": "INDEX_LOOKUP",
     "UNIQUE_SUBQUERY": "INDEX_LOOKUP",
-    "INDEX_SUBQUERY": "INDEX_SCAN",
     "CONST": "CONST",
     "SYSTEM": "CONST",
 }
@@ -611,10 +610,10 @@ _MYSQL_ACCESS_MAP: dict[str, str] = {
 _PG_ACCESS_MAP: dict[str, str] = {
     "SEQ SCAN": "FULL_SCAN",
     "SEQUENTIAL SCAN": "FULL_SCAN",
-    "INDEX FULL SCAN": "INDEX_SCAN",
-    "INDEX RANGE SCAN": "INDEX_SCAN",
-    "BITMAP HEAP SCAN": "INDEX_SCAN",
-    "BITMAP INDEX SCAN": "INDEX_SCAN",
+    "INDEX FULL SCAN": "FULL_INDEX_SCAN",
+    "INDEX RANGE SCAN": "INDEX_RANGE",
+    "BITMAP HEAP SCAN": "INDEX_RANGE",
+    "BITMAP INDEX SCAN": "INDEX_RANGE",
     "INDEX SCAN": "INDEX_LOOKUP",
     "INDEX ONLY SCAN": "INDEX_LOOKUP",
 }
@@ -631,12 +630,13 @@ def _classify_access_pattern(raw_type: str, db_type: str) -> str:
         db_type: 数据库类型（mysql / postgresql / oracle）。
 
     Returns:
-        统一后的访问模式：
-          FULL_SCAN — 全表扫描（最危险）
-          INDEX_SCAN — 索引范围扫描
-          INDEX_LOOKUP — 索引单值查找
-          CONST — 常量访问（极快）
-          UNKNOWN — 无法识别
+        统一后的访问模式（危险程度从高到低）：
+          FULL_SCAN       — 全表扫描（最危险，逐行读整个表）
+          FULL_INDEX_SCAN — 全索引扫描（遍历整个索引树）
+          INDEX_RANGE     — 索引范围扫描（只读索引树中匹配部分）
+          INDEX_LOOKUP    — 索引精确定位（单个/少量探针）
+          CONST           — 常量折叠（主键=常量，最多1行）
+          UNKNOWN         — 无法识别（保守处理）
     """
     if not raw_type:
         return "UNKNOWN"
@@ -644,7 +644,7 @@ def _classify_access_pattern(raw_type: str, db_type: str) -> str:
     cleaned = raw_type.strip().upper()
 
     # 如果已经是统一类型（如 Oracle 解析器已分类），直接返回
-    if cleaned in ("FULL_SCAN", "INDEX_SCAN", "INDEX_LOOKUP", "CONST"):
+    if cleaned in ("FULL_SCAN", "FULL_INDEX_SCAN", "INDEX_RANGE", "INDEX_LOOKUP", "CONST"):
         return cleaned
 
     if db_type == "mysql":
@@ -720,60 +720,58 @@ def extract_metrics(
 # =============================================================================
 
 # --- 阈值常量（硬编码，修改需 Code Review）---
-# 全表扫描：最危险，阈值最保守
-_FULL_SCAN_BLOCK_ROWS = 5_000
+# 全表扫描：最危险，逐行读整个表，阈值最保守
+_FULL_SCAN_BLOCK_ROWS = 50_000
 
-# 索引扫描：有索引加持，阈值放宽
-_INDEX_SCAN_BLOCK_ROWS = 100_000
+# 全索引扫描：遍历整个索引树，比全表扫轻但仍是全量IO，阈值适中
+_FULL_INDEX_SCAN_BLOCK_ROWS = 100_000
 
-# 索引查找：精准访问，几乎不设限
+# 索引范围扫描：只读索引树中匹配部分，顺序IO，阈值放宽
+_INDEX_RANGE_BLOCK_ROWS = 500_000
 
-# LLM 上下文窗口保护
-_RESULT_BLOCK_ROWS = 10_000
-_RESULT_BLOCK_BYTES = 500_000
+# 索引精确查找：逐行B+Tree探针（随机IO），单行成本高于范围扫描，阈值与范围扫描对齐
+_INDEX_LOOKUP_BLOCK_ROWS = 500_000
 
 # 成本
-_COST_BLOCK_RATIO = 100.0
+_COST_BLOCK_RATIO = 1000.0
 
-# 额外操作威胁
-_TEMPTABLE_BLOCK_ROWS = 50_000
+# 临时表威胁
+_TEMPTABLE_BLOCK_ROWS = 200_000
+
+# 无法识别的访问方式保守阈值
+_UNKNOWN_BLOCK_ROWS = 100_000
 
 
 def _get_limit_for_rule(rule_id: str) -> int:
-    """获取规则对应的阈值常量。
-
-    Args:
-        rule_id: 规则 ID。
-
-    Returns:
-        阈值数值。
-    """
+    """获取规则对应的阈值常量。"""
     _limit_map: dict[str, int] = {
         "R1_FULL_SCAN_LARGE": _FULL_SCAN_BLOCK_ROWS,
         "R2_FULL_SCAN_COSTLY": 0,
-        "R3_HUGE_SCAN": _INDEX_SCAN_BLOCK_ROWS,
-        "R4_HUGE_RESULT_ROWS": _RESULT_BLOCK_ROWS,
-        "R5_HUGE_RESULT_BYTES": _RESULT_BLOCK_BYTES,
-        "R6_TEMPTABLE_LARGE": _TEMPTABLE_BLOCK_ROWS,
+        "R3_FULL_INDEX_SCAN": _FULL_INDEX_SCAN_BLOCK_ROWS,
+        "R4_INDEX_RANGE_HUGE": _INDEX_RANGE_BLOCK_ROWS,
+        "R5_LOOKUP_HUGE": _INDEX_LOOKUP_BLOCK_ROWS,
+        "R6_UNKNOWN_CONSERVATIVE": _UNKNOWN_BLOCK_ROWS,
+        "R7_TEMPTABLE_LARGE": _TEMPTABLE_BLOCK_ROWS,
     }
     return _limit_map.get(rule_id, 0)
 
 
 _EVALUATION_RULES: list[dict] = [
-    # ═══════ CRITICAL 级别（阻断执行）═══════
-    # R1: 全表扫描 + 大行数
+    # ═══════ CRITICAL 级别（阻断执行），按危险程度 R1→R7 ═══════
+    # R1: FULL_SCAN（全表扫描）+ 大行数
     {
         "id": "R1_FULL_SCAN_LARGE",
         "severity": "CRITICAL",
         "condition": lambda m: (
-            m.access_pattern == "FULL_SCAN" and m.estimated_rows_examined > _FULL_SCAN_BLOCK_ROWS
+            m.access_pattern == "FULL_SCAN"
+            and m.estimated_rows_examined > _FULL_SCAN_BLOCK_ROWS
         ),
         "message": (
             "全表扫描预估读取 {rows:,} 行，超过安全上限 {limit:,} 行。"
             "建议：为过滤条件列添加索引，或缩小 WHERE 条件范围。"
         ),
     },
-    # R2: 全表扫描 + 高成本
+    # R2: FULL_SCAN（全表扫描）+ 高成本
     {
         "id": "R2_FULL_SCAN_COSTLY",
         "severity": "CRITICAL",
@@ -786,48 +784,65 @@ _EVALUATION_RULES: list[dict] = [
             "全表扫描成本 {cost:.1f} 过高。建议：添加索引避免全表扫描，或使用更精确的 WHERE 条件。"
         ),
     },
-    # R3: 任何访问方式 + 超大扫描行数
+    # R3: FULL_INDEX_SCAN（全索引扫描，如 COUNT(*) 走覆盖索引）
     {
-        "id": "R3_HUGE_SCAN",
+        "id": "R3_FULL_INDEX_SCAN",
         "severity": "CRITICAL",
         "condition": lambda m: (
-            m.access_pattern not in ("INDEX_LOOKUP", "CONST")
-            and m.estimated_rows_examined > _INDEX_SCAN_BLOCK_ROWS
+            m.access_pattern == "FULL_INDEX_SCAN"
+            and m.estimated_rows_examined > _FULL_INDEX_SCAN_BLOCK_ROWS
         ),
         "message": (
-            "预估扫描 {rows:,} 行，超过最大允许值 {limit:,} 行。"
-            "建议：通过 WHERE 条件缩小范围，或使用 LIMIT 分页。"
+            "全索引扫描预估读取 {rows:,} 行，超过安全上限 {limit:,} 行。"
+            "索引虽快但全扫索引仍会产生大量 IO。建议：添加 WHERE 条件缩小范围。"
         ),
     },
-    # R4: 结果集过大（保护 LLM 上下文窗口）
+    # R4: INDEX_RANGE（索引范围扫描）+ 大行数
     {
-        "id": "R4_HUGE_RESULT_ROWS",
-        "severity": "CRITICAL",
-        "condition": lambda m: m.estimated_rows_output > _RESULT_BLOCK_ROWS,
-        "message": (
-            "预估返回 {rows:,} 行，超过 LLM 上下文窗口安全上限 {limit:,} 行。"
-            "建议：添加 LIMIT 限制返回行数，或使用聚合查询减少数据量。"
-        ),
-    },
-    # R5: 结果字节数过大
-    {
-        "id": "R5_HUGE_RESULT_BYTES",
+        "id": "R4_INDEX_RANGE_HUGE",
         "severity": "CRITICAL",
         "condition": lambda m: (
-            m.row_width_bytes > 0
-            and m.estimated_rows_output * m.row_width_bytes > _RESULT_BLOCK_BYTES
+            m.access_pattern == "INDEX_RANGE"
+            and m.estimated_rows_examined > _INDEX_RANGE_BLOCK_ROWS
         ),
         "message": (
-            "预估返回数据量 {bytes:,} 字节，超过安全上限 {limit:,} 字节。"
-            "建议：减少选择的列数，或添加 LIMIT 限制。"
+            "索引范围扫描预估读取 {rows:,} 行，超过安全上限 {limit:,} 行。"
+            "建议：缩小 WHERE 条件范围，或使用 LIMIT 分页。"
         ),
     },
-    # R6: 临时表 + 大数据量
+    # R5: INDEX_LOOKUP + CONST（精确查找）+ 极大数据量
     {
-        "id": "R6_TEMPTABLE_LARGE",
+        "id": "R5_LOOKUP_HUGE",
         "severity": "CRITICAL",
         "condition": lambda m: (
-            "temporary" in m.extra_operations and m.estimated_rows_examined > _TEMPTABLE_BLOCK_ROWS
+            m.access_pattern in ("INDEX_LOOKUP", "CONST")
+            and m.estimated_rows_examined > _INDEX_LOOKUP_BLOCK_ROWS
+        ),
+        "message": (
+            "索引精确查找预估读取 {rows:,} 行，超过安全上限 {limit:,} 行。"
+            "逐行 B+Tree 探针成本极高。建议：分批查询或改用范围扫描。"
+        ),
+    },
+    # R6: UNKNOWN（无法识别）+ 保守阈值
+    {
+        "id": "R6_UNKNOWN_CONSERVATIVE",
+        "severity": "CRITICAL",
+        "condition": lambda m: (
+            m.access_pattern == "UNKNOWN"
+            and m.estimated_rows_examined > _UNKNOWN_BLOCK_ROWS
+        ),
+        "message": (
+            "无法识别的访问方式预估读取 {rows:,} 行，超过保守安全上限 {limit:,} 行。"
+            "建议：检查 SQL 是否有可用索引，或联系 DBA 确认。"
+        ),
+    },
+    # R7: 临时表 + 大数据量（横切维度，不限访问方式）
+    {
+        "id": "R7_TEMPTABLE_LARGE",
+        "severity": "CRITICAL",
+        "condition": lambda m: (
+            "temporary" in m.extra_operations
+            and m.estimated_rows_examined > _TEMPTABLE_BLOCK_ROWS
         ),
         "message": (
             "查询需要使用临时表且数据量达 {rows:,} 行，"
@@ -857,7 +872,6 @@ def evaluate(metrics: ExplainMetrics) -> ExplainDecision:
             rows=metrics.estimated_rows_examined,
             limit=_get_limit_for_rule(rule["id"]),
             cost=metrics.query_cost or 0,
-            bytes=metrics.row_width_bytes * metrics.estimated_rows_output,
         )
 
         if rule["severity"] == "CRITICAL":

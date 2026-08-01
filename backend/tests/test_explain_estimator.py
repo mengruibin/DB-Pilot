@@ -64,7 +64,7 @@ class TestExtractMetricsMySQL:
         }"""
         result = extract_metrics(json_str, "mysql")
         assert result is not None
-        assert result.access_pattern == "INDEX_SCAN"
+        assert result.access_pattern == "INDEX_RANGE"
         assert result.estimated_rows_examined == 500
 
     def test_index_lookup(self) -> None:
@@ -164,7 +164,7 @@ class TestExtractMetricsMySQL:
         }"""
         result = extract_metrics(json_str, "mysql")
         assert result is not None
-        assert result.access_pattern == "INDEX_SCAN"
+        assert result.access_pattern == "FULL_INDEX_SCAN"
         assert result.estimated_rows_examined == 6_363_723
         assert result.estimated_rows_output == 6_363_723  # 无 rows_produced_per_join 时 fallback
 
@@ -337,9 +337,9 @@ class TestClassifyAccessPattern:
         """MySQL 全量 access_type 映射。"""
         inputs = {
             "ALL": "FULL_SCAN",
-            "INDEX_MERGE": "FULL_SCAN",
-            "INDEX": "INDEX_SCAN",
-            "RANGE": "INDEX_SCAN",
+            "INDEX": "FULL_INDEX_SCAN",
+            "INDEX_MERGE": "INDEX_RANGE",
+            "RANGE": "INDEX_RANGE",
             "REF": "INDEX_LOOKUP",
             "EQ_REF": "INDEX_LOOKUP",
             "CONST": "CONST",
@@ -352,8 +352,8 @@ class TestClassifyAccessPattern:
         """PostgreSQL 全量映射。"""
         inputs = {
             "SEQ SCAN": "FULL_SCAN",
-            "INDEX FULL SCAN": "INDEX_SCAN",
-            "INDEX RANGE SCAN": "INDEX_SCAN",
+            "INDEX FULL SCAN": "FULL_INDEX_SCAN",
+            "INDEX RANGE SCAN": "INDEX_RANGE",
             "INDEX SCAN": "INDEX_LOOKUP",
             "INDEX ONLY SCAN": "INDEX_LOOKUP",
         }
@@ -364,8 +364,8 @@ class TestClassifyAccessPattern:
         """Oracle 全量映射。"""
         inputs = {
             "TABLE ACCESS FULL": "FULL_SCAN",
-            "INDEX FULL SCAN": "INDEX_SCAN",
-            "INDEX RANGE SCAN": "INDEX_SCAN",
+            "INDEX FULL SCAN": "FULL_INDEX_SCAN",
+            "INDEX RANGE SCAN": "INDEX_RANGE",
             "INDEX UNIQUE SCAN": "INDEX_LOOKUP",
             "TABLE ACCESS BY INDEX ROWID": "INDEX_LOOKUP",
             "SORT ORDER BY": "UNKNOWN",
@@ -390,143 +390,135 @@ class TestClassifyAccessPattern:
 
 
 class TestEvaluate:
-    """规则引擎评估决策测试。"""
+    """规则引擎评估决策测试 — 7 条 CRITICAL 规则。"""
 
+    # ── R1: FULL_SCAN + 大行数 ──
     def test_r1_full_scan_block(self) -> None:
-        """R1: 全表扫描 + 6K 行 → CRITICAL。"""
-        m = ExplainMetrics(
-            access_pattern="FULL_SCAN",
-            estimated_rows_examined=6_000,
-            estimated_rows_output=100,
-        )
+        """R1: FULL_SCAN + 60K 行 → CRITICAL。"""
+        m = ExplainMetrics("FULL_SCAN", 60_000, 100)
         d = evaluate(m)
         assert not d.allowed
         assert d.risk_level == "CRITICAL"
-        assert "R1" in d.reasons[0] or "全表扫描" in d.reasons[0]
 
-    def test_r1_full_scan_allow(self) -> None:
-        """R1: 全表扫描 + 3K 行 → 低于阈值，不触发。"""
-        m = ExplainMetrics(
-            access_pattern="FULL_SCAN",
-            estimated_rows_examined=3_000,
-            estimated_rows_output=100,
-        )
+    def test_r1_full_scan_below_threshold(self) -> None:
+        """R1: FULL_SCAN + 30K 行（<50K）→ LOW。"""
+        m = ExplainMetrics("FULL_SCAN", 30_000, 100)
         d = evaluate(m)
         assert d.allowed
 
-    def test_r3_huge_scan_block(self) -> None:
-        """R3: INDEX_SCAN + 200K 行 → CRITICAL。"""
-        m = ExplainMetrics(
-            access_pattern="INDEX_SCAN",
-            estimated_rows_examined=200_000,
-            estimated_rows_output=100,
-        )
+    # ── R2: FULL_SCAN + 高成本 ──
+    def test_r2_full_scan_costly(self) -> None:
+        """R2: FULL_SCAN + cost 20000 → CRITICAL。"""
+        m = ExplainMetrics("FULL_SCAN", 3_000, 100, query_cost=20_000.0)
         d = evaluate(m)
         assert not d.allowed
         assert d.risk_level == "CRITICAL"
 
-    def test_r4_huge_result_block(self) -> None:
-        """R4: 返回 50K 行 → CRITICAL。"""
-        m = ExplainMetrics(
-            access_pattern="INDEX_LOOKUP",
-            estimated_rows_examined=500,
-            estimated_rows_output=50_000,
-        )
-        d = evaluate(m)
-        assert not d.allowed
-        assert d.risk_level == "CRITICAL"
-
-    def test_full_scan_below_threshold_low(self) -> None:
-        """FULL_SCAN + 1K 行（<5K 阻断阈值）→ LOW。"""
-        m = ExplainMetrics(
-            access_pattern="FULL_SCAN",
-            estimated_rows_examined=1_000,
-            estimated_rows_output=100,
-        )
+    def test_r2_full_scan_low_cost(self) -> None:
+        """R2: FULL_SCAN + cost 5000（<10000）→ 不触发 R2。"""
+        m = ExplainMetrics("FULL_SCAN", 3_000, 100, query_cost=5_000.0)
         d = evaluate(m)
         assert d.allowed
-        assert d.risk_level == "LOW"
 
-    def test_subcritical_risk_low(self) -> None:
-        """触发多条规则但均未达 CRITICAL 阈值 → LOW。"""
-        m = ExplainMetrics(
-            access_pattern="FULL_SCAN",
-            estimated_rows_examined=3_000,
-            estimated_rows_output=600,
-        )
-        d = evaluate(m)
-        assert d.allowed
-        assert d.risk_level == "LOW"
-
-    def test_critical_overrides_low(self) -> None:
-        """CRITICAL 命中 → 直接阻断（即使有 LOW 规则）。"""
-        m = ExplainMetrics(
-            access_pattern="FULL_SCAN",
-            estimated_rows_examined=6_000,  # R1: 全扫+>5K → CRITICAL
-            estimated_rows_output=600,  # W3: >500 → WARNING
-        )
+    # ── R3: FULL_INDEX_SCAN ──
+    def test_r3_full_index_scan_block(self) -> None:
+        """R3: FULL_INDEX_SCAN + 150K 行 → CRITICAL。"""
+        m = ExplainMetrics("FULL_INDEX_SCAN", 150_000, 150_000)
         d = evaluate(m)
         assert not d.allowed
         assert d.risk_level == "CRITICAL"
-        assert len(d.reasons) == 1  # 只有 CRITICAL 的原因
 
+    def test_r3_full_index_scan_below(self) -> None:
+        """R3: FULL_INDEX_SCAN + 50K 行（<100K）→ LOW。"""
+        m = ExplainMetrics("FULL_INDEX_SCAN", 50_000, 50_000)
+        d = evaluate(m)
+        assert d.allowed
+
+    # ── R4: INDEX_RANGE ──
+    def test_r4_index_range_block(self) -> None:
+        """R4: INDEX_RANGE + 600K 行 → CRITICAL。"""
+        m = ExplainMetrics("INDEX_RANGE", 600_000, 100)
+        d = evaluate(m)
+        assert not d.allowed
+        assert d.risk_level == "CRITICAL"
+
+    def test_r4_index_range_below(self) -> None:
+        """R4: INDEX_RANGE + 200K 行（<500K）→ LOW。"""
+        m = ExplainMetrics("INDEX_RANGE", 200_000, 100)
+        d = evaluate(m)
+        assert d.allowed
+
+    # ── R5: INDEX_LOOKUP + CONST ──
+    def test_r5_lookup_huge_block(self) -> None:
+        """R5: INDEX_LOOKUP + 600K 行 → CRITICAL。"""
+        m = ExplainMetrics("INDEX_LOOKUP", 600_000, 100)
+        d = evaluate(m)
+        assert not d.allowed
+        assert d.risk_level == "CRITICAL"
+
+    def test_r5_const_huge_block(self) -> None:
+        """R5: CONST + 600K 行（极端场景）→ CRITICAL。"""
+        m = ExplainMetrics("CONST", 600_000, 100)
+        d = evaluate(m)
+        assert not d.allowed
+        assert d.risk_level == "CRITICAL"
+
+    def test_r5_lookup_below_threshold(self) -> None:
+        """R5: INDEX_LOOKUP + 200K 行（<500K）→ LOW。"""
+        m = ExplainMetrics("INDEX_LOOKUP", 200_000, 100)
+        d = evaluate(m)
+        assert d.allowed
+
+    # ── R6: UNKNOWN 保守处理 ──
+    def test_r6_unknown_block(self) -> None:
+        """R6: UNKNOWN + 150K 行 → CRITICAL。"""
+        m = ExplainMetrics("UNKNOWN", 150_000, 100)
+        d = evaluate(m)
+        assert not d.allowed
+        assert d.risk_level == "CRITICAL"
+
+    def test_r6_unknown_below(self) -> None:
+        """R6: UNKNOWN + 50K 行（<100K）→ LOW。"""
+        m = ExplainMetrics("UNKNOWN", 50_000, 100)
+        d = evaluate(m)
+        assert d.allowed
+
+    # ── R7: 临时表（横切维度） ──
+    def test_r7_temptable_block(self) -> None:
+        """R7: temp table + 250K 行 → CRITICAL。"""
+        m = ExplainMetrics("INDEX_RANGE", 250_000, 250_000, extra_operations=["temporary"])
+        d = evaluate(m)
+        assert not d.allowed
+        assert d.risk_level == "CRITICAL"
+
+    def test_r7_temptable_below_threshold(self) -> None:
+        """R7: temp table + 100K 行（<200K）→ LOW。"""
+        m = ExplainMetrics("INDEX_RANGE", 100_000, 100_000, extra_operations=["temporary"])
+        d = evaluate(m)
+        assert d.allowed
+
+    def test_r7_temptable_fulled_scan_also_blocked(self) -> None:
+        """R7: FULL_SCAN + temp + 250K → R1 先命中（短路）。"""
+        m = ExplainMetrics("FULL_SCAN", 250_000, 250_000, extra_operations=["temporary"])
+        d = evaluate(m)
+        assert not d.allowed
+        # R1 先匹配，只返回 1 条原因
+        assert len(d.reasons) == 1
+
+    # ── 边界：全 PASS ──
     def test_all_pass_low_risk(self) -> None:
-        """INDEX_LOOKUP + 10 行 → LOW。"""
-        m = ExplainMetrics(
-            access_pattern="INDEX_LOOKUP",
-            estimated_rows_examined=10,
-            estimated_rows_output=10,
-        )
+        """INDEX_LOOKUP + 10 行 + 无额外操作 → LOW。"""
+        m = ExplainMetrics("INDEX_LOOKUP", 10, 10)
         d = evaluate(m)
         assert d.allowed
         assert d.risk_level == "LOW"
 
-    def test_r5_result_bytes_block(self) -> None:
-        """R5: 结果字节数超标。"""
-        m = ExplainMetrics(
-            access_pattern="INDEX_SCAN",
-            estimated_rows_examined=1000,
-            estimated_rows_output=1000,
-            row_width_bytes=5000,  # 1000 × 5000 = 5MB > 500KB
-        )
-        d = evaluate(m)
-        assert not d.allowed
-        assert d.risk_level == "CRITICAL"
-
-    def test_r6_temptable_block(self) -> None:
-        """R6: temp table + 大数据量。"""
-        m = ExplainMetrics(
-            access_pattern="INDEX_SCAN",
-            estimated_rows_examined=60_000,
-            estimated_rows_output=60_000,
-            extra_operations=["temporary"],
-        )
-        d = evaluate(m)
-        assert not d.allowed
-        assert d.risk_level == "CRITICAL"
-
-    def test_w4_filesort_no_warn(self) -> None:
-        """filesort + 6K 行 → 未达 CRITICAL 阈值 → LOW。"""
-        m = ExplainMetrics(
-            access_pattern="INDEX_SCAN",
-            estimated_rows_examined=6_000,
-            estimated_rows_output=100,
-            extra_operations=["filesort"],
-        )
+    # ── filesort 不影响（无临时表不触发 R7） ──
+    def test_filesort_no_temptable_low(self) -> None:
+        """filesort + 60K 行（无 temporary）→ LOW。"""
+        m = ExplainMetrics("INDEX_RANGE", 60_000, 100, extra_operations=["filesort"])
         d = evaluate(m)
         assert d.allowed
-        assert d.risk_level == "LOW"
-
-    def test_w5_lookup_huge_no_warn(self) -> None:
-        """INDEX_LOOKUP + 600K 行 → 未达 CRITICAL 阈值 → LOW。"""
-        m = ExplainMetrics(
-            access_pattern="INDEX_LOOKUP",
-            estimated_rows_examined=600_000,
-            estimated_rows_output=100,
-        )
-        d = evaluate(m)
-        assert d.allowed
-        assert d.risk_level == "LOW"
 
 
 # =============================================================================

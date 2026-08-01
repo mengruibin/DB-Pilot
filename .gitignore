@@ -18,4 +18,3 @@ backend.log
 
 logs/
 docs/*
-!docs/问题&解决.md
