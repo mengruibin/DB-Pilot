@@ -126,7 +126,7 @@ frontend/
 
 ### Architecture Principles
 
-1. **LangGraph ReAct Agent** — LLM 通过 `model.bind_tools()` 决定工具调用顺序，LangGraph 条件边自动路由 `agent ↔ tools` 循环。最多 10 次迭代防无限循环。
+1. **LangGraph ReAct Agent** — LLM 通过 `model.bind_tools()` 决定工具调用顺序，LangGraph 条件边自动路由 `agent ↔ tools` 循环。最多 20 次迭代防无限循环（`_MAX_AGENT_ITERATIONS`），另有连续拦截保护在第 5 次 RE 拦截时强制终止。
 
 2. **SSE 双通道流式** — `astream(stream_mode=["updates", "messages"])` 双通道分离：
    - "messages" 通道：`(AIMessageChunk, metadata)` 逐 token 流，处理 `reasoning_content` / `tool_call_chunks` / `content`
@@ -134,11 +134,12 @@ frontend/
 
 3. **推理与回答分离** — 模型原生 `reasoning_content` 字段（DeepSeek/GLM 等支持）→ 作为独立 SSE `reasoning` 事件推送。普通 content 采用"乐观渲染+收编"模式：一律以 `stage="thinking"` 发射，`is_complete` 时若未检测到工具调用则发送 `stage_change("answer")` 触发前端收编。
 
-4. **Security** — 工具执行前经两层安全关卡：
+4. **Security** — 工具执行前经两层安全关卡 + 改写死循环保护：
    - **confirm_node**（图节点，在 agent_node 之后、safe_tools_node 之前）：检查 `needs_write_confirmation` 声明的工具 → `interrupt()` 暂停图等待用户确认。采用**无条件规则**：工具声明了 `needs_write_confirmation` 即触发确认，不再依赖 `sql` 参数或 `is_write_dml()` 判断。
    - **SafeToolNode**（工具执行时）：连接配置注入 → 工具查找（读取 `extras` 元数据决定安全检查项）→ 安全护栏链 → 执行 → 结果脱敏。护栏链包括两层：
      - SQLAuditCheck（sqlglot 审计拦截 DROP/ALTER/TRUNCATE 等危险 DDL）
      - RowEstimationCheck（EXPLAIN 多维度评估，根据规则引擎阻断大查询或发出警告，失败时降级放行）
+   - **连续拦截保护**（防改写死循环）：`AgentState.consecutive_blocks` 跟踪连续被 RowEstimationCheck 拦截的次数。同一轮无 RE 拦截时自动重置。第 3 次拦截返回强建议 ToolMessage + System Prompt 警告引导 LLM 停止改写，第 5 次强制终止（`is_complete=True`）。
 
 5. **并行工具执行** — 当 LLM 在同一轮返回多个 `tool_calls` 时，SafeToolNode 用 `asyncio.gather(return_exceptions=True)` 并发执行它们。总耗时 ≈ 最慢工具而非耗时之和。通过 `asyncio.Semaphore` 限制最大并发数（默认 5），防止 DB 连接池耗尽。前端的 `onToolResult` 匹配从 `findLastRunningToolCall()` 改为 `tool_call_id` 精确匹配，支持并行安全的结果关联。SSE 事件中的 `tool_call` 和 `tool_result` 均携带 `tool_call_id` 字段用于前后端关联。
 
@@ -239,6 +240,7 @@ frontend/
 - 连接密码仅存于内存 state，不持久化到数据库
 - SQL 审计默认拦截 DROP/ALTER/TRUNCATE/CREATE/GRANT/REVOKE，多语句直接拦截
 - **EXPLAIN 安全评估**：`execute_readonly_sql` 工具声明 `needs_row_estimation: True` 触发 RowEstimationCheck，通过 EXPLAIN 提取多维度指标并用规则引擎评估。`execute_write_sql` 不走自动安全护栏。阈值硬编码在 `explain_estimator.py`，不依赖 .env
+- **连续拦截保护**（防改写死循环）：`AgentState.consecutive_blocks` 跟踪连续被 RowEstimationCheck 拦截次数。第 1-2 次返回普通拦截消息，第 3 次起返回强建议 ToolMessage（含 SQL + EXPLAIN 建议）+ System Prompt 警告引导 LLM 停止改写并告知用户，第 5 次在 `safe_tools_node` 中强制终止（`is_complete=True`）。同一轮无 RE 拦截时计数器自动重置。检测通过 `"[EXPLAIN 安全评估]" in safety_result.reason` 精确识别 RE 拦截，不影响 SQLAuditCheck
 - **结果截断**：所有工具返回结果在序列化为 ToolMessage 前经 `truncate_result_for_llm()` 处理，最大 200 行 / 80K 字符，防止 LLM 上下文窗口溢出。截断时附带 `_truncated`、`_original_total_rows` 元信息
 - **并行工具执行**：SafeToolNode 用 `asyncio.gather()` 并发执行同轮 `tool_calls`，受 `AGENT_MAX_CONCURRENT_TOOLS`（默认 5）限制。SSE 事件的 `tool_call` / `tool_result` 均携带 `tool_call_id` 供前端精确匹配
 - 前端 `onToolResult` 匹配策略：优先用 `tool_call_id` 从 `Map` O(1) 查找，回退到 `tool` 名匹配。`MessageList.vue` 的 `pairToolSteps()` 将 `tool_call` 与对应 `tool_result` 配对渲染

@@ -147,6 +147,15 @@ async def agent_node(state: AgentState) -> dict[str, Any]:
     run_id = state.get("run_id", "")
     iteration = len(state.get("trace_iterations", [])) + 1
 
+    # 安全保护：safe_tools_node 已强制终止（连续拦截 >= 5 次），跳过 LLM 调用
+    if state.get("is_complete"):
+        logger.info(
+            "agent_node 检测到 safe_tools_node 已强制终止，跳过 LLM 调用",
+            run_id=run_id,
+            consecutive_blocks=state.get("consecutive_blocks", 0),
+        )
+        return {}
+
     # 安全上限：迭代次数超过上限时强制终止
     if iteration > _MAX_AGENT_ITERATIONS:
         logger.warning(
@@ -832,6 +841,21 @@ def _build_system_prompt(state: AgentState) -> str:
     else:
         conversation_history = state.get("conversation_history") or "（无历史）"
 
+    # ── 连续拦截警告：当 execute_readonly_sql 反复被 EXPLAIN 安全评估拦截时提醒 LLM ──
+    consecutive_blocks = state.get("consecutive_blocks", 0)
+    consecutive_block_warning = ""
+    if consecutive_blocks >= 2:
+        consecutive_block_warning = (
+            f"\n\n## ⚠️ 重要警告：你已连续 {consecutive_blocks} 次因数据量过大被 EXPLAIN 安全评估拦截\n"
+            "这不是 SQL 写法问题，而是查询本身需要处理的数据量超过安全阈值。\n"
+            "**请不要再调用 execute_readonly_sql 工具**。\n"
+            "改为直接向用户说明：该查询预估扫描数据量过大，无法在当前安全限制下执行，"
+            "并建议用户缩小查询范围（添加 WHERE 条件、使用 LIMIT、聚合查询）"
+            "或在数据库客户端中手动执行。\n"
+            "如果刚刚收到的工具返回消息已包含具体的 EXPLAIN 评估详情和 SQL 语句，"
+            "请将其直接转述给用户，不需要再次调用任何数据库工具。"
+        )
+
     return (
         "你是 DB-Pilot，一个专业的数据库运维 AI 助手。\n\n"
         "## 当前连接上下文\n"
@@ -855,7 +879,8 @@ def _build_system_prompt(state: AgentState) -> str:
         "9. 如果工具返回错误，分析原因并尝试换一种方式解决\n"
         "10. 如果用户要求插入、更新或删除数据，使用 execute_write_sql 工具执行写操作。"
         "写操作执行前系统会请求用户确认，如被用户拒绝请告知用户操作已取消。"
-        "只读查询（SELECT / SHOW / DESCRIBE / EXPLAIN）请使用 execute_readonly_sql 工具。\n"
+        "只读查询（SELECT / SHOW / DESCRIBE / EXPLAIN）请使用 execute_readonly_sql 工具。"
+        f"{consecutive_block_warning}\n"
         "## 对话历史\n"
         f"{conversation_history}"
     )

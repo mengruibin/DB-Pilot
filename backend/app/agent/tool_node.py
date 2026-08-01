@@ -36,6 +36,41 @@ from app.config import settings
 
 logger = structlog.get_logger(__name__)
 
+def _build_row_estimation_block_advisory(
+    block_count: int,
+    safety_reason: str,
+    sql_text: str,
+) -> str:
+    """构造连续被 RowEstimationCheck 拦截时的强提示消息。
+
+    当同一查询连续 >= 3 次被 EXPLAIN 安全评估拦截时，
+    告知 LLM 这不是 SQL 写法问题而是数据量问题，应立即停止改写并告知用户。
+
+    Args:
+        block_count: 当前连续拦截次数（>= 3）。
+        safety_reason: RowEstimationCheck 返回的拦截原因。
+        sql_text: 被拦截的 SQL 语句。
+
+    Returns:
+        给 LLM 的 ToolMessage content 字符串。
+    """
+    return (
+        f"[连续拦截提醒 - 第 {block_count} 次]\n\n"
+        f"你的 SQL 查询已连续 {block_count} 次因数据量过大被 EXPLAIN 安全评估拦截。"
+        "这不是 SQL 语法或写法问题，而是查询本身需要处理的数据量超过了系统安全阈值。"
+        "继续改写 SQL 无法解决此问题。\n\n"
+        "请**立即停止调用 execute_readonly_sql**，改为直接向用户说明情况：\n"
+        "1. 告知用户该查询预估需扫描大量数据，具体评估详情如下：\n"
+        f"{safety_reason}\n"
+        "2. 将你最后一次的 SQL 语句提供给用户，方便用户在数据库客户端中手动执行\n"
+        "3. 建议用户缩小查询范围（如添加更精确的 WHERE 条件、使用 LIMIT、"
+        "或改用聚合统计替代明细查询）\n"
+        "4. 建议用户在数据库客户端中先手动执行 EXPLAIN 确认执行计划\n\n"
+        "最终被拦截的 SQL 语句：\n"
+        f"```sql\n{sql_text}\n```"
+    )
+
+
 # 每轮 ReAct 迭代中最大并行工具数（从配置读取，默认 5）
 _MAX_CONCURRENT_TOOLS = max(1, settings.AGENT_MAX_CONCURRENT_TOOLS)
 
@@ -117,6 +152,7 @@ async def _run_one_tool(
     run_id: str,
     iteration: int,
     semaphore: asyncio.Semaphore,
+    consecutive_blocks: int = 0,
 ) -> dict:
     """执行单个工具调用的完整生命周期（连接注入 → 安全护栏 → 执行 → 脱敏 → 消息构造）。
 
@@ -183,6 +219,7 @@ async def _run_one_tool(
                         "safety_checks_passed": False,
                     }
                 ],
+                "row_estimation_blocked": False,
             }
 
         # ── 3. 根据元数据解析安全检查列表 ──
@@ -196,15 +233,37 @@ async def _run_one_tool(
             checks=applicable_checks,
         )
         if safety_result.blocked:
+            # 检测是否为 RowEstimationCheck 拦截（通过拦截原因特征字符串判断）
+            is_re_blocked = (
+                safety_result.reason is not None
+                and "[EXPLAIN 安全评估]" in safety_result.reason
+            )
             logger.warning(
                 "工具被安全护栏拦截",
                 run_id=run_id,
                 tool=tool_name,
                 reason=safety_result.reason,
+                consecutive_blocks=consecutive_blocks,
+                is_row_estimation_block=is_re_blocked,
             )
+
+            # 确定返回给 LLM 的拦截消息内容
+            if is_re_blocked and consecutive_blocks >= 2:
+                # 第 3 次及以上连续拦截 → 返回强提示消息
+                # is_re_blocked 为 True 已确保 reason 不为 None，assert 消除类型检查器警告
+                assert safety_result.reason is not None
+                sql_text = tool_args.get("sql", "")
+                msg_content = _build_row_estimation_block_advisory(
+                    block_count=consecutive_blocks + 1,
+                    safety_reason=safety_result.reason,
+                    sql_text=sql_text,
+                )
+            else:
+                msg_content = f"操作被安全策略拦截: {safety_result.reason}"
+
             return {
                 "tool_message": ToolMessage(
-                    content=f"操作被安全策略拦截: {safety_result.reason}",
+                    content=msg_content,
                     tool_call_id=tc["id"],
                     name=tool_name,
                 ),
@@ -219,6 +278,7 @@ async def _run_one_tool(
                         "safety_checks_passed": False,
                     }
                 ],
+                "row_estimation_blocked": is_re_blocked,
             }
 
         safety_warnings = list(safety_result.warnings)
@@ -265,6 +325,7 @@ async def _run_one_tool(
                         "safety_checks_passed": True,
                     }
                 ],
+                "row_estimation_blocked": False,
             }
 
         elapsed = int((time.monotonic() - tool_start) * 1000)
@@ -330,6 +391,7 @@ async def _run_one_tool(
                 name=tool_name,
             ),
             "sse_events": local_sse,
+            "row_estimation_blocked": False,
         }
 
 
@@ -349,6 +411,7 @@ async def safe_tools_node(state: AgentState) -> dict[str, Any]:
     run_id = state.get("run_id", "")
     conn_config: dict[str, Any] = state.get("conn_config") or {}
     iteration = len(state.get("trace_iterations", []))
+    consecutive_blocks = state.get("consecutive_blocks", 0)
     sse_events = list(state.get("sse_events", []))
 
     # ── 从消息列表中提取 tool_calls ──
@@ -376,7 +439,7 @@ async def safe_tools_node(state: AgentState) -> dict[str, Any]:
     # 并发执行所有工具
     semaphore = asyncio.Semaphore(_MAX_CONCURRENT_TOOLS)
     results = await asyncio.gather(
-        *[_run_one_tool(tc, conn_config, run_id, iteration, semaphore) for tc in tool_calls],
+        *[_run_one_tool(tc, conn_config, run_id, iteration, semaphore, consecutive_blocks) for tc in tool_calls],
         return_exceptions=True,
     )
 
@@ -414,7 +477,50 @@ async def safe_tools_node(state: AgentState) -> dict[str, Any]:
             tool_messages.append(r["tool_message"])
             sse_events.extend(r["sse_events"])
 
+    # ── 统计本轮 RowEstimationCheck 拦截数，更新 consecutive_blocks ──
+    round_blocked_count = sum(
+        1 for r in results
+        if not isinstance(r, BaseException) and r.get("row_estimation_blocked")
+    )
+    if round_blocked_count > 0:
+        new_consecutive_blocks = consecutive_blocks + 1
+    else:
+        new_consecutive_blocks = 0  # 本轮无 RE 拦截，重置计数器
+
+    # ── 连续拦截 >= 5 次：强制终止，不再让 LLM 继续改写 ──
+    if new_consecutive_blocks >= 5:
+        logger.warning(
+            "连续 RowEstimationCheck 拦截已达上限，强制终止 Agent",
+            run_id=run_id,
+            consecutive_blocks=new_consecutive_blocks,
+        )
+        return {
+            "messages": tool_messages,
+            "sse_events": sse_events,
+            "consecutive_blocks": new_consecutive_blocks,
+            "final_answer": (
+                "抱歉，该查询已连续多次被安全策略拦截，"
+                "数据量过大无法安全执行。\n\n"
+                "请尝试以下方式缩小查询范围后重试：\n"
+                "- 添加更精确的 WHERE 条件过滤数据\n"
+                "- 使用 LIMIT 限制返回行数\n"
+                "- 改用 COUNT/GROUP BY 等聚合查询\n"
+                "- 在数据库客户端中直接执行以绕过安全阈值"
+            ),
+            "is_complete": True,
+            "sse_events": sse_events + [{
+                "type": "error",
+                "error_code": "CONSECUTIVE_BLOCKS_EXCEEDED",
+                "user_message": (
+                    f"连续 {new_consecutive_blocks} 次被 EXPLAIN 安全评估拦截，"
+                    "Agent 已自动终止"
+                ),
+                "severity": "warning",
+            }],
+        }
+
     return {
         "messages": tool_messages,
         "sse_events": sse_events,
+        "consecutive_blocks": new_consecutive_blocks,
     }

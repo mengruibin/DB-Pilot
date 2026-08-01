@@ -69,6 +69,10 @@ class AgentState(TypedDict, total=False):
         run_id: 本次 Agent 运行唯一 ID（UUID 格式）。
         trace_iterations: Agent 决策轨迹（每轮 ReAct 迭代记录）。
         error: 错误信息（若有）。
+
+        # ── 防改写死循环 ──
+        consecutive_blocks: 连续被 RowEstimationCheck 拦截的次数。
+            safe_tools_node 中递增，本轮无 RE 拦截时重置为 0。
     """
     # ── 标准 LangGraph 消息 ──
     messages: Annotated[list[Any], add_messages]
@@ -95,3 +99,6 @@ class AgentState(TypedDict, total=False):
     run_id: str
     trace_iterations: list[dict[str, Any]]
     error: str | None
+
+    # ── 防改写死循环 ──
+    consecutive_blocks: int  # 连续被 RowEstimationCheck 拦截的次数，safe_tools_node 递增，无拦截/切换工具时重置为 0
