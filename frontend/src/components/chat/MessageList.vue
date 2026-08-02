@@ -27,7 +27,6 @@ const ESTIMATED_ITEM_HEIGHT = 72
 const BUFFER = 5
 const VIRTUAL_THRESHOLD = 50
 const isNearBottom = ref(true)
-const showScrollButton = ref(false)
 
 /** 获取实际的滚动容器（外层 .message-list-wrapper） */
 function getScrollContainer(): HTMLElement | null {
@@ -132,7 +131,6 @@ function handleScroll(e: Event): void {
   containerHeight.value = el.clientHeight
   const nearBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 200
   isNearBottom.value = nearBottom
-  showScrollButton.value = !nearBottom
 }
 
 watch(() => props.messages.length, () => {
@@ -514,16 +512,6 @@ const thinkingExpanded = ref(true)  // 默认展开
     <div v-if="messages.length === 0" class="empty-list">
       <p class="empty-text">暂无消息，输入问题开始对话</p>
     </div>
-
-    <!-- ── 滚动到底部按钮 ── -->
-    <Transition name="fade-up">
-      <button v-if="showScrollButton" class="scroll-bottom-btn" @click="scrollToBottom(true)">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
-          <polyline points="6 9 12 15 18 9"/>
-        </svg>
-        最新消息
-      </button>
-    </Transition>
   </div>
 </template>
 
@@ -716,41 +704,4 @@ const thinkingExpanded = ref(true)  // 默认展开
   color: var(--text-tertiary);
 }
 
-/* ═══════════ 滚动到底部按钮 ═══════════ */
-.scroll-bottom-btn {
-  position: absolute;
-  bottom: 12px;
-  left: 50%;
-  transform: translateX(-50%);
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  padding: 6px 16px;
-  background: var(--bg-elevated);
-  border: 1px solid var(--border-color);
-  border-radius: 20px;
-  color: var(--text-secondary);
-  font-family: var(--font-body);
-  font-size: 12px;
-  cursor: pointer;
-  transition: all var(--transition-fast);
-  z-index: 10;
-  white-space: nowrap;
-}
-.scroll-bottom-btn:hover {
-  background: var(--bg-hover);
-  border-color: var(--accent-teal);
-  color: var(--accent-teal);
-}
-
-/* ── 过渡动画 ── */
-.fade-up-enter-active,
-.fade-up-leave-active {
-  transition: all 0.2s ease;
-}
-.fade-up-enter-from,
-.fade-up-leave-to {
-  opacity: 0;
-  transform: translateX(-50%) translateY(8px);
-}
 </style>
