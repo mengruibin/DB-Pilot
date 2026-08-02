@@ -894,8 +894,8 @@ def evaluate(metrics: ExplainMetrics) -> ExplainDecision:
 # LLM 上下文窗口保护 — 结果截断
 # =============================================================================
 
-_MAX_LLM_RESULT_ROWS = 200
-_MAX_LLM_RESULT_CHARS = 80_000
+_MAX_LLM_RESULT_ROWS = 100
+_MAX_LLM_RESULT_CHARS = 40_000
 
 
 def truncate_result_for_llm(result: dict) -> dict:
