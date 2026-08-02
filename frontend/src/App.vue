@@ -97,8 +97,8 @@ onMounted(() => {
   --chat-result-border: #334155;
   --chat-result-text: #94A3B8;
 
-  /* 最终回答 — 背景与卡片统一 #1C2333，文字浅灰高对比 */
-  --chat-answer-bg: transparent;
+  /* 最终回答 — 背景比卡片/思考面板略亮 (#202A3C vs #161B26)，文字浅灰高对比 */
+  --chat-answer-bg: #202A3C;
   --chat-answer-border: #2D3748;
   --chat-answer-text: #E2E8F0;
   --chat-answer-heading: #10B981;
