@@ -20,7 +20,7 @@ os.environ.setdefault("LLM_API_KEY", "test-key")
 os.environ.setdefault("LLM_MODEL", "test-model")
 os.environ.setdefault("DATABASE_URL", "sqlite+aiosqlite:///test.db")
 
-from app.agent.graph import build_agent_graph  # noqa: E402, I001
+from app.agent.graph import build_agent_graph, _extract_token_usage  # noqa: E402, I001
 # from app.agent.state import Intent  # noqa: E402
 
 # =============================================================================
@@ -174,6 +174,63 @@ class TestInferMessageType:
         """只有未知工具时 → general。"""
         state = _make_state(["unknown_tool"])
         assert self._func(state) == "general"
+
+
+# =============================================================================
+# token 用量提取测试（2026-08：会话级 token 统计）
+# =============================================================================
+
+
+class TestExtractTokenUsage:
+    """_extract_token_usage 多 provider 兼容性测试。"""
+
+    def test_usage_metadata_new_langchain(self):
+        """LangChain 新版 usage_metadata 标准化字段。"""
+        from types import SimpleNamespace
+
+        resp = SimpleNamespace(
+            usage_metadata={"input_tokens": 10, "output_tokens": 5},
+        )
+        assert _extract_token_usage(resp) == {"input_tokens": 10, "output_tokens": 5}
+
+    def test_token_usage_openai_style(self):
+        """OpenAI 系 response_metadata.token_usage（prompt/completion_tokens 键名）。"""
+        from types import SimpleNamespace
+
+        resp = SimpleNamespace(
+            usage_metadata=None,
+            response_metadata={
+                "token_usage": {"prompt_tokens": 100, "completion_tokens": 20}
+            },
+        )
+        assert _extract_token_usage(resp) == {"input_tokens": 100, "output_tokens": 20}
+
+    def test_usage_anthropic_style(self):
+        """Anthropic 系 response_metadata.usage（input/output_tokens 键名）。"""
+        from types import SimpleNamespace
+
+        resp = SimpleNamespace(
+            usage_metadata=None,
+            response_metadata={"usage": {"input_tokens": 7, "output_tokens": 3}},
+        )
+        assert _extract_token_usage(resp) == {"input_tokens": 7, "output_tokens": 3}
+
+    def test_missing_usage_returns_zeros(self):
+        """无用量信息时返回全 0，不抛异常。"""
+        from types import SimpleNamespace
+
+        resp = SimpleNamespace(usage_metadata=None, response_metadata={})
+        assert _extract_token_usage(resp) == {"input_tokens": 0, "output_tokens": 0}
+
+    def test_usage_metadata_takes_priority(self):
+        """usage_metadata 优先于 response_metadata。"""
+        from types import SimpleNamespace
+
+        resp = SimpleNamespace(
+            usage_metadata={"input_tokens": 1, "output_tokens": 2},
+            response_metadata={"token_usage": {"prompt_tokens": 9, "completion_tokens": 9}},
+        )
+        assert _extract_token_usage(resp) == {"input_tokens": 1, "output_tokens": 2}
 
 
 # # =============================================================================

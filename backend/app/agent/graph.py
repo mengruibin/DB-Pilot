@@ -267,10 +267,18 @@ async def agent_node(state: AgentState) -> dict[str, Any]:
 
     elapsed_ms = int((time.monotonic() - node_start) * 1000)
 
+    # ── 提取 token 用量（多 provider 兼容，始终记录，不依赖 AGENT_DEBUG） ──
+    token_usage = _extract_token_usage(response)
+    input_tokens = token_usage.get("input_tokens", 0)
+    output_tokens = token_usage.get("output_tokens", 0)
+
     # ── 记录本轮决策轨迹 ──
     trace_entry: dict[str, Any] = {
         "iteration": iteration,
         "duration_ms": elapsed_ms,
+        # token 用量记入轨迹顶层：随 agent_trace 持久化，供会话级汇总/审计
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
     }
     if settings.AGENT_DEBUG:
         trace_entry["debug"] = {
@@ -278,16 +286,6 @@ async def agent_node(state: AgentState) -> dict[str, Any]:
             "system_prompt_length": len(state.get("user_message", "")),
             "messages_count": len(llm_messages),
             "tools_count": len(AGENT_TOOLS),
-            "input_tokens": (
-                response.response_metadata.get("token_usage", {}).get("input_tokens", 0)
-                if hasattr(response, "response_metadata")
-                else 0
-            ),
-            "output_tokens": (
-                response.response_metadata.get("token_usage", {}).get("output_tokens", 0)
-                if hasattr(response, "response_metadata")
-                else 0
-            ),
         }
     trace_iterations = list(state.get("trace_iterations", []))
     sse_events = list(state.get("sse_events", []))
@@ -301,6 +299,8 @@ async def agent_node(state: AgentState) -> dict[str, Any]:
             iteration=iteration,
             tools=[tc["name"] for tc in response.tool_calls],
             duration_ms=elapsed_ms,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
         )
 
         trace_entry["tool_calls"] = [
@@ -343,6 +343,8 @@ async def agent_node(state: AgentState) -> dict[str, Any]:
             text_length=len(final_text),
             total_iterations=iteration,
             duration_ms=elapsed_ms,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
         )
 
         trace_entry["final_answer"] = True
@@ -911,6 +913,37 @@ def _build_llm_messages(state: AgentState) -> list:
         existing = [HumanMessage(content=user_text)]
 
     return [SystemMessage(content=system_text)] + existing
+
+
+def _extract_token_usage(response: Any) -> dict[str, int]:
+    """从 LLM 响应中提取 token 用量，兼容多 provider 的 metadata 格式。
+
+    兼容格式（按优先级）：
+      1. response.usage_metadata       — LangChain 新版的标准化字段
+      2. response_metadata.token_usage — OpenAI 系（含 DeepSeek/GLM 等兼容 API）
+      3. response_metadata.usage       — Anthropic 系
+
+    提取不到时返回全 0，不抛异常（部分 provider 不返回用量信息）。
+    """
+    # 1. LangChain 新版标准化字段
+    usage_metadata = getattr(response, "usage_metadata", None)
+    if isinstance(usage_metadata, dict) and usage_metadata:
+        return {
+            "input_tokens": int(usage_metadata.get("input_tokens") or 0),
+            "output_tokens": int(usage_metadata.get("output_tokens") or 0),
+        }
+
+    # 2/3. provider 特定 metadata
+    metadata = getattr(response, "response_metadata", None) or {}
+    usage = metadata.get("token_usage") or metadata.get("usage")
+    if isinstance(usage, dict):
+        return {
+            "input_tokens": int(usage.get("input_tokens") or usage.get("prompt_tokens") or 0),
+            "output_tokens": int(
+                usage.get("output_tokens") or usage.get("completion_tokens") or 0
+            ),
+        }
+    return {"input_tokens": 0, "output_tokens": 0}
 
 
 def _content_preview(content: str | list | dict | None, max_len: int = 200) -> str:

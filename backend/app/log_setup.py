@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import io
 import logging
 import sys
 from logging.handlers import TimedRotatingFileHandler
@@ -19,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 import structlog
+from structlog.processors import CallsiteParameter, CallsiteParameterAdder
 from structlog.typing import EventDict
 
 from app.config import settings
@@ -83,20 +85,104 @@ def _add_timestamp(
     return event_dict
 
 
-def _add_logger_name(
+# =============================================================================
+# 层次字段处理器
+# 从 CallsiteParameterAdder 注入的 module 字段推导粗粒度层次，
+# 便于按 app.api / app.agent / app.db ... 过滤日志。
+# =============================================================================
+
+_LAYER_MAP: dict[str, str] = {
+    "main": "server",
+    "api": "api",
+    "agent": "agent",
+    "engine": "engine",
+    "db": "db",
+    "database": "db",
+    "models": "models",
+    "auth": "auth",
+    "log_setup": "observability",
+    "correlation": "observability",
+}
+
+
+def _add_layer(
     logger: structlog.typing.WrappedLogger,  # noqa: ARG001
     method_name: str,  # noqa: ARG001
     event_dict: EventDict,
 ) -> EventDict:
-    """注入 logger 名称到事件字典（structlog 默认不携带）。"""
-    # structlog 在处理器中不直接暴露 logger name，我们通过 __name__ 在
-    # 调用侧绑定。此处仅确保 level 字段存在
+    """从 module 字段推导日志所属层次（agent / api / db / engine ...）。
+
+    模块路径形如 "app.agent.graph"，取第二段映射为可读层次名；
+    未知模块（第三方库）回退到原始第二段，非模块来源回退为 "unknown"。
+    """
+    module = event_dict.get("module", "")
+    if not module:
+        event_dict["layer"] = "unknown"
+        return event_dict
+    parts = module.split(".")
+    seg = parts[1] if len(parts) > 1 else parts[0]
+    event_dict["layer"] = _LAYER_MAP.get(seg, seg)
     return event_dict
 
 
 # =============================================================================
 # 配置函数
 # =============================================================================
+
+
+def _utf8_console_stream() -> Any:
+    """返回 UTF-8 安全的控制台输出流。
+
+    Windows 默认控制台为 GBK（cp936），向 stderr 写入中文会乱码或触发
+    UnicodeEncodeError。此处将 stderr 包装为 UTF-8 + backslashreplace 的流。
+    - 已是 UTF-8 或非 TextIOWrapper（如测试中的 StringIO）时原样返回
+    """
+    stream = sys.stderr
+    if stream is None or not isinstance(stream, io.TextIOWrapper):
+        return stream
+    encoding = (stream.encoding or "").lower().replace("_", "-")
+    if encoding in ("utf-8", "utf8"):
+        return stream
+    buffer = getattr(stream, "buffer", None)
+    if buffer is None:
+        return stream
+    try:
+        return io.TextIOWrapper(buffer, encoding="utf-8", errors="backslashreplace")
+    except (AttributeError, ValueError):
+        return stream
+
+
+def _build_shared_processors() -> list[structlog.typing.Processor]:
+    """构建通用预处理处理器链（在渲染之前对所有日志执行）。
+
+    同时用于：
+      1) structlog.configure() 中的全局处理器链
+      2) ProcessorFormatter.foreign_pre_chain（处理非 structlog 来源日志）
+
+    处理链职责：
+      - merge_contextvars：自动注入 trace_id / session_id 等 contextvars 字段
+      - add_log_level：补充 level 字段
+      - _add_timestamp：补充 UTC 时间戳
+      - _mask_sensitive_keys：脱敏 password/token/secret 等
+      - CallsiteParameterAdder：注入调用点信息（模块名/函数名/行号）
+      - _add_layer：从 module 推导层次字段（必须在 CallsiteParameterAdder 之后）
+      - format_exc_info：异常堆栈
+    """
+    return [
+        structlog.contextvars.merge_contextvars,
+        structlog.stdlib.add_log_level,
+        _add_timestamp,
+        _mask_sensitive_keys,
+        CallsiteParameterAdder(
+            [
+                CallsiteParameter.MODULE,
+                CallsiteParameter.FUNC_NAME,
+                CallsiteParameter.LINENO,
+            ]
+        ),
+        _add_layer,
+        structlog.processors.format_exc_info,
+    ]
 
 
 def configure_logging() -> None:
@@ -118,16 +204,7 @@ def configure_logging() -> None:
     log_dir = Path(settings.LOG_DIR)
 
     # ── 通用预处理处理器（在渲染之前对所有日志执行） ──
-    # 这些处理器同时用于：
-    #   1) structlog.configure() 中的全局处理器链
-    #   2) ProcessorFormatter.foreign_pre_chain（处理非 structlog 来源日志）
-    shared_processors: list[structlog.typing.Processor] = [
-        structlog.contextvars.merge_contextvars,
-        structlog.stdlib.add_log_level,
-        _add_timestamp,
-        _mask_sensitive_keys,
-        structlog.processors.format_exc_info,
-    ]
+    shared_processors = _build_shared_processors()
 
     # ── 配置 structlog 全局处理器链 ──
     # 注意：不包含渲染器！渲染交给 handler 级别的 formatter。
@@ -146,7 +223,9 @@ def configure_logging() -> None:
     # ── 构建 handler 级别的 formatter ──
     # 控制台：LOG_FORMAT=text 用彩色控制台，json 用 JSON 行
     if log_format == "json":
-        console_renderer: structlog.typing.Processor = structlog.processors.JSONRenderer()
+        console_renderer: structlog.typing.Processor = structlog.processors.JSONRenderer(
+            ensure_ascii=False,
+        )
     else:
         console_renderer = structlog.dev.ConsoleRenderer(colors=sys.stderr.isatty())
 
@@ -156,8 +235,9 @@ def configure_logging() -> None:
     )
 
     # 文件：始终使用 JSON（避免 ANSI 转义码污染日志文件）
+    # ensure_ascii=False：日志文件中直接输出中文，便于人工 grep/阅读
     file_formatter = structlog.stdlib.ProcessorFormatter(
-        processor=structlog.processors.JSONRenderer(),
+        processor=structlog.processors.JSONRenderer(ensure_ascii=False),
         foreign_pre_chain=shared_processors,
     )
 
@@ -169,8 +249,8 @@ def configure_logging() -> None:
     for h in list(root_logger.handlers):
         root_logger.removeHandler(h)
 
-    # 1. 控制台 handler（stderr）
-    console_handler = logging.StreamHandler(sys.stderr)
+    # 1. 控制台 handler（stderr，UTF-8 安全流防止 Windows GBK 控制台中文乱码）
+    console_handler = logging.StreamHandler(_utf8_console_stream())
     console_handler.setLevel(log_level)
     console_handler.setFormatter(console_formatter)
     root_logger.addHandler(console_handler)

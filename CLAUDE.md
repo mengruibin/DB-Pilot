@@ -148,6 +148,10 @@ frontend/
 7. **Database Adapters** — BaseAdapter ABC 定义统一接口（execute/explain/get_slow_queries/等），lazy-loaded 驱动（aiomysql/asyncpg/oracledb），`AdapterFactory.create()` 创建实例。连接密码仅存于请求内存 state，不持久化。
 
 8. **Observability** — structlog 结构化日志 + X-Request-ID 全链路追踪 + trace_iterations 记录每轮 ReAct 决策轨迹。
+   - **日志字段**：每条日志自动携带 `module` / `func_name` / `lineno`（`CallsiteParameterAdder`）与 `layer`（从模块路径推导：agent/api/db/engine/server/observability），可按层次 `grep '"layer": "agent"'` 过滤
+   - **请求归属**：agent 流内所有日志（含数据库适配器、EXPLAIN 评估）经 contextvars 自动绑定 `session_id` / `connection_id` / `user_id` / `user_role`（配合中间件注入的 `trace_id`），可按会话/连接/请求过滤出完整日志链
+   - **token 消耗**：每轮 LLM 决策记录 `input_tokens` / `output_tokens`（`_extract_token_usage()` 多 provider 兼容，写入决策日志 + trace_iterations 顶层随 agent_trace 持久化）；会话级由 `_stream_events` 汇总为 `total_tokens` → `done.tokens_used` 事件 + 入库 `messages.tokens_used` / `sessions.tokens_used_total`
+   - **中文原文**：JSON 渲染 `ensure_ascii=False`，日志文件直接输出中文（UTF-8）；控制台经 UTF-8 流包装防 Windows GBK 乱码
 
 9. **EXPLAIN 多维度安全评估** — 在执行 `execute_readonly_sql` 前通过 EXPLAIN 获取 5 维标准化指标（访问方式、扫描行数、返回行数、查询成本、额外操作），用硬编码规则引擎（6 条 CRITICAL + 5 条 WARNING）逐条评估。CRITICAL 命中则阻断并告知 LLM 改写，WARNING 仅告警。所有阈值在 `explain_estimator.py` 中硬编码管理，不依赖 .env 配置。`execute_write_sql` 不走自动安全护栏（用户确认即安全屏障），被拒绝的操作由 ToolMessage 返回给 LLM。EXPLAIN 失败时降级放行，不阻断正常业务。同时执行后对结果自动截断（200 行 / 80K 字符），防止 LLM 上下文窗口溢出。
 
@@ -252,6 +256,8 @@ frontend/
 - **run_health_check 关联分析**：检查结果包含 `correlation_notes`（跨项关联分析列表）和 `fix_suggestions`（可执行修复 SQL 命令），从"发现问题"升级到"解决问题"
 - **EXPLAIN 安全拼接**：适配器 `explain()` 方法增加多语句检测和单引号转义，作为 `SQLAuditCheck` 之后的第二道防线（EXPLAIN 不支持参数化占位符）
 - **confirm_node 通用确认机制**：`confirm_node` 采用**无条件规则**——工具声明 `needs_write_confirmation: True` 即触发 `interrupt()` 等待用户确认，不再检查 `sql` 参数或 `is_write_dml()`。`execute_write_sql` 和 `kill_transaction` 均通过此机制触发确认。前端按 `confirm_category`（`sql_write` / `connection_kill` / `generic`）分类渲染对应的确认卡片。新增危险操作工具只需在 `@tool(extras={...})` 中声明 `needs_write_confirmation` + `confirm_category` 即可接入确认流程
+- **结构化日志字段**：structlog 处理链 `_build_shared_processors()`（`log_setup.py`）自动为每条日志注入 `module/func_name/lineno/layer`。agent 流内日志经 contextvars 自动携带 `session_id/connection_id/user_id/user_role`（`_stream_events` 绑定、`finally` 解绑，保留中间件注入的 `trace_id`）。文件与控制台 JSON 均 `ensure_ascii=False` 输出中文原文
+- **token 消耗统计**：`graph.py._extract_token_usage()` 兼容多 provider（`usage_metadata` → `token_usage` → `usage` 优先级），每轮决策日志与 `trace_iterations` 顶层记录 `input_tokens`/`output_tokens`；`chat.py` Step4 汇总 `total_tokens` 用于 `done.tokens_used` 事件与 `messages.tokens_used` / `sessions.tokens_used_total` 持久化
 
 ### Agent 评测体系
 

@@ -519,6 +519,15 @@ async def _stream_events(
                 current_user,
             )
             set_connection_id(body.connection_id)
+            # 可观测性：绑定请求归属上下文到 structlog contextvars，
+            # 使本次 agent 流的所有日志（含图节点/工具/数据库适配器）自动携带归属字段，
+            # 可按 session_id / connection_id / user 过滤出同一次对话的完整日志链
+            structlog.contextvars.bind_contextvars(
+                session_id=session.id,
+                connection_id=body.connection_id,
+                user_id=current_user.id,
+                user_role=current_user.role,
+            )
 
             # 持久化用户消息（恢复请求不创建新消息，已在第一段流中保存）
             if not body.resume:
@@ -849,6 +858,13 @@ async def _stream_events(
             assistant_content = accumulated_state.get("final_answer") or "已完成"
             # 构建 Agent Trace（B-31 可观测性）
             trace_iterations = accumulated_state.get("trace_iterations", [])
+            # 汇总本次 Agent 运行消耗的 token（每轮 LLM 调用 input+output）。
+            # agent_node 已将 token 写入 trace_iterations 每轮记录，这里求和后
+            # 同时用于 done 事件（tokens_used）与数据库持久化（会话级 token 统计）
+            total_tokens = sum(
+                (entry.get("input_tokens") or 0) + (entry.get("output_tokens") or 0)
+                for entry in trace_iterations
+            )
             agent_trace = (
                 json.dumps(
                     {
@@ -879,6 +895,7 @@ async def _stream_events(
                 agent_trace=agent_trace,
                 reasoning_content=full_reasoning,
                 thinking_steps=thinking_steps_json,
+                tokens_used=total_tokens,
             )
 
             # ========== Step 5: done 事件 ==========
@@ -930,6 +947,13 @@ async def _stream_events(
                 }
             )
     finally:
+        # 解绑请求归属上下文（保留中间件注入的 trace_id，供流结束后迟到的日志使用）
+        structlog.contextvars.unbind_contextvars(
+            "session_id",
+            "connection_id",
+            "user_id",
+            "user_role",
+        )
         # 清理所有追踪标记（AC-5：回滚由 DB 连接断开时自动完成）
         if body.session_id:
             _active_streams.pop(body.session_id, None)
