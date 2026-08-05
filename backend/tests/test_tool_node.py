@@ -421,3 +421,49 @@ class TestOutputStructure:
         result = await safe_tools_node(state)
         assert "sse_events" in result
         assert "messages" not in result or result["messages"] == []
+
+
+class TestToolResultExportFields:
+    """tool_result SSE 事件应携带 export_sql / total_rows（query-result-export-plan）。"""
+
+    @pytest.mark.asyncio
+    async def test_readonly_query_result_carries_export_fields(self) -> None:
+        """只读查询结果 → 事件含 export_sql 与 total_rows。"""
+
+        async def _return_query_result(**kwargs):
+            return {
+                "columns": ["id"],
+                "rows": [[1]],
+                "total_rows": 5000,
+                "execution_time_ms": 12,
+                "audit_status": "passed",
+                "is_readonly": True,
+                "summary": "返回 5000 行",
+            }
+
+        mock_registry = {"query_tool": _MockTool(_return_query_result)}
+        with patch("app.agent.tools.registry.TOOL_REGISTRY", mock_registry):
+            state = _make_state([_make_tool_call("query_tool", {"sql": "SELECT * FROM t"})])
+            result = await safe_tools_node(state)
+
+        tool_result_events = [e for e in result["sse_events"] if e.get("type") == "tool_result"]
+        assert len(tool_result_events) == 1
+        ev = tool_result_events[0]
+        assert ev.get("export_sql") == "SELECT * FROM t"
+        assert ev.get("total_rows") == 5000
+
+    @pytest.mark.asyncio
+    async def test_non_query_result_has_no_export_fields(self) -> None:
+        """非查询结果（如 summary 型）→ 事件不携带 export_sql。"""
+
+        async def _return_summary(**kwargs):
+            return {"summary": "执行完成"}
+
+        mock_registry = {"plain_tool": _MockTool(_return_summary)}
+        with patch("app.agent.tools.registry.TOOL_REGISTRY", mock_registry):
+            state = _make_state([_make_tool_call("plain_tool")])
+            result = await safe_tools_node(state)
+
+        tool_result_events = [e for e in result["sse_events"] if e.get("type") == "tool_result"]
+        assert len(tool_result_events) == 1
+        assert "export_sql" not in tool_result_events[0]

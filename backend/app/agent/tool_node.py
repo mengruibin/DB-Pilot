@@ -366,6 +366,20 @@ async def _run_one_tool(
                         "iteration": iteration,
                     }
                 )
+            # 只读查询结果：附加导出元信息（供前端渲染「导出完整结果」按钮）
+            export_meta = {}
+            if (
+                isinstance(result, dict)
+                and result.get("is_readonly") is True
+                and isinstance(result.get("columns"), list)
+            ):
+                export_meta = {
+                    "export_sql": tool_args.get("sql", ""),
+                    # 截断后 total_rows 保留原始总数，_original_total_rows 兼容兜底
+                    "total_rows": result.get(
+                        "_original_total_rows", result.get("total_rows", 0)
+                    ),
+                }
             local_sse.append(
                 {
                     "type": "tool_result",
@@ -376,6 +390,7 @@ async def _run_one_tool(
                     "agent_run_id": run_id,
                     "iteration": iteration,
                     "safety_checks_passed": True,
+                    **export_meta,
                 }
             )
         else:
