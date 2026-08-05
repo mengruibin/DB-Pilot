@@ -79,6 +79,10 @@ export type ThinkingStep = {
   safety_checks_passed?: boolean
   agent_run_id?: string
   iteration?: number
+  /** 可导出的只读查询 SQL（历史重建后导出按钮据此渲染，query-result-export-plan） */
+  export_sql?: string
+  /** 查询总行数（原始全量，非预览截断数） */
+  total_rows?: number
 } | {
   type: 'sql'
   content: string

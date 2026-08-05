@@ -944,6 +944,9 @@ export const useChatStore = defineStore('chat', () => {
             safetyChecksPassed: step.safety_checks_passed,
             agentRunId: step.agent_run_id,
             iteration: step.iteration,
+            // 透传导出元信息，历史对话重载后仍渲染「导出 CSV」按钮（query-result-export-plan）
+            exportSql: step.export_sql,
+            exportTotalRows: step.total_rows,
           })
         } else if (step.type === 'reasoning') {
           result.push({
