@@ -399,26 +399,6 @@ class QueryRequest(BaseModel):
     )
 
 
-class ExplainRequest(BaseModel):
-    """执行计划分析请求体（api-contract §1.3 POST /api/connections/{id}/explain）。"""
-
-    sql: str = Field(
-        ...,
-        min_length=1,
-        max_length=65535,
-        description="要分析执行计划的 SQL 语句",
-        examples=["SELECT * FROM orders WHERE user_id = 123"],
-    )
-    format: str = Field(
-        default="tree",
-        description="输出格式：tree / json / traditional（各数据库方言自动映射）",
-    )
-    password: str | None = Field(
-        default=None,
-        description="连接密码。由前端 localStorage 持有，每次请求传入。",
-    )
-
-
 class SlowQueryItem(BaseModel):
     """慢查询记录项（api-contract §2.4 SlowQuery）。"""
 

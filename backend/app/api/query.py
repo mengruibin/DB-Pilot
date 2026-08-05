@@ -1,12 +1,11 @@
 """
 直接查询与诊断 REST API 路由。
 
-三个端点（api-contract §1.3）：
+两个端点（api-contract §1.3）：
   - POST /api/connections/{id}/query     执行只读 SQL（经审计后执行）
-  - POST /api/connections/{id}/explain   获取 SQL 执行计划 + LLM 分析
   - GET  /api/connections/{id}/slow-queries  获取慢查询列表（分页）
 
-依据 api-contract §1.3（query/explain/slow-queries 三个端点）。
+依据 api-contract §1.3（query/slow-queries 两个端点）。
 依据 AGENTS.md §安全与合规红线（SQL 审计拦截返回 400 而非 500）。
 """
 
@@ -26,7 +25,6 @@ from app.db.factory import AdapterFactory
 from app.models.connection import ConnectionConfigModel
 from app.models.schemas import (
     ConnectionCreateRequest,
-    ExplainRequest,
     QueryRequest,
     SlowQueryListResponse,
 )
@@ -205,110 +203,6 @@ async def execute_query(
             detail={
                 "error_code": "DB_UNREACHABLE",
                 "user_message": f"数据库执行错误：{exc}",
-            },
-        ) from exc
-
-
-# =============================================================================
-# POST /api/connections/{id}/explain — 获取 SQL 执行计划 + LLM 分析
-# =============================================================================
-
-
-@router.post("/{connection_id}/explain")
-async def execute_explain(
-    connection_id: str,
-    body: ExplainRequest,
-    session: AsyncSession = Depends(get_session),  # noqa: B008
-    current_user: UserModel = Depends(get_current_user),
-) -> dict[str, Any]:
-    """获取 SQL 执行计划并进行分析（AC-3）。
-
-    1. 加载连接配置
-    2. 调用适配器 explain() 获取执行计划
-    3. LLM 分析瓶颈（异常时降级到规则引擎）
-    4. 返回 {explain_output, parsed, format}
-
-    Args:
-        connection_id: 连接 ID。
-        body: ExplainRequest 请求体。
-        session: 内部数据库会话。
-
-    Returns:
-        {explain_output, parsed, format}。
-    """
-    logger.info("API 请求开始", endpoint="explain",
-                connection_id=connection_id, sql_length=len(body.sql))
-
-    try:
-        adapter, config = await _load_and_create_adapter(
-            connection_id, body.password, session,
-            current_user=current_user,
-        )
-
-        await adapter.connect(config)
-
-        # 检查适配器是否支持 EXPLAIN
-        caps = adapter.get_capabilities()
-        if not caps.supports_explain:
-            await adapter.disconnect()
-            logger.warning("EXPLAIN 不支持", endpoint="explain",
-                           connection_id=connection_id,
-                           db_type=config.db_type)
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail={
-                    "error_code": "FEATURE_NOT_SUPPORTED",
-                    "user_message": f"{config.db_type} 不支持 EXPLAIN",
-                },
-            )
-
-        # AC-3：调用适配器 explain()
-        explain_result = await adapter.explain(body.sql)
-        await adapter.disconnect()
-
-        explain_output = explain_result.get("explain_output", "")
-        explain_fmt = explain_result.get("format", "text")
-
-        # AC-3：LLM 分析执行计划（异常时降级到规则引擎）
-        from app.engine.diagnosis import analyze_explain
-        from app.prompts.diagnosis import rule_based_analyze
-
-        try:
-            parsed = await analyze_explain(
-                explain_output=explain_output,
-                sql=body.sql,
-                db_type=config.db_type,
-            )
-            analysis_source = "llm"
-        except Exception:
-            logger.info("诊断分析降级到规则引擎", endpoint="explain",
-                        connection_id=connection_id)
-            parsed = rule_based_analyze(
-                explain_output=explain_output,
-                sql=body.sql,
-            )
-            analysis_source = "rule"
-
-        logger.info("API 请求完成", endpoint="explain",
-                    connection_id=connection_id,
-                    format=explain_fmt,
-                    analysis_source=analysis_source)
-        return {
-            "explain_output": explain_output,
-            "parsed": parsed,
-            "format": explain_fmt,
-        }
-
-    except HTTPException:
-        raise
-    except Exception as exc:
-        logger.warning("API 请求失败", endpoint="explain",
-                       connection_id=connection_id, error=str(exc)[:200])
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail={
-                "error_code": "DB_UNREACHABLE",
-                "user_message": f"执行计划分析失败：{exc}",
             },
         ) from exc
 

@@ -128,22 +128,6 @@ export interface DirectQueryRequest {
   max_execution_ms?: number
 }
 
-export interface ExplainRequest {
-  sql: string
-  format?: 'tree' | 'json' | 'traditional'
-}
-
-export interface ExplainResponse {
-  explain_output: string
-  parsed: {
-    total_cost_estimate: string
-    bottleneck: string
-    suggestion: string
-    estimated_improvement: string
-  }
-  format: string
-}
-
 // ─── SSE 事件类型 ───
 
 /** SSE 事件：LLM Token 流式输出块（逐 token/块推送） */
