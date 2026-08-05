@@ -20,6 +20,7 @@ import structlog
 from langchain_core.tools import InjectedToolArg, tool
 
 from app.db.factory import AdapterFactory
+from app.engine.data_masking import mask_query_result
 from app.engine.sql_error_parser import parse_db_error
 from app.models.schemas import ConnectionCreateRequest
 
@@ -370,31 +371,8 @@ async def _run_sql(
         await adapter.disconnect()
 
         # Step 3: 敏感列脱敏（T-4：列名正则匹配）
-        # 对列名匹配敏感模式的列进行 *** 替换
-        sensitive_patterns = [
-            "password",
-            "token",
-            "secret",
-            "key",
-            "auth",
-            "credit",
-            "card",
-            "ssn",
-            "id_card",
-            "phone",
-            "email",
-            "cert",
-        ]
-        masked_columns: list[bool] = []
-        for col in result["columns"]:
-            is_sensitive = any(p in col.lower() for p in sensitive_patterns)
-            masked_columns.append(is_sensitive)
-
-        # 对敏感列逐行脱敏
-        masked_rows = []
-        for row in result["rows"]:
-            masked_row = ["***" if masked_columns[i] else row[i] for i in range(len(row))]
-            masked_rows.append(masked_row)
+        # 与导出端点共用 app/engine/data_masking.mask_query_result，保证脱敏一致
+        _, masked_rows = mask_query_result(result["columns"], result["rows"])
 
         # 写操作记录额外审计日志
         if not is_readonly:
