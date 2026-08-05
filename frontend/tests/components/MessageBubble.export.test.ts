@@ -2,7 +2,7 @@
  * MessageBubble tool_result 导出按钮测试（query-result-export-plan）
  *
  * 验收标准：
- * - 有 exportSql 时渲染「导出完整结果」按钮（含行数）
+ * - 有 exportSql 时渲染「导出 CSV」按钮（行数在 title 提示中）
  * - 无 exportSql 时不渲染按钮
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
@@ -14,7 +14,7 @@ import type { StoreMessage } from '@/stores/chat'
 
 vi.mock('@/composables/useExportFull', () => ({
   useExportFull: () => ({
-    // 注意：exporting/error 须为假值，模板 v-if="exporting" 才渲染「导出完整结果」
+    // 注意：exporting/error 须为假值，模板 v-if="exporting" 才渲染「导出 CSV」
     //（计划初版误写为 vi.fn()（真值），会渲染成「导出中…」导致断言失败）
     exporting: false,
     error: null,
@@ -56,7 +56,7 @@ describe('MessageBubble tool_result 导出按钮', () => {
     vi.restoreAllMocks()
   })
 
-  it('test_export_button_renders_with_sql：有 exportSql 时渲染按钮并显示行数', () => {
+  it('test_export_button_renders_with_sql：有 exportSql 时渲染「导出 CSV」按钮，行数在 title', () => {
     const wrapper = mount(MessageBubble, {
       props: {
         message: makeMessage({ exportSql: 'SELECT * FROM t', exportTotalRows: 5000 }),
@@ -65,10 +65,10 @@ describe('MessageBubble tool_result 导出按钮', () => {
       },
       global: { stubs },
     })
-    const btn = wrapper.find('.export-full-btn')
+    const btn = wrapper.find('.export-csv-btn')
     expect(btn.exists()).toBe(true)
-    expect(btn.text()).toContain('导出完整结果')
-    expect(btn.text()).toContain('5000')
+    expect(btn.text()).toContain('导出 CSV')
+    expect(btn.attributes('title')).toContain('5000')
   })
 
   it('test_export_button_hidden_without_sql：无 exportSql 时不渲染按钮', () => {
@@ -80,6 +80,6 @@ describe('MessageBubble tool_result 导出按钮', () => {
       },
       global: { stubs },
     })
-    expect(wrapper.find('.export-full-btn').exists()).toBe(false)
+    expect(wrapper.find('.export-csv-btn').exists()).toBe(false)
   })
 })
