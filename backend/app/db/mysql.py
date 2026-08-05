@@ -245,6 +245,39 @@ class MySQLAdapter(BaseAdapter):
             logger.error("MySQL 查询异常", sql=sql[:200], error=str(exc)[:200])
             raise ValueError(f"SQL 执行错误：{exc}") from exc
 
+    async def stream_query(
+        self,
+        sql: str,
+        params: dict[str, Any] | None = None,
+        batch_size: int = 2000,
+    ) -> Any:
+        """流式执行只读 SQL，按批产出 (columns, rows_batch)，内存有界。
+
+        边查边出（fetchmany 分批），供导出端点流式生成 CSV 使用。
+        游标持有期间占用一个连接池连接，导出完成即释放。
+        """
+        if not self._connected or self._pool is None:
+            raise ConnectionError("MySQL 未连接，请先调用 connect()")
+
+        # 参数化查询：params dict 转为位置参数列表（与 execute 一致，禁止拼接）
+        param_values = list(params.values()) if params else []
+        async with self._pool.acquire() as conn, conn.cursor() as cur:
+            await cur.execute(sql, param_values)
+            # 无结果集（如 SET 语句）→ 无产出
+            if not cur.description:
+                return
+            columns = [desc[0] for desc in cur.description]
+            yielded_any = False
+            while True:
+                batch = await cur.fetchmany(batch_size)
+                if not batch:
+                    # 空结果集也产出一次（带列名），让导出端写出表头
+                    if not yielded_any:
+                        yield columns, []
+                    break
+                yield columns, [list(row) for row in batch]
+                yielded_any = True
+
     # ================== 元数据 ==================
 
     async def get_databases(self) -> list[str]:

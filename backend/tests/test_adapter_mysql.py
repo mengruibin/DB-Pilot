@@ -111,3 +111,43 @@ class TestMySQLAdapter:
         assert "explain_output" in explain_result
         assert len(explain_result["explain_output"]) > 0
         assert "format" in explain_result
+
+    @pytest.mark.dependency(name="stream_query", depends=["connect"])
+    async def test_mysql_stream_query(self, mysql_adapter) -> None:
+        """AC-7：stream_query 分批产出 (columns, rows_batch)。"""
+        config = mysql_adapter._config  # type: ignore[attr-defined]
+        tables = await mysql_adapter.get_tables(config.database)
+        assert len(tables) > 0
+        first_table = tables[0]["table_name"]
+        sql = f"SELECT * FROM `{first_table}` LIMIT 1000"
+
+        seen_columns = None
+        row_count = 0
+        batch_count = 0
+        async for columns, batch in mysql_adapter.stream_query(sql, batch_size=10):
+            if seen_columns is None:
+                seen_columns = columns
+            assert isinstance(columns, list)
+            assert isinstance(batch, list)
+            row_count += len(batch)
+            batch_count += 1
+
+        assert seen_columns is not None
+        assert row_count >= 1
+        if row_count > 10:
+            assert batch_count > 1, "超过 batch_size 时应分批产出"
+
+    @pytest.mark.dependency(name="stream_query_empty", depends=["connect"])
+    async def test_mysql_stream_query_empty(self, mysql_adapter) -> None:
+        """AC-8：空结果集也应产出一次（带列名），供导出端写表头。"""
+        result = await mysql_adapter.execute("SELECT 1 AS a WHERE 1=0")
+        assert result["columns"] == ["a"]
+        # 空结果集：stream_query 应产出一次 (columns, [])
+        batches = []
+        async for columns, batch in mysql_adapter.stream_query(
+            "SELECT 1 AS a WHERE 1=0", batch_size=10
+        ):
+            batches.append((columns, batch))
+        assert len(batches) == 1
+        assert batches[0][0] == ["a"]
+        assert batches[0][1] == []

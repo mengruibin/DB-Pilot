@@ -118,6 +118,28 @@ class BaseAdapter(ABC):
             TimeoutError: 查询超时（>max_execution_ms）。
         """
 
+    @abstractmethod
+    async def stream_query(
+        self,
+        sql: str,
+        params: dict[str, Any] | None = None,
+        batch_size: int = 2000,
+    ) -> Any:
+        """流式执行只读 SQL，按批产出 (columns, rows_batch)。
+
+        v1 仅 MySQL 实现；PostgreSQL/Oracle 抛 NotImplementedError（导出端点按
+        db_type 前置拦截）。调用方负责 connect/disconnect。
+
+        Args:
+            sql: 要执行的只读 SQL 语句。
+            params: 参数化查询的参数字典（防止 SQL 注入）。
+            batch_size: 每批拉取行数。
+
+        Yields:
+            (columns, rows_batch)：columns 为列名列表，rows_batch 为当前批的行列表。
+            无结果集时无产出；空结果集产出一次 (columns, []) 以便写表头。
+        """
+
     # ================== 元数据 ==================
 
     @abstractmethod

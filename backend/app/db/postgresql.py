@@ -199,6 +199,15 @@ class PostgresAdapter(BaseAdapter):
             logger.error("PostgreSQL 查询异常", sql=sql[:200], error=str(exc)[:200])
             raise ValueError(f"SQL 执行错误：{exc}") from exc
 
+    async def stream_query(
+        self,
+        sql: str,
+        params: dict[str, Any] | None = None,
+        batch_size: int = 2000,
+    ) -> Any:
+        """流式拉取暂未支持（v1 仅 MySQL）。"""
+        raise NotImplementedError("stream_query 暂未支持此数据库类型（v1 仅 MySQL）")
+
     # ================== 元数据 ==================
 
     async def get_databases(self) -> list[str]:
