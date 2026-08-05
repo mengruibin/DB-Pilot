@@ -194,6 +194,10 @@ export interface ToolResultEvent {
   iteration?: number
   /** 安全护栏检查结果（Agent 架构升级后新增） */
   safety_checks_passed?: boolean
+  /** 可导出的只读查询 SQL（导出按钮据此渲染，query-result-export-plan） */
+  export_sql?: string
+  /** 查询总行数（原始全量，非预览截断数） */
+  total_rows?: number
 }
 
 /** SSE 事件：SQL 生成 */

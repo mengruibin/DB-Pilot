@@ -3,7 +3,7 @@
  *
  * 依据 api-contract §1.2 对话（stream/cancel）、§1.3 查询与诊断
  */
-import { http } from './client'
+import { http, ApiError } from './client'
 import type {
   DirectQueryRequest,
   QueryResult,
@@ -25,6 +25,39 @@ const CONN_BASE = '/api/connections'
 /** 执行 SQL 查询（直接模式，由后端审计控制读写） */
 export function directQuery(connectionId: string, data: DirectQueryRequest) {
   return http.post<QueryResult>(`${CONN_BASE}/${connectionId}/query`, data)
+}
+
+/** 导出查询结果为 CSV（流式下载，返回 Blob） */
+export async function exportCsv(
+  connectionId: string,
+  data: { sql: string; password?: string; max_rows?: number }
+): Promise<Blob> {
+  const resp = await fetch(`${CONN_BASE}/${connectionId}/export`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Request-ID': crypto.randomUUID(),
+      ...(localStorage.getItem('db-pilot:token')
+        ? { Authorization: `Bearer ${localStorage.getItem('db-pilot:token')}` }
+        : {}),
+    },
+    body: JSON.stringify(data),
+  })
+
+  if (!resp.ok) {
+    let userMessage = `HTTP ${resp.status}`
+    try {
+      const body = await resp.json()
+      userMessage =
+        (body.user_message as string) ||
+        (body.detail?.user_message as string) ||
+        userMessage
+    } catch {
+      // 非 JSON 错误体
+    }
+    throw new ApiError(resp.status, undefined, userMessage)
+  }
+  return resp.blob()
 }
 
 /** 获取慢查询列表 */

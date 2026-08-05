@@ -83,6 +83,10 @@ export interface StoreMessage {
   /** 安全护栏检查结果（Agent 架构升级后新增） */
   safetyChecksPassed?: boolean
 
+  // tool_result 导出（query-result-export-plan）
+  exportSql?: string
+  exportTotalRows?: number
+
   // sql
   sqlContent?: string
   auditStatus?: string
@@ -602,6 +606,8 @@ export const useChatStore = defineStore('chat', () => {
             safetyChecksPassed: event.safety_checks_passed,
             agentRunId: event.agent_run_id,
             iteration: event.iteration,
+            exportSql: event.export_sql,
+            exportTotalRows: event.total_rows,
             createdAt: new Date().toISOString(),
           })
         },
