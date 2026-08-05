@@ -217,6 +217,19 @@ class Settings(BaseSettings):
         "JSON 执行计划高度重复，LLM 只需看节点形状，不需要全部节点。",
     )
 
+    # ==================== 结果导出（query-result-export-plan） ====================
+    EXPORT_MAX_ROWS: int = Field(
+        default=100_000,
+        ge=1,
+        description="单次导出最大行数硬上限，防止大批量导出拖垮数据库。"
+        "超过该值的查询结果会被截断并在 CSV 末尾标注。",
+    )
+    EXPORT_BATCH_SIZE: int = Field(
+        default=2_000,
+        ge=100,
+        description="导出游标分批拉取行数（内存有界的关键）。",
+    )
+
     # ==================== 校验 ====================
 
     @field_validator("LLM_API_KEY", "LLM_MODEL", "DATABASE_URL", "JWT_SECRET")
