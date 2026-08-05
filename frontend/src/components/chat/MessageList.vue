@@ -1,12 +1,14 @@
 <script setup lang="ts">
 /**
- * MessageList — 消息列表（AI 响应卡片布局 + 虚拟滚动）
+ * MessageList — 消息列表（AI 响应卡片布局）
  *
  * 设计理念（遵照 DB-Pilot 对话界面设计规范）：
  *   用户消息 → 独立气泡（右对齐）
  *   AI 响应 → 主卡片 = 思考面板（可折叠）+ 最终回答（绿调）
  *
- * 虚拟滚动：消息超 50 条时启用，仅渲染可视区域 ±5 条。
+ * 全量渲染：不分页、不虚拟滚动，始终渲染全部消息并做卡片分组。
+ * 消息量级受 API pageSize=200 约束，全量渲染几百条 DOM 对现代浏览器无压力，
+ * 同时避免固定估算高度导致的虚拟滚动错位/裁剪问题。
  * 自动滚底：新消息到达自动滚动，用户手动上翻 >200px 时暂停。
  */
 import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue'
@@ -20,12 +22,8 @@ const props = defineProps<{
 
 // ─── 滚动容器 ───
 const listRef = ref<HTMLElement | null>(null)
-const scrollTop = ref(0)
-const containerHeight = ref(0)
 
-const ESTIMATED_ITEM_HEIGHT = 72
-const BUFFER = 5
-const VIRTUAL_THRESHOLD = 50
+/** 是否靠近底部（靠近时新消息到达自动滚底） */
 const isNearBottom = ref(true)
 
 /** 获取实际的滚动容器（外层 .message-list-wrapper） */
@@ -56,10 +54,6 @@ function isThinkingPhaseMessage(msg: StoreMessage): boolean {
  *   4. 其余独立消息 → 'normal'
  */
 const groupedMessages = computed<MessageGroup[]>(() => {
-  if (props.messages.length > VIRTUAL_THRESHOLD) {
-    return props.messages.map((msg) => ({ type: 'normal' as const, items: [msg] }))
-  }
-
   const groups: MessageGroup[] = []
   const len = props.messages.length
   let i = 0
@@ -101,34 +95,15 @@ const groupedMessages = computed<MessageGroup[]>(() => {
   return groups
 })
 
-// ─── 虚拟滚动 ───
-const virtualRange = computed(() => {
-  const total = props.messages.length
-  if (total <= VIRTUAL_THRESHOLD) return { start: 0, end: total, totalHeight: 0, offsetTop: 0 }
-  const start = Math.max(0, Math.floor(scrollTop.value / ESTIMATED_ITEM_HEIGHT) - BUFFER)
-  const end = Math.min(total, Math.ceil((scrollTop.value + containerHeight.value) / ESTIMATED_ITEM_HEIGHT) + BUFFER)
-  return { start, end, totalHeight: total * ESTIMATED_ITEM_HEIGHT, offsetTop: start * ESTIMATED_ITEM_HEIGHT }
-})
-
-const visibleMessages = computed(() => {
-  const { start, end } = virtualRange.value
-  return props.messages.slice(start, end)
-})
-const virtualOffset = computed(() => virtualRange.value.offsetTop)
-const virtualTotalHeight = computed(() => virtualRange.value.totalHeight)
-const useVirtual = computed(() => props.messages.length > VIRTUAL_THRESHOLD)
-
 // ─── 自动滚动 ───
 function scrollToBottom(smooth = true): void {
   const container = getScrollContainer()
   if (!container) return
-  container.scrollTo({ top: container.scrollHeight, behavior: smooth ? 'smooth' : 'instant' })
+  container.scrollTo({ top: container.scrollHeight, behavior: smooth ? 'smooth' : 'auto' })
 }
 
 function handleScroll(e: Event): void {
   const el = e.target as HTMLElement
-  scrollTop.value = el.scrollTop
-  containerHeight.value = el.clientHeight
   const nearBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 200
   isNearBottom.value = nearBottom
 }
@@ -145,7 +120,6 @@ onMounted(() => {
   nextTick(() => scrollToBottom(false))
   const container = getScrollContainer()
   if (container) {
-    containerHeight.value = container.clientHeight
     container.addEventListener('scroll', handleScroll, { passive: true })
   }
 })
@@ -274,9 +248,8 @@ const thinkingExpanded = ref(true)  // 默认展开
 
 <template>
   <div class="message-list" ref="listRef">
-    <!-- ═══════════ 非虚拟滚动：分组渲染 ═══════════ -->
-    <template v-if="!useVirtual">
-      <template v-for="(group, gIdx) in groupedMessages" :key="gIdx">
+    <!-- ═══════════ 分组渲染（全量消息，无虚拟滚动） ═══════════ -->
+    <template v-for="(group, gIdx) in groupedMessages" :key="gIdx">
 
         <!-- ── 用户消息：独立右对齐气泡 ── -->
         <template v-if="group.type === 'user'">
@@ -491,22 +464,6 @@ const thinkingExpanded = ref(true)  // 默认展开
         </template>
 
       </template>
-    </template>
-
-    <!-- ═══════════ 虚拟滚动（平坦列表） ═══════════ -->
-    <template v-else>
-      <div class="virtual-spacer" :style="{ height: `${virtualTotalHeight}px` }">
-        <div class="virtual-content" :style="{ transform: `translateY(${virtualOffset}px)` }">
-          <MessageBubble
-            v-for="msg in visibleMessages"
-            :key="msg.id"
-            :message="msg"
-            :is-last="false"
-            :is-streaming="false"
-          />
-        </div>
-      </div>
-    </template>
 
     <!-- ── 空状态 ── -->
     <div v-if="messages.length === 0" class="empty-list">
@@ -680,15 +637,6 @@ const thinkingExpanded = ref(true)  // 默认展开
   margin-bottom: 12px;
   padding: 12px 16px;
   overflow: hidden;
-}
-
-/* ═══════════ 虚拟滚动 ═══════════ */
-.virtual-spacer {
-  position: relative;
-  overflow: hidden;
-}
-.virtual-content {
-  will-change: transform;
 }
 
 /* ═══════════ 空状态 ═══════════ */
