@@ -16,6 +16,7 @@ import ResultTable from '@/components/sql/ResultTable.vue'
 import ErrorCard from '@/components/common/ErrorCard.vue'
 import DiagnosisCard from '@/components/chat/DiagnosisCard.vue'
 import MarkdownRenderer from '@/components/chat/MarkdownRenderer.vue'
+import { useExportFull } from '@/composables/useExportFull'
 
 const props = withDefaults(
   defineProps<{
@@ -36,6 +37,15 @@ const props = withDefaults(
 )
 
 const chatStore = useChatStore()
+
+// ─── 完整结果导出（query-result-export-plan） ───
+const { exporting, error: exportError, exportFullCsv } = useExportFull()
+
+function handleExportFull(): void {
+  const connId = chatStore.currentSession?.connection_id
+  if (!connId || !props.message.exportSql) return
+  exportFullCsv({ sql: props.message.exportSql, connectionId: connId })
+}
 
 /** 判断当前 tool_call 是否正在等待用户审批 */
 const isWaitingApproval = computed(() => {
@@ -235,6 +245,18 @@ const showCursor = computed(() => {
           </summary>
           <div class="tool-result-content">
             <MarkdownRenderer :content="message.content" />
+          </div>
+          <!-- 完整结果导出按钮（query-result-export-plan） -->
+          <div v-if="message.exportSql" class="tool-result-export">
+            <button
+              class="export-full-btn"
+              :disabled="exporting"
+              @click="handleExportFull"
+            >
+              <span v-if="exporting">导出中…</span>
+              <span v-else>📥 导出完整结果<template v-if="message.exportTotalRows">（共 {{ message.exportTotalRows }} 行）</template></span>
+            </button>
+            <span v-if="exportError" class="export-error">{{ exportError }}</span>
           </div>
         </details>
       </template>
@@ -642,5 +664,39 @@ const showCursor = computed(() => {
 
 .message-bubble.in-card .reasoning-text {
   padding: 0;
+}
+
+/* ═══════════ tool_result 导出按钮 ═══════════ */
+.tool-result-export {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 8px 0 2px;
+}
+
+.export-full-btn {
+  font-size: 12px;
+  padding: 4px 12px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--accent-teal);
+  color: var(--accent-teal);
+  background: transparent;
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.export-full-btn:hover:not(:disabled) {
+  background: var(--accent-teal);
+  color: var(--bg-surface);
+}
+
+.export-full-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.export-error {
+  font-size: 12px;
+  color: var(--color-error);
 }
 </style>
