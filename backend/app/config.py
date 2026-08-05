@@ -156,6 +156,67 @@ class Settings(BaseSettings):
         description="是否启用链路追踪。关闭后 trace_id 仍生成但不强制透传。",
     )
 
+    # ==================== 上下文压缩（context-compression-plan） ====================
+    AGENT_CONTEXT_COMPRESS_ENABLED: bool = Field(
+        default=True,
+        description="是否启用上下文压缩。关闭后 _build_llm_messages 全量发送历史（旧行为）。",
+    )
+    AGENT_COMPACT_TRIGGER_TOKENS: int = Field(
+        default=60_000,
+        ge=4_000,
+        description="懒触发阈值：LLM 输入估算 token 超过该值才启动压缩。"
+        "128K 窗口下约 47% 占用触发，留足当前轮与输出空间；小窗口用户可调低。",
+    )
+    AGENT_KEEP_RECENT_TURNS: int = Field(
+        default=5,
+        ge=0,
+        le=10,
+        description="近 K 轮窗口：最近 K 个已完成轮次逐字保留（追问/未解决需要的数据）。"
+        "0 表示只保留当前轮，全部旧轮进摘要。",
+    )
+    AGENT_IDLE_DECAY_MINUTES: int = Field(
+        default=120,
+        ge=0,
+        description="闲置衰减：新轮距上一轮超过该分钟数时，窗口 K 强制归 0"
+        "（数据已过时 + prompt cache 已过期 + 可重查）。",
+    )
+    AGENT_DIGEST_MAX_TURNS: int = Field(
+        default=20,
+        ge=1,
+        description="摘要最多保留最近 N 轮，最旧轮次丢弃，防止摘要自身膨胀。",
+    )
+    AGENT_DIGEST_MAX_Q_CHARS: int = Field(
+        default=300,
+        ge=20,
+        description="摘要中每轮用户问题的最大字符数（语义锚点，正常问题远小于此，仅兜异常长粘贴）。",
+    )
+    AGENT_DIGEST_MAX_CONCLUSION_CHARS: int = Field(
+        default=800,
+        ge=50,
+        description="摘要中每轮助手最终结论的最大字符数（结论是摘要核心载荷，有界多留）。",
+    )
+    AGENT_DIGEST_MAX_ARG_CHARS: int = Field(
+        default=300,
+        ge=20,
+        description=(
+            "摘要中单个工具参数的最大字符数"
+            "（实测 SQL avg 115 / max 244，正常不截，兜尾部极端查询）。"
+        ),
+    )
+    AGENT_ESTIMATE_CHARS_PER_TOKEN: int = Field(
+        default=3,
+        ge=1,
+        le=6,
+        description="token 估算启发式：每字符折算 token 数（中文约 1-2 字符/token，"
+        "中英混合取 3）。仅用于触发阈值判断，需保守（小值→估高→提前触发）。",
+    )
+    EXPLAIN_MAX_CHARS: int = Field(
+        default=8_000,
+        ge=1_000,
+        description="EXPLAIN 类结果（explain_output / explain_result）截断上限字符数。"
+        "JSON 执行计划高度重复，LLM 只需看节点形状，不需要全部节点。",
+    )
+
     # ==================== 校验 ====================
 
     @field_validator("LLM_API_KEY", "LLM_MODEL", "DATABASE_URL", "JWT_SECRET")

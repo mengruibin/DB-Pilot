@@ -297,10 +297,18 @@ async def _run_one_tool(
         try:
             result = await tool_fn.ainvoke(tool_args)
             # ── 5.5. LLM 上下文窗口保护：截断大结果集 ──
-            if isinstance(result, dict) and "rows" in result:
+            # 兼容无 rows 键的结果（explain_output / items / categories 等）：
+            # explain 类用更小阈值（JSON 计划高度重复，LLM 只需看节点形状），
+            # 其余用默认 40K 上限（context-compression-plan 第二层配套）
+            if isinstance(result, dict):
                 from app.engine.explain_estimator import truncate_result_for_llm
 
-                result = truncate_result_for_llm(result)
+                cap = (
+                    settings.EXPLAIN_MAX_CHARS
+                    if ("explain_output" in result or "explain_result" in result)
+                    else 40_000
+                )
+                result = truncate_result_for_llm(result, max_chars=cap)
         except Exception as exc:
             logger.error(
                 "工具执行异常",

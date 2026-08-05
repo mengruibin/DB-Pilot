@@ -615,6 +615,14 @@ async def _stream_events(
                     "conn_config": conn_config,
                     "run_id": run_id,
                     "trace_iterations": [],
+                    # 一次性/会话态标志：新轮必须重置。上一轮最终回答时 agent_node
+                    # 把 is_complete 置 True 并随 checkpoint 持久化；若不重置，本轮
+                    # agent_node 开头 `if state.get("is_complete")` 会误判"已强制终止"
+                    # 直接 return {} 跳过 LLM 调用 → 第二次提问无回答（2026-08-05 定位）。
+                    # final_answer / consecutive_blocks 同理是跨轮遗留，一并清空。
+                    "is_complete": False,
+                    "final_answer": None,
+                    "consecutive_blocks": 0,
                 }
                 _stream = graph.astream(
                     initial_state,
@@ -634,6 +642,10 @@ async def _stream_events(
             # True  → 确认工具调用迭代，content 保持 thinking 无需变更
             # is_complete 时仍为 False → 最终回答，发送 stage_change("answer") 触发前端收编
             seen_tool_calls = False
+            # 图是否已收尾（agent_node 返回 is_complete）。收尾后不再发射业务事件，
+            # 但必须让 astream 自然消费完，否则提前 break 会取消 graph 剩余执行，
+            # 最终回答的 checkpoint 合并（blob）被丢弃（结论恒（无），见 root cause）。
+            completed = False
             # reasoning_content 累积器：逐 chunk 收集 LLM 深度推理文本，
             # 流结束后统一保存到数据库（持久化思考过程）
             reasoning_content_parts: list[str] = []
@@ -671,6 +683,15 @@ async def _stream_events(
                     _namespace, mode, data = stream_item
                 else:
                     mode, data = stream_item
+
+                # 图已收尾（is_complete）后：不再处理任何流项（token/updates），
+                # 但必须继续消费 astream 直到自然结束，让 LangGraph 完成最终
+                # checkpoint 合并（messages blob）。若这里 break 出 async-for，
+                # 生成器被提前关闭 → graph 剩余执行被取消 → 最终回答只留在
+                # checkpoint_writes 待合并写入、不进 checkpoint_blobs，
+                # 压缩摘要读 checkpoint 状态时旧轮结论恒为（无）。
+                if completed:
+                    continue
 
                 # ── 处理 LLM Token 流（乐观渲染 + 收编） ──
                 if mode == "messages":
@@ -730,7 +751,6 @@ async def _stream_events(
                 # 每个 delta 仅包含该节点返回的字段（增量而非全量）
                 # data 在此分支中为 dict[str, dict]（非 str/tuple）
                 updates: dict[str, dict[str, Any]] = data  # type: ignore[assignment]
-                completed = False
                 for node_name, node_output in updates.items():
                     # 防御：node_output 可能为 None（LangGraph 内部节点如 __start__）
                     if node_output is None:
@@ -818,10 +838,12 @@ async def _stream_events(
                                 }
                             )
                         completed = True
-                        break
+                        # 注意：这里只 break 内层 for node_name 循环；
+                        # 不再 break 外层 async-for（见顶部 completed 守卫），
+                        # 让 astream 自然消费完以完成最终 checkpoint 合并。
 
-                if completed:
-                    break
+                # 收尾后不再 break 外层循环；顶部 `if completed: continue`
+                # 静默消费剩余流，直至 graph 完成最终 checkpoint 写入。
 
             # ========== Step 3b: 中断检测（仅初始请求） ==========
             # 当 confirm_node 调用 interrupt() 后，astream 正常结束，图被暂停。

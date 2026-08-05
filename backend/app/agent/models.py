@@ -122,6 +122,14 @@ def build_chat_model(
     elif provider == "openai":
         _common["temperature"] = 0.0
 
+        # stream_usage=True：langchain-openai 对自定义 base_url 默认关闭流式 usage
+        # （非 OpenAI 端点通常不支持，见 ChatOpenAI.stream_usage 文档）。阿里百炼/
+        # DeepSeek 等兼容端点需显式发送 stream_options={"include_usage": True}，
+        # 才会在流式最后一个 chunk 返回 usage；否则 streaming=True 的 ainvoke
+        # 组装出的响应无 usage_metadata → input_tokens/output_tokens 恒 0，
+        # token 锚定估算（token-estimation-plan）与会话级 token 统计全部失效。
+        _common["stream_usage"] = True
+
         # 启用深度思考模式 → 使用 CustomChatOpenAI 保留 reasoning_content
         # 注：thinking 模式需通过模型名（如 deepseek-reasoner）或 API 端配置开启，
         # model_kwargs 在部分 langchain-openai 版本中不兼容 extra_body 传递

@@ -541,7 +541,7 @@ class TestTruncateResult:
         assert "_truncated" not in truncated
 
     def test_over_row_limit(self) -> None:
-        """500 行截断到 200 行。"""
+        """500 行截断到 _MAX_LLM_RESULT_ROWS（100）行。"""
         result = {
             "columns": ["id"],
             "rows": [{"id": i} for i in range(500)],
@@ -550,8 +550,8 @@ class TestTruncateResult:
         truncated = truncate_result_for_llm(result)
         assert truncated["_truncated"] is True
         assert truncated["_original_total_rows"] == 500
-        assert truncated["_truncated_to"] == 200
-        assert len(truncated["rows"]) == 200
+        assert truncated["_truncated_to"] == 100
+        assert len(truncated["rows"]) == 100
 
     def test_truncation_metadata(self) -> None:
         """截断后包含正确元信息。"""
@@ -576,3 +576,50 @@ class TestTruncateResult:
         assert truncate_result_for_llm("string") == "string"  # type: ignore[arg-type]
         assert truncate_result_for_llm(None) is None  # type: ignore[arg-type]
         assert truncate_result_for_llm([]) == []  # type: ignore[arg-type]
+
+
+class TestTruncateGenericResult:
+    """无 rows 键结果的通用体积截断（context-compression-plan 第二层配套）。"""
+
+    def test_small_non_rows_result_unchanged(self) -> None:
+        """小体积非 rows 结果原样返回，无标记。"""
+        result = {"status": "pass", "summary": "无锁等待", "total_waiting": 0}
+        assert truncate_result_for_llm(result) is result
+
+    def test_empty_rows_unchanged(self) -> None:
+        """rows 为空的结果原样返回（不误触通用截断打标记）。"""
+        result = {"columns": ["id"], "rows": [], "total_rows": 0}
+        assert truncate_result_for_llm(result) is result
+
+    def test_huge_explain_output_truncated(self) -> None:
+        """巨型 explain_output 截到指定阈值并带 _truncated 标记。"""
+        result = {"explain_output": "x" * 200_000, "format": "json", "summary": "s"}
+        truncated = truncate_result_for_llm(result, max_chars=8_000)
+        import json
+
+        serialized = json.dumps(truncated, ensure_ascii=False)
+        assert truncated["_truncated"] is True
+        assert truncated["_truncated_to_chars"] == 8_000
+        assert len(serialized) <= 8_000 + 500, f"截断后应接近阈值，实际 {len(serialized)}"
+
+    def test_large_items_list_reduced(self) -> None:
+        """超限 items 列表按半数递减（get_slow_queries include_explain 场景）。"""
+        items = [
+            {"sql_text": "SELECT " + "x" * 1_200, "query_time_sec": i} for i in range(50)
+        ]
+        result = {"items": items, "total": len(items)}
+        truncated = truncate_result_for_llm(result, max_chars=40_000)
+        assert truncated["_truncated"] is True
+        assert len(truncated["items"]) < len(items), "items 应被缩减"
+        assert truncated["items"][0]["sql_text"] == items[0]["sql_text"], "剩余条目内容完整"
+
+    def test_rows_behavior_unchanged_with_custom_max_chars(self) -> None:
+        """rows 结果沿用原逻辑，max_chars 参数化后仍截断。"""
+        result = {
+            "columns": ["id"],
+            "rows": [{"id": i} for i in range(300)],
+            "total_rows": 300,
+        }
+        truncated = truncate_result_for_llm(result, max_chars=40_000)
+        assert truncated["_truncated"] is True
+        assert len(truncated["rows"]) == 100

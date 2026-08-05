@@ -73,6 +73,12 @@ class AgentState(TypedDict, total=False):
         # ── 防改写死循环 ──
         consecutive_blocks: 连续被 RowEstimationCheck 拦截的次数。
             safe_tools_node 中递增，本轮无 RE 拦截时重置为 0。
+
+        # ── 上下文压缩（context-compression-plan） ──
+        history_digest: 当前轮之前的历史摘要（抽取式文本，纯函数 _build_history_digest 生成）。
+        digest_upto_msg_id: 摘要覆盖的最后一条历史消息 id（增量失效判断：id 变化才重算）。
+        context_window_k: 本轮生效的近轮窗口 K（新轮开始时决定，闲置衰减可能为 0）。
+        last_turn_at: 上一轮首次 LLM 决策的时间戳（time.time()，用于闲置衰减判断）。
     """
     # ── 标准 LangGraph 消息 ──
     messages: Annotated[list[Any], add_messages]
@@ -102,3 +108,9 @@ class AgentState(TypedDict, total=False):
 
     # ── 防改写死循环 ──
     consecutive_blocks: int  # 连续被 RowEstimationCheck 拦截的次数，safe_tools_node 递增，无拦截/切换工具时重置为 0
+
+    # ── 上下文压缩（context-compression-plan） ──
+    history_digest: str | None  # 当前轮之前的历史摘要（抽取式文本）
+    digest_upto_msg_id: str | None  # 摘要覆盖的最后一条历史消息 id（增量失效判断）
+    context_window_k: int  # 本轮生效的近轮窗口 K（新轮开始时决定，闲置衰减可能为 0）
+    last_turn_at: float | None  # 上一轮首次 LLM 决策的时间戳（闲置衰减判断）

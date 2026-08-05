@@ -898,33 +898,49 @@ _MAX_LLM_RESULT_ROWS = 100
 _MAX_LLM_RESULT_CHARS = 40_000
 
 
-def truncate_result_for_llm(result: dict) -> dict:
-    """截断查询结果，防止 LLM 上下文窗口溢出。
+def truncate_result_for_llm(
+    result: dict,
+    max_chars: int | None = None,
+) -> dict:
+    """截断工具结果，防止 LLM 上下文窗口溢出（兼容有/无 rows 键的结果）。
 
     在 tool_node.py 的 _run_one_tool 中，工具执行成功后、构造 ToolMessage 前调用。
     截断时补充元信息告知 LLM 数据已被截断。
 
+    - rows 列表结果：沿用原逻辑（行数上限 + 序列化体积上限，阈值取 max_chars）
+    - 无 rows 键结果（explain_output / items / categories 等）：迭代削减最大的
+      list 字段（半数递减）；仍超限则对最大的字符串字段切片。
+    - 正常小结果原样返回（不附加任何标记）。
+
     Args:
         result: 工具执行结果 dict（含 columns / rows / total_rows 等字段）。
+        max_chars: 序列化体积上限。None 时使用默认 _MAX_LLM_RESULT_CHARS（40K）；
+            调用方（tool_node）对 explain 类结果传入更小阈值（settings.EXPLAIN_MAX_CHARS）。
 
     Returns:
         截断后的 result dict（如果不需要截断则原样返回）。
     """
+    if max_chars is None:
+        max_chars = _MAX_LLM_RESULT_CHARS
     if not isinstance(result, dict):
         return result
 
     rows = result.get("rows", [])
-    if not isinstance(rows, list) or not rows:
-        return result
+    if isinstance(rows, list) and rows:
+        return _truncate_rows_result(result, rows, max_chars)
+    return _truncate_generic_result(result, max_chars)
+
+
+def _truncate_rows_result(result: dict, rows: list, max_chars: int) -> dict:
+    """截断 rows 结果（原 truncate_result_for_llm 逻辑，体积阈值参数化）。"""
+    import json
 
     total_rows = result.get("total_rows", len(rows))
 
     # 行数在允许范围内 → 检查字符数
     if total_rows <= _MAX_LLM_RESULT_ROWS:
-        import json
-
         body = json.dumps(result, ensure_ascii=False, default=str)
-        if len(body) <= _MAX_LLM_RESULT_CHARS:
+        if len(body) <= max_chars:
             return result
         # 字符数超额，降级到截断逻辑
 
@@ -936,11 +952,51 @@ def truncate_result_for_llm(result: dict) -> dict:
     truncated["_truncated_to"] = _MAX_LLM_RESULT_ROWS
 
     # 如果序列化后仍过大，逐次减半直到收束
-    import json
-
     serialized = json.dumps(truncated, ensure_ascii=False, default=str)
-    while len(serialized) > _MAX_LLM_RESULT_CHARS and len(truncated["rows"]) > 10:
+    while len(serialized) > max_chars and len(truncated["rows"]) > 10:
         truncated["rows"] = truncated["rows"][: max(10, len(truncated["rows"]) // 2)]
         serialized = json.dumps(truncated, ensure_ascii=False, default=str)
 
     return truncated
+
+
+def _truncate_generic_result(result: dict, max_chars: int) -> dict:
+    """截断无 rows 键的结果：迭代削减最大 list / 字符串字段，直到体积达标。
+
+    体积未超限的小结果（如 rows 为空的查询结果）原样返回，不附加任何标记。
+    仅在序列化体积确实超过 max_chars 时才进入削减循环。
+    """
+    import json
+
+    if len(json.dumps(result, ensure_ascii=False, default=str)) <= max_chars:
+        return result
+
+    truncated: dict = dict(result)
+    while True:
+        serialized = json.dumps(truncated, ensure_ascii=False, default=str)
+        if len(serialized) <= max_chars:
+            truncated["_truncated"] = True
+            truncated["_truncated_to_chars"] = max_chars
+            return truncated
+        # 1) 缩减最大的 list 字段（items / categories / held_locks 等）
+        best_key, best_len = None, 0
+        for k_, v_ in truncated.items():
+            if isinstance(v_, list) and len(v_) > best_len:
+                best_key, best_len = k_, len(v_)
+        if best_key is not None and best_len > 1:
+            truncated[best_key] = truncated[best_key][: max(1, best_len // 2)]
+            continue
+        # 2) 缩减最大的字符串字段（如 explain_output）
+        # 注意：必须按半递减而非切片到 max_chars，否则序列化含其他字段仍可能略超限，
+        # 切片后长度不变会导致死循环（踩坑记录见 context-compression-plan §7）。
+        best_key, best_str = None, ""
+        for k_, v_ in truncated.items():
+            if isinstance(v_, str) and len(v_) > len(best_str):
+                best_key, best_str = k_, v_
+        if best_key is not None and len(best_str) > 100:
+            truncated[best_key] = best_str[: max(100, len(best_str) // 2)]
+            continue
+        # 3) 兜底：所有字段已最小仍超限，直接返回当前结果
+        truncated["_truncated"] = True
+        truncated["_truncated_to_chars"] = max_chars
+        return truncated
