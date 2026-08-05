@@ -228,43 +228,41 @@ const showCursor = computed(() => {
         </div>
       </template>
 
-      <!-- === tool_result（工具返回结果，折叠块 + 右侧导出按钮） === -->
+      <!-- === tool_result（工具返回结果，折叠块；导出按钮与摘要同一行） === -->
       <template v-if="message.type === 'tool_result'">
-        <div class="tool-result-row">
-          <details class="tool-result-block" @toggle="toolResultExpanded = ($event.target as HTMLDetailsElement).open">
-            <summary class="tool-result-summary">
-              <svg class="tool-result-chevron" :class="{ open: toolResultExpanded }" width="12" height="12" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
-                <path d="M6 4L10 8L6 12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
-              </svg>
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="tool-result-icon">
-                <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>
-                <line x1="3" y1="9" x2="21" y2="9"/>
-                <line x1="9" y1="21" x2="9" y2="9"/>
-              </svg>
-              <span class="tool-result-label">工具返回结果</span>
-              <span v-if="message.durationMs !== undefined" class="tool-result-duration">{{ formatDuration(message.durationMs) }}</span>
-            </summary>
-            <div class="tool-result-content">
-              <MarkdownRenderer :content="message.content" />
-            </div>
-          </details>
-          <!-- 导出 CSV 按钮（折叠块右侧，query-result-export-plan） -->
-          <button
-            v-if="message.exportSql"
-            class="export-csv-btn"
-            :disabled="exporting"
-            :title="message.exportTotalRows ? `共 ${message.exportTotalRows} 行` : '导出完整查询结果为 CSV'"
-            @click="handleExportFull"
-          >
-            <!-- download 图标 -->
-            <svg class="export-csv-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
-              <polyline points="7 10 12 15 17 10"/>
-              <line x1="12" y1="15" x2="12" y2="3"/>
+        <details class="tool-result-block" @toggle="toolResultExpanded = ($event.target as HTMLDetailsElement).open">
+          <summary class="tool-result-summary">
+            <svg class="tool-result-chevron" :class="{ open: toolResultExpanded }" width="12" height="12" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <path d="M6 4L10 8L6 12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
             </svg>
-            <span>{{ exporting ? '导出中…' : '导出 CSV' }}</span>
-          </button>
-        </div>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="tool-result-icon">
+              <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>
+              <line x1="3" y1="9" x2="21" y2="9"/>
+              <line x1="9" y1="21" x2="9" y2="9"/>
+            </svg>
+            <span class="tool-result-label">工具返回结果</span>
+            <span v-if="message.durationMs !== undefined" class="tool-result-duration">{{ formatDuration(message.durationMs) }}</span>
+            <!-- 导出 CSV 按钮：与摘要同一行右侧对齐，不影响下方内容宽度（query-result-export-plan） -->
+            <button
+              v-if="message.exportSql"
+              class="export-csv-btn"
+              :disabled="exporting"
+              :title="message.exportTotalRows ? `共 ${message.exportTotalRows} 行` : '导出完整查询结果为 CSV'"
+              @click.stop="handleExportFull"
+            >
+              <!-- download 图标 -->
+              <svg class="export-csv-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                <polyline points="7 10 12 15 17 10"/>
+                <line x1="12" y1="15" x2="12" y2="3"/>
+              </svg>
+              <span>{{ exporting ? '导出中…' : '导出 CSV' }}</span>
+            </button>
+          </summary>
+          <div class="tool-result-content">
+            <MarkdownRenderer :content="message.content" />
+          </div>
+        </details>
         <span v-if="exportError" class="export-error">{{ exportError }}</span>
       </template>
 
@@ -673,27 +671,14 @@ const showCursor = computed(() => {
   padding: 0;
 }
 
-/* ═══════════ tool_result 导出按钮（折叠块右侧） ═══════════ */
-.tool-result-row {
-  display: flex;
-  align-items: flex-start;
-  gap: 10px;
-  margin: 6px 0;
-}
-
-.tool-result-row .tool-result-block {
-  flex: 1;
-  min-width: 0;
-  margin: 0; /* 行内间距由 .tool-result-row 统一控制 */
-}
-
-/* 导出 CSV 按钮：紧凑、不突兀。深色主题深灰边框 / 浅色主题白底灰边 */
+/* ═══════════ tool_result 导出按钮（摘要行右侧） ═══════════ */
+/* 按钮位于 tool-result-summary 内同一行，不占 tool-result-content 宽度 */
 .export-csv-btn {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  margin-top: 4px;
-  padding: 3px 10px;
+  margin-left: auto;                     /* 推到摘要行最右侧 */
+  padding: 2px 10px;
   font-size: 12px;
   line-height: 1.4;
   color: var(--text-secondary);
