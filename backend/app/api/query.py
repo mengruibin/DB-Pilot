@@ -12,19 +12,27 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import time
 from typing import Any
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.dependencies import get_current_user, verify_resource_ownership
+from app.config import settings
 from app.database import get_session
 from app.db.factory import AdapterFactory
+from app.engine.csv_exporter import iter_csv_rows, with_first_batch_timeout
+from app.engine.explain_estimator import extract_metrics
+from app.engine.sql_auditor import audit
 from app.models.connection import ConnectionConfigModel
 from app.models.schemas import (
     ConnectionCreateRequest,
+    ExportRequest,
     QueryRequest,
     SlowQueryListResponse,
 )
@@ -105,7 +113,7 @@ async def execute_query(
     connection_id: str,
     body: QueryRequest,
     session: AsyncSession = Depends(get_session),  # noqa: B008
-    current_user: UserModel = Depends(get_current_user),
+    current_user: UserModel = Depends(get_current_user),  # noqa: B008
 ) -> dict[str, Any]:
     """执行只读 SQL 查询（直接模式）。
 
@@ -208,6 +216,145 @@ async def execute_query(
 
 
 # =============================================================================
+# POST /api/connections/{id}/export — 导出只读查询结果为 CSV（流式）
+# =============================================================================
+
+
+@router.post("/{connection_id}/export")
+async def export_query_result(
+    connection_id: str,
+    body: ExportRequest,
+    session: AsyncSession = Depends(get_session),  # noqa: B008
+    current_user: UserModel = Depends(get_current_user),  # noqa: B008
+) -> StreamingResponse:
+    """导出只读 SQL 查询结果为 CSV（流式，query-result-export-plan）。
+
+    安全护栏（三道闸门）：
+      1. SQL 审计（audit()，拦截返回 400）
+      2. 只读校验（is_readonly，写 SQL 返回 400）
+      3. 行数硬上限（EXPORT_MAX_ROWS，超出截断 + 标注）
+    另：EXPLAIN 预估仅做信息性日志，不阻断（超限降级截断）。
+
+    Args:
+        connection_id: 连接 ID。
+        body: ExportRequest 请求体。
+
+    Returns:
+        StreamingResponse：text/csv，attachment 下载。
+    """
+    # AC-6：入口日志
+    logger.info("API 请求开始", endpoint="export",
+                connection_id=connection_id, sql_length=len(body.sql))
+
+    adapter, config = await _load_and_create_adapter(
+        connection_id,
+        body.password,
+        session,
+        current_user=current_user,
+    )
+
+    # ── ① SQL 审计 ──
+    audit_result = audit(body.sql, db_type=config.db_type, user_role=current_user.role)
+    if not audit_result.passed:
+        violation = audit_result.violations[0]
+        logger.warning("SQL审计拦截", endpoint="export",
+                       connection_id=connection_id,
+                       violation_type=violation.type)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "error_code": "SQL_AUDIT_BLOCKED",
+                "user_message": violation.message,
+                "severity": "warning",
+            },
+        )
+
+    # ── ② 只读校验 ──
+    if not audit_result.is_readonly:
+        logger.warning("导出非只读语句被拒", endpoint="export",
+                       connection_id=connection_id)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "error_code": "EXPORT_NOT_READONLY",
+                "user_message": "仅支持导出只读查询结果（SELECT / SHOW / WITH）",
+                "severity": "warning",
+            },
+        )
+
+    # ── v1 仅 MySQL ──
+    if config.db_type != "mysql":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "error_code": "EXPORT_NOT_SUPPORTED",
+                "user_message": "导出功能暂不支持该数据库类型（v1 仅 MySQL）",
+                "severity": "warning",
+            },
+        )
+
+    # ── 连接目标数据库（失败返回 502，与直查端点一致） ──
+    try:
+        await adapter.connect(config)
+    except Exception as exc:
+        logger.warning("导出连接失败", endpoint="export",
+                       connection_id=connection_id, error=str(exc)[:200])
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail={
+                "error_code": "DB_UNREACHABLE",
+                "user_message": f"数据库连接失败：{exc}",
+            },
+        ) from exc
+
+    # ── ③ EXPLAIN 预估（信息性，不阻断，超限降级截断） ──
+    try:
+        explain_raw = (await adapter.explain(body.sql)).get("explain_output", "")
+        metrics = extract_metrics(explain_raw, db_type="mysql")
+        if metrics:
+            logger.info(
+                "导出 EXPLAIN 预估",
+                endpoint="export",
+                connection_id=connection_id,
+                estimated_scan=metrics.estimated_rows_examined,
+            )
+    except Exception as exc:
+        logger.warning("导出 EXPLAIN 失败（降级放行）",
+                       endpoint="export", connection_id=connection_id,
+                       error=str(exc)[:200])
+
+    # ── 行数上限（只允许缩小，封顶 EXPORT_MAX_ROWS） ──
+    max_rows = min(body.max_rows or settings.EXPORT_MAX_ROWS, settings.EXPORT_MAX_ROWS)
+
+    # ── ④ 游标流式拉取 + 首批超时 → CSV 行流 ──
+    rows_stream = adapter.stream_query(
+        body.sql, batch_size=settings.EXPORT_BATCH_SIZE
+    )
+    rows_stream = with_first_batch_timeout(
+        rows_stream, body.max_execution_ms / 1000
+    )
+
+    async def _stream():
+        try:
+            async for line in iter_csv_rows(rows_stream, max_rows):
+                yield line.encode("utf-8")
+        finally:
+            # 确保流结束/中断时释放连接池连接
+            with contextlib.suppress(Exception):
+                await adapter.disconnect()
+
+    filename = f"export_{int(time.time())}.csv"
+    logger.info("API 请求完成", endpoint="export",
+                connection_id=connection_id,
+                max_rows=max_rows)
+    return StreamingResponse(
+        _stream(),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+# =============================================================================
 # GET /api/connections/{id}/slow-queries — 获取慢查询列表（分页）
 # =============================================================================
 
@@ -225,7 +372,7 @@ async def list_slow_queries(
     ),
     password: str | None = Query(default=None, description="连接密码"),
     session: AsyncSession = Depends(get_session),  # noqa: B008
-    current_user: UserModel = Depends(get_current_user),
+    current_user: UserModel = Depends(get_current_user),  # noqa: B008
 ) -> SlowQueryListResponse:
     """获取慢查询列表（分页）。
 

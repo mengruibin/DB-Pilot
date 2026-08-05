@@ -399,6 +399,36 @@ class QueryRequest(BaseModel):
     )
 
 
+class ExportRequest(BaseModel):
+    """查询结果导出请求体（query-result-export-plan §4.3）。
+
+    导出时重新执行 SQL，游标流式生成 CSV。密码由前端内存持有，每次请求传入。
+    """
+
+    sql: str = Field(
+        ...,
+        min_length=1,
+        max_length=65535,
+        description="要导出的只读 SQL 语句（SELECT/SHOW/WITH）",
+        examples=["SELECT * FROM orders WHERE status='pending'"],
+    )
+    password: str | None = Field(
+        default=None,
+        description="连接密码。仅存于内存，不落盘（AGENTS.md §安全红线）。",
+    )
+    max_rows: int | None = Field(
+        default=None,
+        ge=1,
+        description="单次导出行数上限。默认 EXPORT_MAX_ROWS，传入值只允许缩小（端点内封顶）。",
+    )
+    max_execution_ms: int = Field(
+        default=30000,
+        ge=1000,
+        le=120000,
+        description="查询执行最大时长（毫秒），超时按首批拉取超时处理。",
+    )
+
+
 class SlowQueryItem(BaseModel):
     """慢查询记录项（api-contract §2.4 SlowQuery）。"""
 
@@ -594,7 +624,7 @@ class LoginResponse(BaseModel):
 
     access_token: str = Field(..., description="JWT 访问令牌")
     token_type: str = Field(default="bearer", description="令牌类型")
-    user: "UserResponse"  # 前向引用，使用 model_rebuild() 解析
+    user: UserResponse  # 前向引用，使用 model_rebuild() 解析
 
 
 class UserCreateRequest(BaseModel):
