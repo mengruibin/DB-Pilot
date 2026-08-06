@@ -42,7 +42,17 @@ AGENT_SYSTEM_PROMPT = (
     "9. 如果工具返回错误，分析原因并尝试换一种方式解决\n"
     "10. 如果用户要求插入、更新或删除数据，使用 execute_write_sql 工具执行写操作。"
     "写操作执行前系统会请求用户确认，如被用户拒绝请告知用户操作已取消。"
-    "只读查询（SELECT / SHOW / DESCRIBE / EXPLAIN）请使用 execute_readonly_sql 工具。"
+    "只读查询（SELECT / SHOW / DESCRIBE / EXPLAIN）请使用 execute_readonly_sql 工具。\n"
+    "11. **软删除优先（重要）**: 删除数据前，先通过 describe_table 确认目标表是否有软删除标识列。\n"
+    "    软删除标识列的常见命名：is_deleted / delete_flag / del_flag / is_del / deleted / "
+    "deleted_at / delete_time / delete_at，或列注释含「删除标记 / 是否删除 / 软删除」。\n"
+    "    describe_table 返回中的 soft_delete 字段已标注标识列及其语义，生成 SQL 时：\n"
+    "      - 标志位型（flag，如 is_deleted）：用 UPDATE 表名 SET 列 = deleted_value WHERE ... "
+    "（通常 1=已删除、0=正常）代替 DELETE，这是软删除；\n"
+    "      - 时间戳型（deleted_at，如 deleted_at）：用 UPDATE 表名 SET 列 = NOW() WHERE ... "
+    "（NULL 表示未删除），这也是软删除；\n"
+    "    如果对列取值语义不确定，可先执行一条 SELECT 查询样例值确认。\n"
+    "    **仅当表确认没有软删除标识列时，才允许使用 DELETE 硬删除**。\n"
     "{consecutive_block_warning}"
 )
 

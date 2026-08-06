@@ -21,6 +21,7 @@ from langchain_core.tools import InjectedToolArg, tool
 
 from app.db.factory import AdapterFactory
 from app.engine.data_masking import mask_query_result
+from app.engine.soft_delete import detect_soft_delete_columns
 from app.engine.sql_error_parser import parse_db_error
 from app.models.schemas import ConnectionCreateRequest
 
@@ -209,6 +210,13 @@ async def describe_table(
                             "type": str           // 索引类型（如 "BTREE", "HASH"）
                         }
                     ],
+                    "soft_delete": {              // 可选：检测到软删除标识列时出现
+                        "column": str,            //   标识列名（如 "is_deleted"）
+                        "kind": str,              //   "flag"=标志位 | "deleted_at"=时间戳
+                        "deleted_value": int,     //   flag 型已删除取值；deleted_at 型为 null
+                        "active_value": int,      //   flag 型正常取值；deleted_at 型为 null
+                        "note": str               //   命中依据（列名/注释）
+                    },
                     "summary": str
                 }
             ],
@@ -247,14 +255,30 @@ async def describe_table(
             try:
                 columns = await adapter.get_columns(database, tbl)
                 indexes = await adapter.get_indexes(database, tbl)
-                tables_data.append(
-                    {
-                        "table_name": tbl,
-                        "columns": columns,
-                        "indexes": indexes,
-                        "summary": f"{tbl}：{len(columns)} 列, {len(indexes)} 个索引",
+                summary = f"{tbl}：{len(columns)} 列, {len(indexes)} 个索引"
+
+                # 软删除标识列检测（soft-delete-plan）：命中时标注 soft_delete 字段，
+                # 让 Agent 删除数据时生成软删除 UPDATE 而非硬 DELETE
+                table_entry: dict[str, Any] = {
+                    "table_name": tbl,
+                    "columns": columns,
+                    "indexes": indexes,
+                    "summary": summary,
+                }
+                soft_delete_list = detect_soft_delete_columns(columns)
+                if soft_delete_list:
+                    sd = soft_delete_list[0]
+                    table_entry["soft_delete"] = {
+                        "column": sd.column,
+                        "kind": sd.kind,
+                        "deleted_value": sd.deleted_value,
+                        "active_value": sd.active_value,
+                        "note": sd.reason,
                     }
-                )
+                    table_entry["summary"] = (
+                        f"{summary} | ⚠️ 检测到软删除标识列 {sd.column}（{sd.reason}）"
+                    )
+                tables_data.append(table_entry)
             except Exception as tbl_exc:
                 # 单表失败已隔离，不影响其他表继续查询
                 logger.warning(
