@@ -74,6 +74,38 @@ def _is_dangerous(sql: str) -> bool:
     )
 
 
+def _extract_tokens_used(events: list[dict]) -> int:
+    """从 done 事件提取整条用例的端到端 token 消耗。
+
+    后端在 done 事件携带 tokens_used（所有迭代 input_tokens + output_tokens 之和，
+    由 chat.py 从 trace_iterations 汇总），覆盖 Agent 运行期间全部 LLM 调用。
+    """
+    for ev in events:
+        if ev.get("type") == "done":
+            return ev.get("tokens_used", 0) or 0
+    return 0
+
+
+def _count_final_answer_chars(events: list[dict]) -> int:
+    """统计 LLM 最终回答的字符数。
+
+    规则：最后一次 tool_call 事件之后的所有 token 事件 content 拼接长度。
+    收尾迭代必然无工具调用，因此该边界能准确切出最终回答；
+    无工具调用的用例（直接回答/拒答）则取全部 token 事件 content。
+    """
+    last_tool_call_idx = -1
+    for idx, ev in enumerate(events):
+        if ev.get("type") == "tool_call":
+            last_tool_call_idx = idx
+
+    start = last_tool_call_idx + 1
+    return sum(
+        len(str(ev.get("content", "") or ""))
+        for ev in events[start:]
+        if ev.get("type") == "token"
+    )
+
+
 def _serialize_value(val: Any) -> Any:
     """将数据库返回值转为 JSON 可序列化类型。"""
     if val is None:
@@ -179,6 +211,8 @@ class EvalCaseResult:
     result_match: bool | None = None
     execution_time_ms: int = 0
     agent_iterations: int = 0
+    tokens_used: int = 0  # 端到端 token 消耗（done 事件汇总）
+    final_answer_chars: int = 0  # LLM 最终回答字符数
     error_message: str | None = None
     evidence: str = ""
 
@@ -196,6 +230,8 @@ class EvalCaseResult:
             "result_match": self.result_match,
             "execution_time_ms": self.execution_time_ms,
             "agent_iterations": self.agent_iterations,
+            "tokens_used": self.tokens_used,
+            "final_answer_chars": self.final_answer_chars,
             "error_message": self.error_message,
             "evidence": self.evidence,
         }
@@ -536,17 +572,21 @@ class EvaluatorEngine:
 
         elapsed = int((time.monotonic() - t_start) * 1000)
 
-        # Step 2: 提取 Agent 迭代数
+        # Step 2: 提取 Agent 迭代数 + 端到端 token 消耗 + 最终回答字符数
         agent_iterations = 0
         for ev in events:
             if ev.get("type") == "done":
                 agent_iterations = ev.get("total_iterations", 0)
                 break
 
+        tokens_used = _extract_tokens_used(events)
+        final_answer_chars = _count_final_answer_chars(events)
+
         # Step 3: 是否为安全用例？
         if category == "拒答/安全":
             return self._evaluate_safety_case(
-                case, events, elapsed, agent_iterations
+                case, events, elapsed, agent_iterations,
+                tokens_used=tokens_used, final_answer_chars=final_answer_chars,
             )
 
         # Step 4: 提取 SQL
@@ -556,6 +596,7 @@ class EvaluatorEngine:
                 case_id=case_id, category=category, question=question,
                 golden_sql=golden_sql, status="fail",
                 execution_time_ms=elapsed, agent_iterations=agent_iterations,
+                tokens_used=tokens_used, final_answer_chars=final_answer_chars,
                 evidence="Agent 未生成 SQL",
             )
 
@@ -576,6 +617,8 @@ class EvaluatorEngine:
             result_match=match,
             execution_time_ms=elapsed,
             agent_iterations=agent_iterations,
+            tokens_used=tokens_used,
+            final_answer_chars=final_answer_chars,
             error_message=error_msg,
             evidence=(
                 "SQL 精确匹配" if sql_exact
@@ -820,6 +863,7 @@ class EvaluatorEngine:
     def _evaluate_safety_case(
         self, case: dict, events: list[dict],
         elapsed_ms: int, iterations: int,
+        tokens_used: int = 0, final_answer_chars: int = 0,
     ) -> EvalCaseResult:
         """评估安全用例：Agent 是否正确拒答。"""
         case_id = case.get("id", "")
@@ -863,6 +907,8 @@ class EvaluatorEngine:
                 sql_exact_match=None,
                 execution_time_ms=elapsed_ms,
                 agent_iterations=iterations,
+                tokens_used=tokens_used,
+                final_answer_chars=final_answer_chars,
                 evidence="; ".join(evidence_parts) if evidence_parts else "Agent 正确拒答",
             )
         else:
@@ -874,6 +920,8 @@ class EvaluatorEngine:
                 sql_exact_match=None,
                 execution_time_ms=elapsed_ms,
                 agent_iterations=iterations,
+                tokens_used=tokens_used,
+                final_answer_chars=final_answer_chars,
                 evidence=f"Agent 未拒答，生成了 SQL: {agent_sql[:100] if agent_sql else 'N/A'}",
             )
 
@@ -918,6 +966,17 @@ class ReportGenerator:
         sorted_times = sorted(times)
         median_time = sorted_times[len(sorted_times) // 2] if sorted_times else 0
 
+        # token 消耗与最终回答字符统计
+        tokens_list = [r.tokens_used for r in self._results if r.tokens_used > 0]
+        total_tokens = sum(tokens_list)
+        avg_tokens = total_tokens // len(tokens_list) if tokens_list else 0
+        answer_chars_list = [
+            r.final_answer_chars for r in self._results if r.final_answer_chars > 0
+        ]
+        avg_answer_chars = (
+            sum(answer_chars_list) // len(answer_chars_list) if answer_chars_list else 0
+        )
+
         # 分类统计
         per_category: dict[str, dict] = {}
         for r in self._results:
@@ -946,6 +1005,9 @@ class ReportGenerator:
             "avg_execution_time_ms": avg_time,
             "median_execution_time_ms": median_time,
             "total_duration_ms": self._total_duration_ms,
+            "total_tokens_used": total_tokens,
+            "avg_tokens_per_case": avg_tokens,
+            "avg_final_answer_chars": avg_answer_chars,
             "per_category": per_category,
         }
 
@@ -1077,6 +1139,14 @@ footer {{ text-align:center; color:#999; font-size:0.8rem; margin-top:48px; padd
     <div class="value">{s['avg_execution_time_ms'] // 1000}s</div>
     <div class="label">平均耗时</div>
   </div>
+  <div class="kpi-card info">
+    <div class="value">{s['avg_tokens_per_case']}</div>
+    <div class="label">平均 Token/用例</div>
+  </div>
+  <div class="kpi-card info">
+    <div class="value">{s['avg_final_answer_chars']}</div>
+    <div class="label">平均回答字符</div>
+  </div>
   <div class="kpi-card {'pass' if s.get('refused_wrong', 0) == 0 else 'warn'}">
     <div class="value">{s['refused_correctly']}/{s.get('refused_correctly', 0) + s.get('refused_wrong', 0)}</div>
     <div class="label">安全拒答率</div>
@@ -1160,7 +1230,11 @@ document.querySelectorAll('.detail-row').forEach(row => {{
             }.get(r.status, r.status)
 
             agent_sql = r.agent_sql or "（未提取到 SQL）"
-            detail = ""
+            detail = (
+                f'<div style="color:#666;font-size:0.85rem;margin-bottom:6px;">'
+                f'⚡ Token: {r.tokens_used} &nbsp;|&nbsp; '
+                f'📝 最终回答: {r.final_answer_chars} 字符</div>'
+            )
             if r.agent_sql and r.agent_sql != r.golden_sql:
                 detail = f"""
 <div class="sql-label">🔮 Agent SQL:</div>
@@ -1183,16 +1257,18 @@ document.querySelectorAll('.detail-row').forEach(row => {{
   <td><span class="badge {badge_class}">{status_cn}</span></td>
   <td>{'✅' if r.sql_exact_match else ('—' if r.sql_exact_match is None else '❌')}</td>
   <td>{'✅' if r.result_match else ('—' if r.result_match is None else '❌')}</td>
+  <td>{r.tokens_used}</td>
+  <td>{r.final_answer_chars}</td>
   <td>{r.execution_time_ms // 1000}s</td>
   <td style="font-size:0.85rem;color:#666;">{self._escape_html(r.evidence[:60])}</td>
 </tr>
 <tr class="detail-content" hidden>
-  <td colspan="8">{detail or '（无额外信息）'}</td>
+  <td colspan="10">{detail or '（无额外信息）'}</td>
 </tr>"""
         return f"""<table>
 <thead><tr>
   <th>ID</th><th>类别</th><th>问题</th><th>状态</th>
-  <th>SQL匹配</th><th>结果匹配</th><th>耗时</th><th>说明</th>
+  <th>SQL匹配</th><th>结果匹配</th><th>Token</th><th>回答字符</th><th>耗时</th><th>说明</th>
 </tr></thead>
 <tbody>{rows}</tbody>
 </table>"""
@@ -1379,6 +1455,8 @@ async def main() -> None:
     print(f"  📊 结果匹配率: {s['result_match_rate']}%")
     print(f"  ⏱️  平均耗时: {s['avg_execution_time_ms'] // 1000}s")
     print(f"  ⏱️  总耗时:   {total_duration // 1000}s")
+    print(f"  ⚡ 总 Token: {s['total_tokens_used']} (平均 {s['avg_tokens_per_case']}/用例)")
+    print(f"  📝 平均回答字符: {s['avg_final_answer_chars']}")
     print(f"{'=' * 60}")
     print(f"\n📁 输出文件:")
     print(f"   {json_name}")

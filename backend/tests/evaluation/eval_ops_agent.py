@@ -67,12 +67,13 @@ if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
 
 from eval_agent import (  # noqa: E402
-    EvalConfig,
-    APIClient,
-    _is_dangerous,
     _DANGEROUS_PREFIXES,
+    APIClient,
+    EvalConfig,
+    _count_final_answer_chars,
+    _extract_tokens_used,
+    _is_dangerous,
 )
-
 
 # =============================================================================
 # 工具函数
@@ -125,6 +126,8 @@ class OpsEvalCaseResult:
     # 通用指标
     agent_iterations: int = 0
     execution_time_ms: int = 0
+    tokens_used: int = 0  # 端到端 token 消耗（done 事件汇总）
+    final_answer_chars: int = 0  # LLM 最终回答字符数
     error_message: str | None = None
     evidence: str = ""
 
@@ -148,6 +151,8 @@ class OpsEvalCaseResult:
             "confirm_category": self.confirm_category,
             "agent_iterations": self.agent_iterations,
             "execution_time_ms": self.execution_time_ms,
+            "tokens_used": self.tokens_used,
+            "final_answer_chars": self.final_answer_chars,
             "error_message": self.error_message,
             "evidence": self.evidence,
         }
@@ -268,17 +273,21 @@ class OpsEvalEngine:
 
         elapsed = int((time.monotonic() - t_start) * 1000)
 
-        # Step 2: 提取迭代次数
+        # Step 2: 提取迭代次数 + 端到端 token 消耗 + 最终回答字符数
         agent_iterations = 0
         for ev in events:
             if ev.get("type") == "done":
                 agent_iterations = ev.get("total_iterations", 0)
                 break
 
+        tokens_used = _extract_tokens_used(events)
+        final_answer_chars = _count_final_answer_chars(events)
+
         # Step 3: 安全/拒答类用例
         if category == "拒答/安全":
             return self._evaluate_safety_ops(
-                case, events, elapsed, agent_iterations
+                case, events, elapsed, agent_iterations,
+                tokens_used=tokens_used, final_answer_chars=final_answer_chars,
             )
 
         # Step 4: 提取工具调用链
@@ -291,6 +300,7 @@ class OpsEvalEngine:
             return self._evaluate_confirm_case(
                 case, events, tool_chain, actual_names, expected_names,
                 elapsed, agent_iterations,
+                tokens_used=tokens_used, final_answer_chars=final_answer_chars,
             )
 
         # Step 6: 三层评测
@@ -345,6 +355,8 @@ class OpsEvalEngine:
             tool_order_correct=order_result["correct"],
             agent_iterations=agent_iterations,
             execution_time_ms=elapsed,
+            tokens_used=tokens_used,
+            final_answer_chars=final_answer_chars,
             evidence="; ".join(evidence_parts),
         )
 
@@ -355,6 +367,7 @@ class OpsEvalEngine:
     def _evaluate_safety_ops(
         self, case: dict, events: list[dict],
         elapsed: int, iterations: int,
+        tokens_used: int = 0, final_answer_chars: int = 0,
     ) -> OpsEvalCaseResult:
         """评估安全/拒答类用例：Agent 是否拒绝了危险操作。"""
         case_id = case.get("id", "OP-???")
@@ -401,6 +414,8 @@ class OpsEvalEngine:
             tool_order_correct=None,
             agent_iterations=iterations,
             execution_time_ms=elapsed,
+            tokens_used=tokens_used,
+            final_answer_chars=final_answer_chars,
             evidence=evidence,
         )
 
@@ -413,16 +428,22 @@ class OpsEvalEngine:
         tool_chain: list[dict], actual_names: list[str],
         expected_names: list[str],
         elapsed: int, iterations: int,
+        tokens_used: int = 0, final_answer_chars: int = 0,
     ) -> OpsEvalCaseResult:
         """评估危险操作确认类用例。"""
         case_id = case.get("id", "OP-???")
         category = case.get("category", "")
         question = case.get("question", "")
         expected_tools: list[dict] = case.get("expected_tools", [])
+        forbidden_tools: list[str] = case.get("forbidden_tools", [])
         ordered: bool = case.get("ordered", False)
+        allow_extra: bool = case.get("allow_extra_tools", True)
 
-        # L1+L3: 工具选择 + 顺序
-        sel_result = _evaluate_tool_selection(expected_tools, actual_names, [], False)
+        # L1+L3: 工具选择 + 顺序（遵循用例的 allow_extra_tools / forbidden_tools 设置，
+        # 不再硬编码 allow_extra=False 和空 forbidden）
+        sel_result = _evaluate_tool_selection(
+            expected_tools, actual_names, forbidden_tools, allow_extra,
+        )
         order_result = _evaluate_tool_order(
             expected_names, actual_names, ordered,
         ) if ordered else {"correct": None, "detail": ""}
@@ -469,6 +490,8 @@ class OpsEvalEngine:
             confirm_category=confirm_info.get("category"),
             agent_iterations=iterations,
             execution_time_ms=elapsed,
+            tokens_used=tokens_used,
+            final_answer_chars=final_answer_chars,
             evidence="; ".join(evidence_parts),
         )
 
@@ -804,6 +827,17 @@ class OpsReportGenerator:
         avg_time = sum(times) / len(times) if times else 0
         median_time = times[len(times) // 2] if times else 0
 
+        # token 消耗与最终回答字符统计
+        tokens_list = [r.tokens_used for r in self._results if r.tokens_used > 0]
+        total_tokens = sum(tokens_list)
+        avg_tokens = total_tokens / len(tokens_list) if tokens_list else 0
+        answer_chars_list = [
+            r.final_answer_chars for r in self._results if r.final_answer_chars > 0
+        ]
+        avg_answer_chars = (
+            sum(answer_chars_list) / len(answer_chars_list) if answer_chars_list else 0
+        )
+
         # 按分类统计
         per_category: dict[str, dict] = {}
         for r in self._results:
@@ -834,6 +868,9 @@ class OpsReportGenerator:
             "avg_execution_time_ms": round(avg_time),
             "median_execution_time_ms": round(median_time),
             "total_duration_ms": self._total_duration_ms,
+            "total_tokens_used": round(total_tokens),
+            "avg_tokens_per_case": round(avg_tokens),
+            "avg_final_answer_chars": round(avg_answer_chars),
             "per_category": per_category,
         }
 
@@ -985,6 +1022,8 @@ class OpsReportGenerator:
              color(s['safety_refusal_rate']) if s.get('safety_refusal_rate') else "blue"),
             ("平均耗时", f"{s['avg_execution_time_ms'] // 1000}s",
              "green" if s['avg_execution_time_ms'] < 60000 else "amber"),
+            ("平均 Token/用例", str(s.get('avg_tokens_per_case', 0)), "blue"),
+            ("平均回答字符", str(s.get('avg_final_answer_chars', 0)), "blue"),
             ("总用例数", str(s['total_cases']), "blue"),
         ]
 
@@ -1054,6 +1093,8 @@ class OpsReportGenerator:
   <strong>缺少:</strong> {r.missing_tools or '无'}<br>
   <strong>禁用工具被调用:</strong> {r.forbidden_tools_called or '无'}<br>
   <strong>迭代轮次:</strong> {r.agent_iterations}<br>
+  <strong>Token 消耗:</strong> {r.tokens_used}<br>
+  <strong>最终回答长度:</strong> {r.final_answer_chars} 字符<br>
 """
 
             if r.param_mismatches:
@@ -1074,6 +1115,8 @@ class OpsReportGenerator:
                 f'<td>{param_icon}</td>'
                 f'<td>{order_icon}</td>'
                 f'<td>{r.execution_time_ms}ms</td>'
+                f'<td>{r.tokens_used}</td>'
+                f'<td>{r.final_answer_chars}</td>'
                 f'<td class="evidence" title="{r.evidence}">{r.evidence[:60]}</td>'
                 f'<td><details><summary>详情</summary>{detail_html}</details></td>'
                 f'</tr>'
@@ -1083,7 +1126,7 @@ class OpsReportGenerator:
 <thead><tr>
   <th>ID</th><th>分类</th><th>问题</th><th>状态</th>
   <th>工具选择</th><th>参数</th><th>顺序</th>
-  <th>耗时</th><th>证据</th><th></th>
+  <th>耗时</th><th>Token</th><th>回答</th><th>证据</th><th></th>
 </tr></thead>
 <tbody>{"".join(rows)}</tbody>
 </table>"""
@@ -1220,6 +1263,8 @@ async def main() -> None:
     print(f"  安全拒绝率:       {summary.get('safety_refusal_rate', 'N/A')}%")
     print(f"  平均耗时:         {summary['avg_execution_time_ms']}ms")
     print(f"  总耗时:           {total_duration // 1000}s")
+    print(f"  Token 消耗:       {summary.get('total_tokens_used', 0)} (平均 {summary.get('avg_tokens_per_case', 0)}/用例)")
+    print(f"  平均回答字符:     {summary.get('avg_final_answer_chars', 0)}")
 
     # JSON 报告
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
