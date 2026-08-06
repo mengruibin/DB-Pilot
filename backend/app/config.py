@@ -156,6 +156,24 @@ class Settings(BaseSettings):
         description="是否启用链路追踪。关闭后 trace_id 仍生成但不强制透传。",
     )
 
+    # ==================== LLM 并发限流（llm-concurrency-limit-plan） ====================
+    AGENT_MAX_CONCURRENT_LLM: int = Field(
+        default=5,
+        ge=1,
+        le=20,
+        description="全局 LLM 调用并发上限：同一时刻最多允许的 LLM 请求数（进程级，"
+        "单进程部署下即全局硬上限）。防止并发请求打爆 provider 配额触发 429 限流，"
+        "同时控制 token 成本。全后端唯一的 LLM 调用点（graph.py agent_node 的 ainvoke）"
+        "统一经 LLMLimiter 限流。",
+    )
+    AGENT_LLM_WAIT_TIMEOUT_SECONDS: float = Field(
+        default=30,
+        ge=1,
+        le=600,
+        description="LLM 并发饱和时的排队等待超时（秒）。超限时新请求排队等待并发槽位，"
+        "超过该时间仍未轮到的返回「AI 服务繁忙」友好提示并结束本轮，避免无限挂起。",
+    )
+
     # ==================== 上下文压缩（context-compression-plan） ====================
     AGENT_CONTEXT_COMPRESS_ENABLED: bool = Field(
         default=True,
@@ -175,7 +193,7 @@ class Settings(BaseSettings):
         "0 表示只保留当前轮，全部旧轮进摘要。",
     )
     AGENT_IDLE_DECAY_MINUTES: int = Field(
-        default=120,
+        default=60,
         ge=0,
         description="闲置衰减：新轮距上一轮超过该分钟数时，窗口 K 强制归 0"
         "（数据已过时 + prompt cache 已过期 + 可重查）。",

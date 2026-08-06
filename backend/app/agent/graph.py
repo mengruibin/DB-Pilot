@@ -54,6 +54,7 @@ from psycopg import AsyncConnection
 from psycopg.rows import DictRow, dict_row
 from psycopg_pool import AsyncConnectionPool
 
+from app.agent.llm_limiter import LLMConcurrencyBusyError, llm_limiter
 from app.agent.models import build_chat_model
 from app.agent.state import AgentState
 from app.config import settings
@@ -313,7 +314,47 @@ async def agent_node(state: AgentState) -> dict[str, Any]:
     # 此处尝试标准绑定，失败后降级到无工具绑定模式（纯文本回复）。
     try:
         model_with_tools = model.bind_tools(AGENT_TOOLS)
-        response = await model_with_tools.ainvoke(llm_messages)
+        # 全局 LLM 并发限流（llm-concurrency-limit-plan）：排队等待并发槽位，
+        # 超时抛 LLMConcurrencyBusy → 转为「AI 服务繁忙」友好降级，而非无限挂起。
+        # 全后端唯一 LLM 调用点，此处限流即覆盖全部 LLM 流量。
+        async with llm_limiter.slot():
+            response = await model_with_tools.ainvoke(llm_messages)
+    except LLMConcurrencyBusyError:
+        logger.warning(
+            "LLM 并发饱和，排队超时",
+            run_id=run_id,
+            iteration=iteration,
+            wait_timeout_seconds=llm_limiter.wait_timeout,
+            max_concurrent=llm_limiter.max_concurrent,
+        )
+        sse_events = list(state.get("sse_events", []))
+        sse_events.append(
+            {
+                "type": "error",
+                "error_code": "LLM_BUSY",
+                "user_message": "当前同时处理的任务较多，AI 服务繁忙，请稍后再试",
+                "severity": "warning",
+            }
+        )
+        return {
+            "final_answer": (
+                "当前同时处理的任务较多，AI 服务繁忙。"
+                "请稍等片刻后重新发送消息。"
+            ),
+            "is_complete": True,
+            "trace_iterations": state.get("trace_iterations", [])
+            + [
+                {
+                    "iteration": iteration,
+                    "status": "llm_concurrency_busy",
+                    "wait_timeout_seconds": llm_limiter.wait_timeout,
+                    "max_concurrent": llm_limiter.max_concurrent,
+                    "model": settings.LLM_MODEL,
+                    "provider": settings.LLM_PROVIDER,
+                }
+            ],
+            "sse_events": sse_events,
+        }
     except ValueError as exc:
         error_str = str(exc)
         if "null value for 'choices'" in error_str:

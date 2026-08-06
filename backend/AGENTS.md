@@ -41,6 +41,7 @@ DB-Pilot 是基于 LangGraph StateGraph + FastAPI 构建的**数据库运维 AI 
 - [ ] MUST 默认使用 Anthropic Claude API（依据 PRD §6.1）
 - [ ] SHOULD 架构兼容 OpenAI 格式的模型切换（依据 PRD §10.3）
 - [ ] MUST NOT 在代码中硬编码模型名称；模型名必须从 `config.py` 读取
+- [ ] MUST 所有 LLM 调用统一经 `app.agent.llm_limiter.LLMLimiter` 限流（llm-concurrency-limit-plan）：`graph.py` agent_node 的 `ainvoke` 是全后端唯一 LLM 调用点，用 `slot()` 包裹；新增 LLM 调用点必须同样接入限流，禁止裸调用 provider
 
 ### 禁止项
 
