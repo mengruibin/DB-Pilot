@@ -49,6 +49,10 @@ class AgentState(TypedDict, total=False):
         sse_events: 前端 SSE 事件累积列表。
             图节点写入 type="thinking"/"tool_call"/"tool_result"/"sql"/"result" 等事件。
             API 层从 state["sse_events"] 读取并序列化为 SSE 流。
+            注意（security-pipeline-north-star-plan）：本字段无 reducer（覆盖式）。
+            secure_tools_node 在 interrupt resume 遍只返回"本遍新事件"（截断），
+            否则历史 tool_call 事件被重发、前端重复卡片。首遍 interrupt 前的
+            部分返回值整体丢弃（GraphInterrupt 终止节点，前端从未收到）。
 
         # ── 输入字段（调用方在创建 state 时填充） ──
         user_message: 用户输入的原始消息文本。

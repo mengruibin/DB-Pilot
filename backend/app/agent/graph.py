@@ -4,8 +4,8 @@ Agent StateGraph 定义（2026-07 重构：移除了意图分类节点）。
 基于 LangGraph 构建 ReAct (Reasoning + Acting) Agent 图。
 LLM 自主决定调用哪些工具、以什么顺序调用、何时停止并给出最终回答。
 
-图结构：
-  agent_node → confirm_node → safe_tools_node（ReAct 循环）
+图结构（security-pipeline-north-star-plan 收敛后）：
+  agent_node ↔ secure_tools_node（ReAct 循环，三阶段安全流水线内嵌确认）
         │
         ▼
        END
@@ -24,10 +24,14 @@ LLM 自主决定调用哪些工具、以什么顺序调用、何时停止并给�
   - thinking/result SSE 事件已移除，用户通过 token 通道看到打字机效果
 
 变更说明（2026-07-14）：
-  移除了旧版 TODO 注释（interrupt() 占位），正式实现写操作确认功能：
-  - agent_node 后插入 confirm_node，检测写 DML 并通过 interrupt() 暂停
-  - 用户决策后恢复，拒绝的 tool_calls 替换为 ToolMessage
-  - graph 实例改为模块级单例（get_agent_graph），支持跨请求恢复
+  正式实现写操作确认功能：agent_node 后插入 confirm_node，通过 interrupt() 暂停。
+  graph 实例改为模块级单例（get_agent_graph），支持跨请求恢复。
+
+变更说明（2026-08-07）：
+  security-pipeline-north-star-plan：删除 confirm_node / route_after_confirm，
+  确认逻辑并入 secure_tools_node 的三阶段安全流水线（PRE_CONFIRM → CONFIRM →
+  PRE_EXECUTE）。图简化为 agent → tools → agent 两点结构，确认在
+  secure_tools_node 内以批量 interrupt 完成。
 """
 
 from __future__ import annotations
@@ -49,7 +53,6 @@ from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.graph import END, StateGraph
 from langgraph.graph.state import CompiledStateGraph
-from langgraph.types import interrupt
 from psycopg import AsyncConnection
 from psycopg.rows import DictRow, dict_row
 from psycopg_pool import AsyncConnectionPool
@@ -104,30 +107,6 @@ def route_after_agent(
         total_iterations=len(state.get("trace_iterations", [])),
     )
     return "__end__"
-
-
-def route_after_confirm(
-    state: AgentState,
-) -> Literal["tools", "agent"]:
-    """确认后路由：仍有待执行工具 → tools，全部拒绝 → agent 回应。
-
-    从消息列表末尾向前查找最后一个 AIMessage，检查其 tool_calls 是否非空
-    来决定路由目标。
-
-    Args:
-        state: 当前 AgentState。
-
-    Returns:
-        "tools" — 仍有 tool_calls，继续执行 safe_tools_node。
-        "agent" — 无 tool_calls（全部拒绝），由 LLM 回应。
-    """
-    messages = state.get("messages", [])
-    for msg in reversed(messages):
-        if isinstance(msg, AIMessage):
-            if msg.tool_calls:
-                return "tools"
-            break
-    return "agent"
 
 
 # =============================================================================
@@ -500,260 +479,6 @@ async def agent_node(state: AgentState) -> dict[str, Any]:
 
 
 # =============================================================================
-# 危险操作确认节点（通用化：needs_write_confirmation 即确认，无额外条件）
-# =============================================================================
-
-# 连接注入参数集合（confirm_node 阶段尚未注入，过滤以保持 details 干净）
-_CONN_INJECTED_PARAMS = frozenset(
-    {
-        "connection_id",
-        "db_type",
-        "host",
-        "port",
-        "database",
-        "user",
-        "password",
-        "ssl_enabled",
-        "ssl_ca_cert",
-        "user_role",
-    }
-)
-
-
-def _build_confirmable_action(tc: Any, extras: dict[str, Any]) -> dict[str, Any]:
-    """从工具调用构建通用"需确认操作"记录。
-
-    needs_write_confirmation == True → 无条件确认，
-    不再检查 sql 或 is_write_dml()。新增工具只需声明 extras 即可接入确认流程。
-
-    Args:
-        tc: LangChain ToolCall 字典（含 id/name/args）。
-        extras: 工具声明的 extras 字典。
-
-    Returns:
-        {tool_call_id, tool, category, description, details}。
-    """
-    tool_name = tc["name"]
-    raw_args = dict(tc["args"])
-
-    # 过滤连接注入参数（保持 description/details 干净）
-    key_args: dict[str, Any] = {k: v for k, v in raw_args.items() if k not in _CONN_INJECTED_PARAMS}
-
-    # 自动生成人类可读描述
-    parts: list[str] = []
-    for k, v in key_args.items():
-        v_str = str(v)
-        if len(v_str) > 80:
-            v_str = v_str[:77] + "..."
-        parts.append(f"{k}={v_str}")
-    arg_desc = ", ".join(parts)
-    description = tool_name + (f": {arg_desc}" if arg_desc else "")
-
-    return {
-        "tool_call_id": tc["id"],
-        "tool": tool_name,
-        "category": extras.get("confirm_category", "generic"),
-        "description": description,
-        "details": key_args,
-    }
-
-
-async def confirm_node(state: AgentState) -> dict[str, Any]:
-    """通用危险操作确认节点——声明了 needs_write_confirmation 的工具即触发确认。
-
-    图结构位置：agent_node → confirm_node → safe_tools_node
-
-    逻辑：
-    1. 读取最后一条 AIMessage.tool_calls
-    2. 通过 TOOL_REGISTRY.extras 判断哪些工具声明了 needs_write_confirmation
-    3. 声明了该标志的工具 → interrupt() 暂停图，等待用户决策
-    4. 用户决策后（interrupt() 返回）：
-       - 拒绝的 tool_calls → 从 AIMessage 移除 + 生成 ToolMessage
-       - 批准的 tool_calls → 保留（含所有未声明标志的工具）
-    5. 无任何工具声明 needs_write_confirmation → 直接透传 return {}
-
-    与旧逻辑的区别：
-      - 不再依赖 sql 参数或 is_write_dml() 判断
-      - 不再区分"写 SQL"和"非 SQL 危险操作"
-      - 新增工具只需声明 needs_write_confirmation 即可接入确认流程
-
-    幂等性保证：
-      - 第一次执行：interrupt() 暂停，等待决策
-      - 第二次执行（resume）：interrupt() 返回决策值，继续处理
-      - 无危险操作时：return {} 直接透传，无副作用
-
-    Returns:
-        包含 messages（替换后的 AIMessage + ToolMessage 列表）和 sse_events 的更新 dict。
-        无危险操作时返回 {}（无修改）。
-    """
-    from app.agent.tools.registry import TOOL_REGISTRY  # noqa: I001
-
-    run_id = state.get("run_id", "")
-    messages = state.get("messages", [])
-    last_msg = messages[-1] if messages else None
-
-    if not isinstance(last_msg, AIMessage) or not last_msg.tool_calls:
-        return {}
-
-    tool_calls = last_msg.tool_calls
-
-    # ── 分类：声明了 needs_write_confirmation 的需确认，其余安全 ──
-    writes: list[dict[str, Any]] = []
-    safe: list[Any] = []
-    for tc in tool_calls:
-        tool_fn = TOOL_REGISTRY.get(tc["name"])
-        extras = getattr(tool_fn, "extras", None) or {}
-        if extras.get("needs_write_confirmation"):
-            writes.append(_build_confirmable_action(tc, extras))
-        else:
-            safe.append(tc)
-
-    if not writes:
-        logger.info("confirm_node: 无需确认的操作，直接透传", run_id=run_id)
-        return {}
-
-    # ====== 有危险操作，需要用户确认 ======
-    # ── 审计日志：逐条打印每条操作详情 ──
-    logger.warning(
-        "【安全审计】检测到危险操作，等待用户确认",
-        run_id=run_id,
-        write_count=len(writes),
-        safe_count=len(safe),
-    )
-    for w in writes:
-        logger.warning(
-            "【安全审计】操作详情",
-            run_id=run_id,
-            tool_call_id=w["tool_call_id"],
-            tool=w["tool"],
-            category=w["category"],
-            description=w["description"],
-        )
-    # 控制台打印（运维审计追踪）
-    print(f"\n{'=' * 60}")
-    print(f"[SECURITY AUDIT] 检测到 {len(writes)} 条危险操作 | 同时携带 {len(safe)} 条安全工具")
-    for w in writes:
-        print(f"  ├─ [{w['tool']}]({w['category']}) {w['description'][:120]}")
-    if safe:
-        print(f"  └─ 安全工具 {len(safe)} 个: {[s['name'] for s in safe]}")
-    else:
-        print(f"  └─ 无安全工具")
-    print(f"{'=' * 60}\n")
-
-    # interrupt() 第一次执行：暂停图，将 payload 返回给调用方
-    # interrupt() 第二次执行（resume）：返回 Command(resume=...) 中的值
-    decision = interrupt(
-        {
-            "type": "confirm_required",
-            "writes": writes,
-            "safe_tool_count": len(safe),
-            "session_id": state.get("session_id", ""),  # 供前端恢复请求时使用
-        }
-    )
-
-    # ====== 处理用户决策（interrupt() 恢复后执行） ======
-    approved_ids: set[str] = set(decision.get("approved_tool_call_ids", []))
-    denied_ids: set[str] = set(decision.get("denied_tool_call_ids", []))
-
-    # ── 审计日志：用户决策结果 ──
-    logger.warning(
-        "【安全审计】用户决策已处理",
-        run_id=run_id,
-        approved_count=len(approved_ids),
-        denied_count=len(denied_ids),
-    )
-    for w in writes:
-        tool_call_id = w["tool_call_id"]
-        if tool_call_id in approved_ids:
-            logger.warning(
-                "【安全审计】操作已批准",
-                run_id=run_id,
-                tool_call_id=tool_call_id,
-                tool=w["tool"],
-                description=w["description"],
-            )
-        elif tool_call_id in denied_ids:
-            logger.warning(
-                "【安全审计】操作已拒绝",
-                run_id=run_id,
-                tool_call_id=tool_call_id,
-                tool=w["tool"],
-                description=w["description"],
-            )
-    # 控制台打印
-    print(f"\n{'=' * 60}")
-    print(f"[SECURITY AUDIT] 用户决策结果: 批准 {len(approved_ids)} / 拒绝 {len(denied_ids)}")
-    for w in writes:
-        tid = w["tool_call_id"]
-        status = (
-            "✅ 已批准"
-            if tid in approved_ids
-            else ("❌ 已拒绝" if tid in denied_ids else "⏭️ 未处理")
-        )
-        print(f"  {status} [{w['tool']}]({w['category']}) {w['description'][:120]}")
-    print(f"{'=' * 60}\n")
-
-    # 保留批准的写 + 所有安全工具
-    kept_calls = [tc for tc in tool_calls if tc["id"] in approved_ids or tc in safe]
-
-    # 为被拒绝的工具生成 ToolMessage 和 SSE 事件
-    denied_msgs: list[ToolMessage] = []
-    sse_events: list[dict] = []
-    iteration = len(state.get("trace_iterations", []))
-
-    for tc in tool_calls:
-        if tc["id"] in denied_ids:
-            # 从 writes 中查找对应的描述
-            desc = next(
-                (w["description"] for w in writes if w["tool_call_id"] == tc["id"]),
-                tc["name"],
-            )
-            denied_msgs.append(
-                ToolMessage(
-                    content=f"操作已被用户取消: {desc}",
-                    tool_call_id=tc["id"],
-                    name=tc["name"],
-                )
-            )
-            sse_events.append(
-                {
-                    "type": "tool_result",
-                    "tool": tc["name"],
-                    "summary": "用户取消了操作",
-                    "tool_call_id": tc["id"],
-                    "agent_run_id": run_id,
-                    "iteration": iteration,
-                    "safety_checks_passed": False,
-                }
-            )
-
-    # 替换原始 AIMessage（相同 id → add_messages reducer 进行替换而非追加）
-    modified_aimsg = AIMessage(
-        content=last_msg.content or "",
-        tool_calls=kept_calls,
-        id=last_msg.id,
-    )
-
-    # trace 记录
-    trace_iterations = list(state.get("trace_iterations", []))
-    trace_iterations.append(
-        {
-            "iteration": len(trace_iterations) + 1,
-            "node": "confirm",
-            "writes_detected": len(writes),
-            "approved": len(approved_ids),
-            "denied": len(denied_ids),
-        }
-    )
-
-    return {
-        "messages": [modified_aimsg] + denied_msgs,
-        "sse_events": sse_events,
-        "trace_iterations": trace_iterations,
-    }
-
-
-# =============================================================================
 # 构建 StateGraph
 # =============================================================================
 
@@ -763,18 +488,17 @@ def build_agent_graph(
 ) -> CompiledStateGraph:
     """构建 Agent 状态图（2026-07 重构：移除了意图分类 + format_response）。
 
-    图结构：
+    图结构（security-pipeline-north-star-plan 收敛后）：
       agent → route_after_agent（条件边）
-        ├── "tools" → confirm_node（写操作确认）
-        │     ├── "tools" → safe_tools_node → agent（ReAct 循环）
-        │     └── "agent" → agent（全部拒绝后 LLM 回应）
+        ├── "tools" → secure_tools_node（三阶段安全流水线：PRE_CONFIRM → CONFIRM
+        │                 → PRE_EXECUTE + 执行）→ agent（ReAct 循环，固定边）
         └── "__end__" → END（agent_node 直接设置 is_complete: True）
 
     外部通过 graph.astream(initial_state, stream_mode=["updates", "messages"]) 执行，
     从 state["sse_events"] 读取 SSE 事件并序列化为 SSE 流。
 
     AsyncPostgresSaver checkpointer 通过 PostgreSQL 持久化保存 state 快照，
-    支持进程重启后恢复中断的图（confirm/resume 跨重启）。
+    支持进程重启后恢复中断的图（interrupt/resume 跨重启）。
 
     变更（2026-07-04）：
       移除了 classify_node（原本在入口之前做 5 分类），
@@ -796,6 +520,10 @@ def build_agent_graph(
       （checkpointer-redis-migration-plan）。最终选择 PostgreSQL 持久化，
       社区 Redis 包依赖 RedisJSON/RediSearch 模块，普通 Redis 无法运行。
 
+    变更（2026-08-07）：
+      security-pipeline-north-star-plan：删除 confirm_node / route_after_confirm，
+      确认逻辑并入 secure_tools_node（三阶段安全流水线）。节点集 = {agent, tools}。
+
     Args:
         checkpointer: 可选的 checkpointer 实例。为 None 时使用 MemorySaver
             （内存态，测试/未初始化场景）。生产环境由 init_checkpointer()
@@ -806,14 +534,13 @@ def build_agent_graph(
     """
     from langgraph.checkpoint.memory import MemorySaver  # noqa: I001
 
-    from app.agent.tool_node import safe_tools_node  # noqa: I001
+    from app.agent.tool_node import secure_tools_node  # noqa: I001
 
     workflow = StateGraph(AgentState)
 
     # ── 注册节点 ──
     workflow.add_node("agent", agent_node)
-    workflow.add_node("confirm", confirm_node)
-    workflow.add_node("tools", safe_tools_node)
+    workflow.add_node("tools", secure_tools_node)
 
     # ── 入口：直接进入 Agent ──
     workflow.set_entry_point("agent")
@@ -823,22 +550,12 @@ def build_agent_graph(
         "agent",
         route_after_agent,
         {
-            "tools": "confirm",  # agent → confirm（写操作检查）
+            "tools": "tools",  # agent → tools（三阶段安全流水线）
             "__end__": END,
         },
     )
 
-    # ── confirm → tools 或 agent ──
-    workflow.add_conditional_edges(
-        "confirm",
-        route_after_confirm,
-        {
-            "tools": "tools",  # 有工具 → 执行
-            "agent": "agent",  # 全部拒绝 → LLM 回应
-        },
-    )
-
-    # ── tools → agent（结果返回，继续决策） ──
+    # ── tools → agent（结果返回，继续决策；全拦/全拒自然回 agent 由 LLM 回应） ──
     workflow.add_edge("tools", "agent")
 
     # ── 编译图（AsyncRedisSaver 持久化 checkpoint 到 Redis） ──

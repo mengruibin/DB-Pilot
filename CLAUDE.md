@@ -80,8 +80,7 @@ npx vue-tsc --noEmit
   → (api/chat.py) 解析连接、构建 AgentState (scoped to connection)
   → (agent/graph.py) LangGraph StateGraph (双通道流式):
       agent_node (LLM bind_tools → 决策工具调用或最终回答)
-        → confirm_node (无条件规则：声明 needs_write_confirmation 的工具即 interrupt 等待用户确认)
-        → tools_node (安全护栏 → 连接注入 → 工具并行执行 → 脱敏，最多 5 个并发) → agent_node (ReAct 循环, ≤10 轮)
+        → secure_tools_node (三阶段安全流水线：PRE_CONFIRM 并行审计 → CONFIRM 批量 interrupt 确认 → PRE_EXECUTE + 并行执行，最多 5 个并发) → agent_node (ReAct 循环, ≤10 轮)
         → END (is_complete=True)
   → SSE 流式返回 12+ 种事件类型 (messages/updates 双通道)
       ┌─ messages: reasoning / token / tool_call_chunks (逐 token)
@@ -101,8 +100,8 @@ backend/
 │   │   ├── state.py          # AgentState TypedDict + Intent 枚举
 │   │   ├── models.py         # Chat 模型工厂（ChatAnthropic / ChatOpenAI 统一接口）
 │   │   ├── router.py         # IntentRouter：关键词+LLM 两层意图分类
-│   │   ├── tool_node.py      # SafeToolNode：安全护栏+连接注入+脱敏，标准 ToolMessage
-│   │   ├── safety.py         # 安全护栏链（SQL 审计/只读检查/连接限额）
+│   │   ├── tool_node.py      # secure_tools_node：三阶段安全流水线图节点（薄委托层，委托 security/orchestrator）
+│   │   ├── security/         # 安全流水线包：models(抽象) / registry(单一事实源) / stages(阶段实现) / orchestrator(三阶段编排+执行原语)
 │   │   └── tools/            # 工具实现（query, diagnosis, health, troubleshoot）
 │   ├── db/                   # 数据库适配器（BaseAdapter ABC + mysql/postgresql/oracle）
 │   ├── engine/               # 无状态引擎：nl2sql, sql_auditor(sqlglot), diagnosis, health_check, explain_estimator
@@ -134,14 +133,26 @@ frontend/
 
 3. **推理与回答分离** — 模型原生 `reasoning_content` 字段（DeepSeek/GLM 等支持）→ 作为独立 SSE `reasoning` 事件推送。普通 content 采用"乐观渲染+收编"模式：一律以 `stage="thinking"` 发射，`is_complete` 时若未检测到工具调用则发送 `stage_change("answer")` 触发前端收编。
 
-4. **Security** — 工具执行前经两层安全关卡 + 改写死循环保护：
-   - **confirm_node**（图节点，在 agent_node 之后、safe_tools_node 之前）：检查 `needs_write_confirmation` 声明的工具 → `interrupt()` 暂停图等待用户确认。采用**无条件规则**：工具声明了 `needs_write_confirmation` 即触发确认，不再依赖 `sql` 参数或 `is_write_dml()` 判断。
-   - **SafeToolNode**（工具执行时）：连接配置注入 → 工具查找（读取 `extras` 元数据决定安全检查项）→ 安全护栏链 → 执行 → 结果脱敏。护栏链包括两层：
-     - SQLAuditCheck（sqlglot 审计拦截 DROP/ALTER/TRUNCATE 等危险 DDL）
-     - RowEstimationCheck（EXPLAIN 多维度评估，根据规则引擎阻断大查询或发出警告，失败时降级放行）
-   - **连续拦截保护**（防改写死循环）：`AgentState.consecutive_blocks` 跟踪连续被 RowEstimationCheck 拦截的次数。同一轮无 RE 拦截时自动重置。第 3 次拦截返回强建议 ToolMessage + System Prompt 警告引导 LLM 停止改写，第 5 次强制终止（`is_complete=True`）。
+4. **Security** — 单一声明式安全流水线（security-pipeline-north-star-plan）：
+   - **安全注册表**：所有工具的安全行为集中在 `security/registry.py` 的 `SECURITY_REGISTRY`
+     （SecurityProfile = 有序阶段序列），禁止在工具 extras/图节点散落安全逻辑。
+   - **secure_tools_node**（工具执行，`tool_node.py`）：委托 `security/orchestrator.py` 三阶段编排——
+     Phase 1 PRE_CONFIRM（并行纯审计，interrupt 前重跑两遍，禁止 DB 副作用）
+     → Phase 2 CONFIRM（含确认阶段的工具批量 `interrupt()` 等待用户确认，任何工具执行之前）
+     → Phase 3 PRE_EXECUTE + 执行（确认后只跑一遍，允许 EXPLAIN 副作用，并行最多 5 个并发）。
+   - **阶段实现**（`security/stages.py`）：
+     - SQLAuditStage（sqlglot 审计，PRE_CONFIRM）：拦截 DROP/ALTER/TRUNCATE 等红线 DDL、
+       非 admin 的 DELETE/UPDATE/INSERT/MERGE。写操作在确认前先过此关，红线 DDL 不进确认流。
+     - RowEstimationStage（EXPLAIN 多维度评估，PRE_EXECUTE）：规则引擎阻断大查询，
+       失败时降级放行。
+     - ConfirmStage（标记型，CONFIRM）：orchestrator 据此批量 interrupt，前端按
+       `confirm_category`（sql_write / connection_kill / generic）渲染确认卡片。
+   - **连续拦截保护**（防改写死循环）：`AgentState.consecutive_blocks` 跟踪连续被
+     RowEstimationStage 拦截的次数（结构化 `ROW_ESTIMATION_BLOCKED` 识别，非字符串特征）。
+     同一轮无 RE 拦截时自动重置。第 3 次拦截返回强建议 ToolMessage，第 5 次强制终止
+     （`is_complete=True` + `CONSECUTIVE_BLOCKS_EXCEEDED` error 事件）。
 
-5. **并行工具执行** — 当 LLM 在同一轮返回多个 `tool_calls` 时，SafeToolNode 用 `asyncio.gather(return_exceptions=True)` 并发执行它们。总耗时 ≈ 最慢工具而非耗时之和。通过 `asyncio.Semaphore` 限制最大并发数（默认 5），防止 DB 连接池耗尽。前端的 `onToolResult` 匹配从 `findLastRunningToolCall()` 改为 `tool_call_id` 精确匹配，支持并行安全的结果关联。SSE 事件中的 `tool_call` 和 `tool_result` 均携带 `tool_call_id` 字段用于前后端关联。
+5. **并行工具执行** — 当 LLM 在同一轮返回多个 `tool_calls` 时，`secure_tools_node`（`security/orchestrator.py`）在 PRE_CONFIRM 与 Phase 3 用 `asyncio.gather(return_exceptions=True)` 并发执行它们。总耗时 ≈ 最慢工具而非耗时之和。通过 `asyncio.Semaphore` 限制最大并发数（默认 5），防止 DB 连接池耗尽。前端的 `onToolResult` 匹配从 `findLastRunningToolCall()` 改为 `tool_call_id` 精确匹配，支持并行安全的结果关联。SSE 事件中的 `tool_call` 和 `tool_result` 均携带 `tool_call_id` 字段用于前后端关联。
 
 6. **SSE 事件协议** — 12+ 种事件类型通过 SSE `event: message` + `data: JSON` 传输：`thinking` / `reasoning` / `token(stage=thinking|answer)` / `tool_call`（含 `tool_call_id`） / `tool_result`（含 `tool_call_id`） / `sql` / `result` / `text` / `error` / `done` / `stage_change` / `confirm_required`。前端 `useSSE` composable 统一解析分发到 Pinia store 回调。
 
@@ -211,7 +222,7 @@ frontend/
 - **`connection_kill`**：红色三角警告图标 + `--confirm-danger` 强调色 + 线程详情表 + "此操作不可逆"提示 + "确认终止"
 - **`generic`**：灰色信息圆图标 + `--confirm-generic` 强调色 + key-value 参数表 + "确认执行"（未知类别降级兜底）
 - 所有类别共用响应式逻辑：`chatStore.pendingConfirm` 驱动、`isWaitingApproval` computed 自动判断、1.5s 冷却防误触
-- 后端新增工具只需声明 `needs_write_confirmation` + `confirm_category` 即可自动接入确认流程
+- 后端新增工具只需在 `security/registry.py` 的 `SECURITY_REGISTRY` 中给工具 profile 加 `confirm` 阶段（`params={"category": ...}`）即可自动接入确认流程
 
 设计 token 在 `App.vue` CSS 变量中定义，支持 **深色/浅色** 双主题（通过 `[data-theme="light"]` 切换）。核心变量以 `--chat-*` 和 `--confirm-*` 前缀命名。字体：Satoshi（正文）+ JetBrains Mono（代码）。
 
@@ -219,20 +230,23 @@ frontend/
 
 所有 Agent 工具集中注册在 `app/agent/tools/registry.py`，新增工具只需在此注册，无需修改 graph.py：
 
-| 工具 | 功能 | 安全声明 |
+| 工具 | 功能 | 安全声明（`SECURITY_REGISTRY`） |
 |------|------|----------|
 | `list_tables` | 列出数据库中所有表 | — |
 | `describe_table` | 获取指定表结构 | — |
-| `execute_readonly_sql` | 执行只读 SQL 查询（SELECT / SHOW / EXPLAIN） | `needs_sql_audit`, `needs_row_estimation` |
-| `execute_write_sql` | 执行写 SQL（INSERT / UPDATE / DELETE，需用户确认） | `needs_write_confirmation`, `confirm_category: sql_write` |
+| `execute_readonly_sql` | 执行只读 SQL 查询（SELECT / SHOW / EXPLAIN） | `sql_audit`(PRE_CONFIRM) + `row_estimation`(PRE_EXECUTE) |
+| `execute_write_sql` | 执行写 SQL（INSERT / UPDATE / DELETE，需用户确认） | `sql_audit`(PRE_CONFIRM) + `confirm`(sql_write) |
 | `get_slow_queries` | 获取慢查询日志（支持日志检测、performance_schema 降级、EXPLAIN 联动） | — |
-| `explain_query` | 分析 SQL 执行计划 | `needs_sql_audit` |
+| `explain_query` | 分析 SQL 执行计划 | `sql_audit`(PRE_CONFIRM) |
 | `check_connections` | 检查连接池状态 | — |
 | `check_locks` | 检查锁等待（返回完整锁拓扑：表名/锁模式/锁类型，区分 held/waiting） | — |
 | `analyze_locks` | 查询指定事务/线程的详细锁信息（锁模式、等待链、根阻塞者） | — |
-| `kill_transaction` | 终止指定线程的连接（需用户确认，自动验证） | `needs_write_confirmation`, `confirm_category: connection_kill` |
+| `kill_transaction` | 终止指定线程的连接（需用户确认，自动验证） | `confirm`(connection_kill) |
 | `check_replication` | 检查主从复制状态 | — |
 | `run_health_check` | 执行 20 项健康巡检（含关联分析、一键修复建议） | — |
+
+> 安全声明一律定义在 `app/agent/security/registry.py` 的 `SECURITY_REGISTRY`（单一事实源），
+> 工具 extras 无安全声明残留。新增危险操作工具只需在此登记对应阶段即可接入安全流水线。
 
 ### Key Conventions
 
@@ -243,21 +257,22 @@ frontend/
 - 所有 `@tool` 函数返回 Python 原生类型（dict/list/str），禁止返回 ORM 实例
 - 连接密码仅存于内存 state，不持久化到数据库
 - SQL 审计默认拦截 DROP/ALTER/TRUNCATE/CREATE/GRANT/REVOKE，多语句直接拦截
-- **EXPLAIN 安全评估**：`execute_readonly_sql` 工具声明 `needs_row_estimation: True` 触发 RowEstimationCheck，通过 EXPLAIN 提取多维度指标并用规则引擎评估。`execute_write_sql` 不走自动安全护栏。阈值硬编码在 `explain_estimator.py`，不依赖 .env
-- **连续拦截保护**（防改写死循环）：`AgentState.consecutive_blocks` 跟踪连续被 RowEstimationCheck 拦截次数。第 1-2 次返回普通拦截消息，第 3 次起返回强建议 ToolMessage（含 SQL + EXPLAIN 建议）+ System Prompt 警告引导 LLM 停止改写并告知用户，第 5 次在 `safe_tools_node` 中强制终止（`is_complete=True`）。同一轮无 RE 拦截时计数器自动重置。检测通过 `"[EXPLAIN 安全评估]" in safety_result.reason` 精确识别 RE 拦截，不影响 SQLAuditCheck
+- **EXPLAIN 安全评估**：`execute_readonly_sql` 的 `row_estimation` 阶段（PRE_EXECUTE，确认后只跑一遍）通过 EXPLAIN 提取多维度指标并用规则引擎评估。`execute_write_sql` 走 `sql_audit`(PRE_CONFIRM) 前置审计 + `confirm`(sql_write) 确认，不走 row_estimation。阈值硬编码在 `explain_estimator.py`，不依赖 .env
+- **连续拦截保护**（防改写死循环）：`AgentState.consecutive_blocks` 跟踪连续被 RowEstimationStage 拦截次数。第 1-2 次返回普通拦截消息，第 3 次起返回强建议 ToolMessage（含 SQL + EXPLAIN 建议）+ System Prompt 警告引导 LLM 停止改写并告知用户，第 5 次在 `secure_tools_node` 中强制终止（`is_complete=True`）。同一轮无 RE 拦截时计数器自动重置。RE 拦截识别用结构化 `block_code == "ROW_ESTIMATION_BLOCKED"`（非字符串特征耦合），advisory 序号按"本轮第 k 个"递增（修复并行旧值问题），不影响 SQLAuditStage
 - **结果截断**：所有工具返回结果在序列化为 ToolMessage 前经 `truncate_result_for_llm()` 处理，最大 200 行 / 80K 字符，防止 LLM 上下文窗口溢出。截断时附带 `_truncated`、`_original_total_rows` 元信息
-- **并行工具执行**：SafeToolNode 用 `asyncio.gather()` 并发执行同轮 `tool_calls`，受 `AGENT_MAX_CONCURRENT_TOOLS`（默认 5）限制。SSE 事件的 `tool_call` / `tool_result` 均携带 `tool_call_id` 供前端精确匹配
+- **并行工具执行**：`secure_tools_node`（security/orchestrator.py）用 `asyncio.gather()` 并发执行同轮 `tool_calls`（PRE_CONFIRM 与 Phase 3 均受 `AGENT_MAX_CONCURRENT_TOOLS`（默认 5）限制）。SSE 事件的 `tool_call` / `tool_result` 均携带 `tool_call_id` 供前端精确匹配
 - **LLM 并发限流**：全后端唯一的 LLM 调用点（`graph.py` agent_node 的 `ainvoke`）经 `app/agent/llm_limiter.py` 的 `LLMLimiter.slot()` 限流。模块级共享 `asyncio.Semaphore`（进程级全局硬上限，区别于 tool_node 的每轮局部信号量），饱和时排队，超过 `AGENT_LLM_WAIT_TIMEOUT_SECONDS`（默认 30s）抛 `LLMConcurrencyBusyError` → SSE `error` 事件（`LLM_BUSY`）+ `is_complete=True` 友好降级「AI 服务繁忙」。`AGENT_MAX_CONCURRENT_LLM`（默认 5，范围 1-20）配置全局并发在途数上限。单进程部署全局生效，多 worker 需外部协调（见 docs/llm-concurrency-limit-plan.md）
 - 前端 `onToolResult` 匹配策略：优先用 `tool_call_id` 从 `Map` O(1) 查找，回退到 `tool` 名匹配。`MessageList.vue` 的 `pairToolSteps()` 将 `tool_call` 与对应 `tool_result` 配对渲染
-- **读写 SQL 工具分离**：`execute_sql` 已拆分为 `execute_readonly_sql`（只读查询，带 SQLAuditCheck + RowEstimationCheck 安全护栏）和 `execute_write_sql`（写操作，带 `needs_write_confirmation` 用户确认屏障）。`execute_write_sql` 不声明 `needs_sql_audit` / `needs_row_estimation`，用户确认即安全屏障。LLM 错将写 SQL 发给 `execute_readonly_sql` 时，非 admin 用户会被 SQLAuditCheck 拦截
+- **读写 SQL 工具分离**：`execute_sql` 已拆分为 `execute_readonly_sql`（只读查询，SECURITY_REGISTRY 声明 `sql_audit`(PRE_CONFIRM) + `row_estimation`(PRE_EXECUTE)）和 `execute_write_sql`（写操作，SECURITY_REGISTRY 声明 `sql_audit`(PRE_CONFIRM) + `confirm`(sql_write)）。**写操作在确认前先过 sql_audit**——红线 DDL 与非 admin 写操作在确认流之前即被拦截（不弹确认卡片）。LLM 错将写 SQL 发给 `execute_readonly_sql` 时，非 admin 用户会被 SQLAuditStage 拦截
 - **写操作确认 UI**：采用内联卡片非模态弹窗，`WriteConfirmation.vue` 组件根据 `chatStore.pendingConfirm` 渲染。tool_call 卡片通过 `isWaitingApproval` computed 响应式判断是否等待审批，显示时钟图标 + "等待用户审批"（由 `pendingConfirm.writes` 驱动，无需手动同步 `stepStatus`）。深色主题强调色浅绿 `#4ADE80`，浅色主题浅蓝 `#60A5FA`，变量定义在 `App.vue` 的 `--confirm-*` CSS 变量中
 - **MySQL 版本检测**：`MySQLAdapter.connect()` 自动执行 `SELECT VERSION()` 检测 MySQL/MariaDB 版本，存储为 `_db_vendor` 和 `_version_int`，供 `is_mariadb()` / `get_db_version()` 查询
 - **软删除感知**：`describe_table` 输出表级 `soft_delete` 字段（`{column, kind(flag|deleted_at), deleted_value, active_value, note}`），由 `engine/soft_delete.py` 的 `detect_soft_delete_columns()` 以列名关键词 + 列注释关键词启发式识别（零配置）。系统提示词规则 11 强制：表含软删除标识时删除必须用 `UPDATE SET 标识=已删除` 代替 `DELETE` 硬删除。仅感知层引导，不做执行层硬拦截
 - **check_locks 返回结构**：返回 `{held_locks, waiting_locks, total_held, total_waiting, summary}`，每个锁记录含 `table_name`、`lock_mode`、`lock_type`。MySQL 8.0+ 走 `performance_schema.data_locks`，5.7/MariaDB 走 `SHOW ENGINE INNODB STATUS` 回退
 - **get_slow_queries 降级方案**：慢查询日志未开启时返回开启指引 `SET GLOBAL slow_query_log = ON`；日志不可用时自动降级到 `performance_schema.events_statements_summary_by_digest`。返回 `slow_log_enabled` 和 `fallback_used` 标识数据来源
 - **run_health_check 关联分析**：检查结果包含 `correlation_notes`（跨项关联分析列表）和 `fix_suggestions`（可执行修复 SQL 命令），从"发现问题"升级到"解决问题"
-- **EXPLAIN 安全拼接**：适配器 `explain()` 方法增加多语句检测和单引号转义，作为 `SQLAuditCheck` 之后的第二道防线（EXPLAIN 不支持参数化占位符）
-- **confirm_node 通用确认机制**：`confirm_node` 采用**无条件规则**——工具声明 `needs_write_confirmation: True` 即触发 `interrupt()` 等待用户确认，不再检查 `sql` 参数或 `is_write_dml()`。`execute_write_sql` 和 `kill_transaction` 均通过此机制触发确认。前端按 `confirm_category`（`sql_write` / `connection_kill` / `generic`）分类渲染对应的确认卡片。新增危险操作工具只需在 `@tool(extras={...})` 中声明 `needs_write_confirmation` + `confirm_category` 即可接入确认流程
+- **EXPLAIN 安全拼接**：适配器 `explain()` 方法增加多语句检测和单引号转义，作为 `SQLAuditStage` 之后的第二道防线（EXPLAIN 不支持参数化占位符）
+- **安全流水线统一确认机制**：确认由 `secure_tools_node` 内的三阶段流水线统一编排（不再有独立 confirm_node）。工具含 `confirm` 阶段（CONFIRM 相位）即触发批量 `interrupt()` 等待用户确认，任何工具执行之前。`execute_write_sql` 和 `kill_transaction` 均通过此机制触发确认（分类分别为 `sql_write` / `connection_kill`）。前端按 `confirm_category`（`sql_write` / `connection_kill` / `generic`）分类渲染对应的确认卡片。新增危险操作工具只需在 `security/registry.py` 的 `SECURITY_REGISTRY` 中给工具 profile 加 `confirm` 阶段（含 category 参数）即可接入确认流程
+- **安全行为单一事实源**：安全策略一律经 `app/agent/security/registry.py` 的 `SECURITY_REGISTRY` 声明（SecurityProfile 有序阶段序列），**禁止在工具 extras、图节点里散落安全逻辑**。PRE_CONFIRM 阶段必须纯（无 DB 副作用，interrupt 重放跑两遍）；resume 遍必须截断 sse_events（只返回本遍新事件）。两阶段间的"确认后只跑一遍"由 `interrupt()` 语义天然保证（Phase 3 仅 resume 遍/单遍可达）
 - **结构化日志字段**：structlog 处理链 `_build_shared_processors()`（`log_setup.py`）自动为每条日志注入 `module/func_name/lineno/layer`。agent 流内日志经 contextvars 自动携带 `session_id/connection_id/user_id/user_role`（`_stream_events` 绑定、`finally` 解绑，保留中间件注入的 `trace_id`）。文件与控制台 JSON 均 `ensure_ascii=False` 输出中文原文
 - **token 消耗统计**：`graph.py._extract_token_usage()` 兼容多 provider（`usage_metadata` → `token_usage` → `usage` 优先级），每轮决策日志与 `trace_iterations` 顶层记录 `input_tokens`/`output_tokens`；`chat.py` Step4 汇总 `total_tokens` 用于 `done.tokens_used` 事件与 `messages.tokens_used` / `sessions.tokens_used_total` 持久化
 - **上下文压缩（context-compression-plan）**：懒触发 + 轮次边界摘要。每次 `agent_node` 决策前用 `_estimate_input_tokens` 估算（**真实锚定 + 增量**：`est = 上次真实 input + 上次 output + 增量×rate`，见 token-estimation-plan），超过 `AGENT_COMPACT_TRIGGER_TOKENS`（默认 60000）才启动压缩；压缩生效后**短路恒压缩**（锚点只在未压缩会话使用，避免锚点语义不一致）。`_partition_turns(messages, k)` 按 HumanMessage 切成（远古历史/近 K 轮窗口/当前轮），历史进摘要、窗口+当前轮逐字保留；`_effective_window_k` 闲置衰减（超 `AGENT_IDLE_DECAY_MINUTES`（默认 120）→ K=0）。摘要缓存键 `digest_upto_msg_id`（历史最后消息 id），同轮迭代复用、新轮重算

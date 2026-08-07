@@ -86,8 +86,7 @@ DB-Pilot 是一个基于大语言模型（LLM）与 LangGraph ReAct Agent 的**�
   → (api/chat.py) 解析连接、构建 AgentState (scoped to connection)
   → (agent/graph.py) LangGraph StateGraph（双通道流式）:
       agent_node (LLM bind_tools → 决策工具调用或最终回答)
-        → confirm_node (无条件规则：声明 needs_write_confirmation 的工具即 interrupt 等待用户确认)
-        → tools_node (安全护栏 → 连接注入 → 工具并行执行 → 脱敏，最多 5 个并发) → agent_node (ReAct 循环, ≤10 轮)
+        → secure_tools_node (三阶段安全流水线：PRE_CONFIRM 并行审计 → CONFIRM 批量 interrupt 确认 → PRE_EXECUTE + 并行执行，最多 5 个并发) → agent_node (ReAct 循环, ≤10 轮)
         → END (is_complete=True)
   → SSE 流式返回 12+ 种事件类型 (messages/updates 双通道)
       ┌─ messages: reasoning / token / tool_call_chunks (逐 token)
@@ -251,37 +250,41 @@ npm run preview      # 本地预览
 
 ## Agent 工具集
 
-所有工具集中注册于 `backend/app/agent/tools/registry.py`，新增工具只需在此注册，无需修改图逻辑。
+工具注册于 `backend/app/agent/tools/registry.py`（新增工具只需在此注册），安全策略集中声明于 `backend/app/agent/security/registry.py` 的 `SECURITY_REGISTRY`（单一事实源）。
 
-| 工具 | 功能 | 安全声明 |
+| 工具 | 功能 | 安全声明（`SECURITY_REGISTRY`） |
 |------|------|----------|
 | `list_tables` | 列出数据库中所有表 | — |
 | `describe_table` | 获取指定表结构（含软删除标识标注） | — |
-| `execute_readonly_sql` | 执行只读 SQL（SELECT / SHOW / EXPLAIN） | `needs_sql_audit`、`needs_row_estimation` |
-| `execute_write_sql` | 执行写 SQL（INSERT / UPDATE / DELETE，需用户确认） | `needs_write_confirmation`、`confirm_category: sql_write` |
+| `execute_readonly_sql` | 执行只读 SQL（SELECT / SHOW / EXPLAIN） | `sql_audit`(PRE_CONFIRM) + `row_estimation`(PRE_EXECUTE) |
+| `execute_write_sql` | 执行写 SQL（INSERT / UPDATE / DELETE，需用户确认） | `sql_audit`(PRE_CONFIRM) + `confirm`(sql_write) |
 | `get_slow_queries` | 获取慢查询日志（日志检测 / performance_schema 降级 / EXPLAIN 联动） | — |
-| `explain_query` | 分析 SQL 执行计划 | `needs_sql_audit` |
+| `explain_query` | 分析 SQL 执行计划 | `sql_audit`(PRE_CONFIRM) |
 | `check_connections` | 检查连接池状态 | — |
 | `check_locks` | 检查锁等待（完整锁拓扑：表名 / 锁模式 / 锁类型，区分 held / waiting） | — |
 | `analyze_locks` | 查询指定事务 / 线程的详细锁信息（等待链、根阻塞者） | — |
-| `kill_transaction` | 终止指定线程的连接（需用户确认，自动验证） | `needs_write_confirmation`、`confirm_category: connection_kill` |
+| `kill_transaction` | 终止指定线程的连接（需用户确认，自动验证） | `confirm`(connection_kill) |
 | `check_replication` | 检查主从复制状态 | — |
 | `run_health_check` | 执行 20 项健康巡检（含关联分析、一键修复建议） | — |
+
+> 安全行为一律经 `SECURITY_REGISTRY` 声明，禁止在工具 extras / 图节点散落安全逻辑。新增危险操作工具只需给工具 profile 加 `confirm` 阶段（含 category 参数）即可接入确认流程。
 
 ---
 
 ## 安全设计
 
-DB-Pilot 在工具执行前设置了**两层安全关卡** + 多重纵深防护：
+DB-Pilot 采用**单一声明式安全流水线**（`backend/app/agent/security/` 包）——所有工具的安全策略集中在 `SECURITY_REGISTRY` 声明（SecurityProfile = 有序阶段序列），一个 `secure_tools_node` 按三阶段编排，图结构为 `agent → tools → agent`。
 
-### 1. confirm_node（写操作确认）
-- **无条件规则**：工具声明 `needs_write_confirmation: True` 即触发 `interrupt()` 暂停图等待用户确认，不再依赖 SQL 参数判断。
-- 前端按 `confirm_category` 渲染内联确认卡片：`sql_write`（SQL 高亮）/ `connection_kill`（线程详情 + "此操作不可逆"）/ `generic`（降级兜底）。
+### 1. 三阶段安全流水线（`secure_tools_node`）
+- **Phase 1 PRE_CONFIRM（并行纯审计）**：每个工具 profile 的 PRE_CONFIRM 阶段（如 sqlglot 审计）在确认前并行执行，无 DB 副作用（interrupt 重放会跑两遍）。红线 DDL 与非 admin 写操作在此被拦，**不再弹确认卡片**。
+- **Phase 2 CONFIRM（批量 interrupt 确认）**：含 `confirm` 阶段的工具（写 SQL / 终止连接）批量 `interrupt()` 等待用户确认，任何工具执行之前。前端按 `confirm_category` 渲染内联确认卡片：`sql_write`（SQL 高亮）/ `connection_kill`（线程详情 + "此操作不可逆"）/ `generic`（降级兜底）。
+- **Phase 3 PRE_EXECUTE + 执行（只跑一遍）**：确认后对幸存者执行 PRE_EXECUTE（如 EXPLAIN 评估）+ 工具执行。interrupt 重放语义保证 Phase 3 只跑一遍——**EXPLAIN / 工具恰执行一次**；resume 遍截断 sse_events，历史 tool_call 事件不重发。
 
-### 2. SafeToolNode（执行时安全护栏链）
-- **SQLAuditCheck**：sqlglot 解析审计，拦截 DROP / ALTER / TRUNCATE / CREATE / GRANT / REVOKE 等危险 DDL 与多语句注入。
-- **RowEstimationCheck**：EXPLAIN 提取 5 维标准化指标（访问方式 / 扫描行数 / 返回行数 / 查询成本 / 额外操作），6 条 CRITICAL + 5 条 WARNING 规则评估，命中 CRITICAL 则阻断并引导 LLM 改写；EXPLAIN 失败时降级放行。
-- **连续拦截保护**：防 LLM 反复改写绕过 —— 第 3 次拦截返回强建议 ToolMessage，第 5 次强制终止。
+### 2. 安全阶段（`agent/security/stages.py`）
+- **SQLAuditStage**：sqlglot 解析审计，拦截 DROP / ALTER / TRUNCATE / CREATE / GRANT / REVOKE 等危险 DDL、非 admin 的 DELETE / UPDATE / INSERT / MERGE 与多语句注入。**写操作在确认前先过此关**，审计通过才进确认流。
+- **RowEstimationStage**：EXPLAIN 提取 5 维标准化指标（访问方式 / 扫描行数 / 返回行数 / 查询成本 / 额外操作），6 条 CRITICAL 规则评估，命中则阻断并引导 LLM 改写；EXPLAIN 失败时降级放行。
+- **ConfirmStage**：标记型阶段，驱动批量确认（`sql_write` / `connection_kill` / `generic` 分类）。
+- **连续拦截保护**：防 LLM 反复改写绕过 —— 结构化 `ROW_ESTIMATION_BLOCKED` 识别，第 3 次拦截返回强建议 ToolMessage，第 5 次强制终止。
 
 ### 3. 纵深防护
 - **参数化查询**：禁止字符串拼接 SQL，一律使用参数绑定。
@@ -390,7 +393,7 @@ npm test
 npx vue-tsc --noEmit
 ```
 
-后端测试覆盖：SQL 审计器、EXPLAIN 评估、数据脱敏、CSV 导出、上下文压缩、LLM 限流器、软删除识别、工具节点、用户数据隔离、数据库适配器等模块。
+后端测试覆盖：SQL 审计器、EXPLAIN 评估、数据脱敏、CSV 导出、上下文压缩、LLM 限流器、软删除识别、工具节点、**安全流水线（注册表 / 阶段 / 编排器重放幂等）**、用户数据隔离、数据库适配器等模块。
 
 ---
 
@@ -410,8 +413,8 @@ DB-Pilot/
 │   │   │   ├── graph.py              # StateGraph 编排 + 上下文压缩
 │   │   │   ├── state.py              # AgentState TypedDict
 │   │   │   ├── models.py             # Chat 模型工厂（Anthropic / OpenAI 统一接口）
-│   │   │   ├── tool_node.py          # SafeToolNode：护栏 + 注入 + 脱敏
-│   │   │   ├── safety.py             # 安全护栏链（SQL 审计 / 只读 / 连接限额）
+│   │   │   ├── tool_node.py          # secure_tools_node：三阶段安全流水线图节点（薄委托层）
+│   │   │   ├── security/             # 安全流水线包：models(抽象) / registry(单一事实源) / stages(阶段实现) / orchestrator(三阶段编排+执行原语)
 │   │   │   ├── llm_limiter.py        # 全局 LLM 并发限流
 │   │   │   └── tools/                # 工具实现（query / diagnosis / health / troubleshoot / registry）
 │   │   ├── db/                       # 数据库适配器（BaseAdapter + mysql / postgresql / oracle）

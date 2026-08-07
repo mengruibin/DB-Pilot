@@ -458,12 +458,7 @@ async def _run_sql(
 # =============================================================================
 
 
-@tool(
-    extras={
-        "needs_sql_audit": True,
-        "needs_row_estimation": True,
-    },
-)
+@tool
 async def execute_readonly_sql(
     sql: str,
     connection_id: Annotated[str, InjectedToolArg],
@@ -479,7 +474,7 @@ async def execute_readonly_sql(
 ) -> dict[str, Any]:
     """执行只读 SQL 查询（SELECT / SHOW / DESCRIBE / EXPLAIN / WITH）。
     写操作（INSERT / UPDATE / DELETE）请使用 execute_write_sql 工具。
-    安全审计由 tool_node 安全护栏层在工具执行前统一检查。
+    安全行为见 security/registry.py（sql_audit + row_estimation 两阶段）。
 
     Args:
         sql: 要执行的只读 SQL 语句。
@@ -500,12 +495,7 @@ async def execute_readonly_sql(
 # =============================================================================
 
 
-@tool(
-    extras={
-        "needs_write_confirmation": True,
-        "confirm_category": "sql_write",
-    },
-)
+@tool
 async def execute_write_sql(
     sql: str,
     connection_id: Annotated[str, InjectedToolArg],
@@ -522,6 +512,7 @@ async def execute_write_sql(
     """执行写 SQL 语句（INSERT / UPDATE / DELETE）。
     执行前系统会请求用户确认，用户批准后才会实际执行。
     只读查询（SELECT / SHOW / DESCRIBE / EXPLAIN）请使用 execute_readonly_sql 工具。
+    安全行为见 security/registry.py（sql_audit 前置审计 + confirm 用户确认）。
 
     Args:
         sql: 要执行的写 SQL 语句。

@@ -829,7 +829,7 @@ async def _analyze_pg_locks(
 # =============================================================================
 
 
-@tool(extras={"needs_write_confirmation": True, "confirm_category": "connection_kill"})
+@tool
 async def kill_transaction(
     connection_id: Annotated[str, InjectedToolArg],
     db_type: Annotated[str, InjectedToolArg],
@@ -846,7 +846,8 @@ async def kill_transaction(
     """终止指定线程 ID 的数据库连接（KILL CONNECTION），
     用于紧急处理锁阻塞或长时间运行的事务。
     执行前会查询事务详情并附带风险提示。
-    注意：此工具需要用户确认后才能执行。
+    注意：此工具需要用户确认后才能执行（connection_kill 确认流，
+    安全行为见 security/registry.py）。
 
     Args:
         thread_id: 要终止的线程/连接 ID（必填）。
@@ -860,7 +861,7 @@ async def kill_transaction(
         }
         失败: {"error": str, "detail": str}
     """
-    # SAFETY: 写操作由 needs_write_confirmation 触发的 confirm_node 管控
+    # SAFETY: 终止连接由安全流水线的 confirm 阶段（connection_kill 确认流）管控
     try:
         config = _build_config(
             connection_id,

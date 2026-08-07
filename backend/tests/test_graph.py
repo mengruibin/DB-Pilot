@@ -49,11 +49,15 @@ class TestGraphStructure:
         assert "general" not in graph.nodes
 
     def test_required_nodes_exist(self):
-        """图中应存在 agent/confirm/tools 节点。"""
+        """图中应存在 agent/tools 节点，且不含 confirm（已并入安全流水线）。"""
         graph = build_agent_graph()
         assert "agent" in graph.nodes
-        assert "confirm" in graph.nodes
         assert "tools" in graph.nodes
+
+    def test_confirm_node_removed(self):
+        """图中不应存在 confirm 节点（security-pipeline-north-star-plan 收敛）。"""
+        graph = build_agent_graph()
+        assert "confirm" not in graph.nodes
 
     def test_format_response_removed(self):
         """图中不应存在 format_response 节点（2026-07 已删除）。"""
@@ -61,12 +65,12 @@ class TestGraphStructure:
         assert "format_response" not in graph.nodes
 
     def test_only_expected_nodes(self):
-        """图中仅应有 agent/confirm/tools（以及 LangGraph 内置 __start__）。"""
+        """图中仅应有 agent/tools（以及 LangGraph 内置 __start__）。"""
         graph = build_agent_graph()
         actual_nodes = set(graph.nodes.keys())
         # LangGraph 自动添加 __start__ 内部节点
-        assert actual_nodes >= {"agent", "confirm", "tools"}
-        assert actual_nodes - {"__start__", "agent", "confirm", "tools"} == set()
+        assert actual_nodes >= {"agent", "tools"}
+        assert actual_nodes - {"__start__", "agent", "tools"} == set()
 
 
 # =============================================================================

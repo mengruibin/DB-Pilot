@@ -72,7 +72,7 @@ def _safe_tool_call(fn_name: str, exc: Exception) -> dict[str, Any]:
 # =============================================================================
 
 
-@tool(extras={"needs_sql_audit": True})
+@tool
 async def explain_query(
     connection_id: Annotated[str, InjectedToolArg],
     db_type: Annotated[str, InjectedToolArg],
@@ -92,6 +92,7 @@ async def explain_query(
 
     获取指定 SQL 语句的执行计划（EXPLAIN），用于查询性能分析和索引优化建议。
     三种格式（tree/json/traditional）由目标数据库方言自动映射，实际支持的格式取决于数据库类型。
+    安全行为见 security/registry.py（sql_audit 前置审计）。
 
     Args:
         sql: 要分析的 SQL 语句。
@@ -106,8 +107,8 @@ async def explain_query(
         不支持: {"error": str, "detail": str}
         失败: {"error": str, "detail": str}
     """
-    # Step 1: SQL 安全审计由上游 tool_node._run_one_tool 中的
-    # SQLAuditCheck 在工具执行前统一拦截，此处不再重复审计。
+    # Step 1: SQL 安全审计由安全流水线（security/registry.py sql_audit 阶段，
+    # 位于 secure_tools_node 的 PRE_CONFIRM 相位）在工具执行前统一拦截，此处不再重复审计。
     # SAFETY: 参数化连接配置，不拼接连接串（AGENTS.md §数据库操作原则）
 
     # Step 2: 建立连接并检查适配器能力

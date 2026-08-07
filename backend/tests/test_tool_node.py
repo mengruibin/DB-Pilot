@@ -15,7 +15,7 @@ import asyncio
 import os
 import time
 from typing import Any
-from unittest.mock import ANY, AsyncMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -24,11 +24,10 @@ os.environ.setdefault("LLM_API_KEY", "test-key")
 os.environ.setdefault("LLM_MODEL", "test-model")
 os.environ.setdefault("DATABASE_URL", "sqlite+aiosqlite:///test.db")
 
-from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.messages import AIMessage
 
 from app.agent.state import AgentState
-from app.agent.tool_node import safe_tools_node
-
+from app.agent.tool_node import secure_tools_node
 
 # =============================================================================
 # 辅助函数：模拟工具函数（带 ainvoke 方法）
@@ -79,18 +78,6 @@ def _patch_tool_registry():
         "failing_tool": _MockTool(_mock_failing_tool),
     }
     with patch("app.agent.tools.registry.TOOL_REGISTRY", mock_registry):
-        yield
-
-
-@pytest.fixture(autouse=True)
-def _patch_safety_checks():
-    """绕过安全护栏检查（测试中不校验 SQL）。"""
-    with patch("app.agent.tool_node.run_safety_checks") as mock_safety:
-        mock_result = AsyncMock()
-        mock_result.blocked = False
-        mock_result.reason = ""
-        mock_result.warnings = []
-        mock_safety.return_value = mock_result
         yield
 
 
@@ -152,7 +139,7 @@ class TestParallelExecution:
         state = _make_state(tool_calls)
 
         start = time.monotonic()
-        result = await safe_tools_node(state)
+        result = await secure_tools_node(state)
         elapsed = time.monotonic() - start
 
         # 并行执行 3 个 10ms 的工具，总耗时应显著小于 30ms（串行）
@@ -176,7 +163,7 @@ class TestParallelExecution:
         state = _make_state(tool_calls)
 
         start = time.monotonic()
-        await safe_tools_node(state)
+        await secure_tools_node(state)
         elapsed = time.monotonic() - start
 
         # 并行执行，总耗时 ≈ 50ms（最慢工具），而非 60ms（串行之和）
@@ -203,7 +190,7 @@ class TestDefaultRoleFallback:
         mock_registry = {"result_tool": _MockTool(_return_result_with_sensitive_columns)}
         with patch("app.agent.tools.registry.TOOL_REGISTRY", mock_registry):
             state = _make_state([_make_tool_call("result_tool")])
-            result = await safe_tools_node(state)
+            result = await secure_tools_node(state)
 
         tool_content = result["messages"][0].content
         assert '"password"' in tool_content
@@ -220,7 +207,7 @@ class TestDefaultRoleFallback:
         mock_registry = {"capture_tool": _MockTool(_capture_tool)}
         with patch("app.agent.tools.registry.TOOL_REGISTRY", mock_registry):
             state = _make_state([_make_tool_call("capture_tool")])
-            result = await safe_tools_node(state)
+            result = await secure_tools_node(state)
 
         assert len(result["messages"]) == 1
         assert result["messages"][0].name == "capture_tool"
@@ -239,7 +226,7 @@ class TestErrorIsolation:
         ]
         state = _make_state(tool_calls)
 
-        result = await safe_tools_node(state)
+        result = await secure_tools_node(state)
 
         # 总共返回 3 个 ToolMessage
         assert len(result["messages"]) == 3
@@ -264,7 +251,7 @@ class TestErrorIsolation:
         ]
         state = _make_state(tool_calls)
 
-        result = await safe_tools_node(state)
+        result = await secure_tools_node(state)
 
         sse_events = result["sse_events"]
 
@@ -285,7 +272,7 @@ class TestSemaphoreCapsConcurrency:
 
         用 Semaphore(1) 模拟，多个工具应逐个执行而非并发。
         """
-        with patch("app.agent.tool_node._MAX_CONCURRENT_TOOLS", 1):
+        with patch("app.agent.security.orchestrator._MAX_CONCURRENT_TOOLS", 1):
             tool_calls = [
                 _make_tool_call("slow_tool"),  # 50ms
                 _make_tool_call("slow_tool"),  # 50ms
@@ -294,7 +281,7 @@ class TestSemaphoreCapsConcurrency:
             state = _make_state(tool_calls)
 
             start = time.monotonic()
-            await safe_tools_node(state)
+            await secure_tools_node(state)
             elapsed = time.monotonic() - start
 
             # Semaphore(1) 退化为串行，3 × 50ms ≈ 150ms
@@ -307,7 +294,7 @@ class TestSemaphoreCapsConcurrency:
     @pytest.mark.asyncio
     async def test_semaphore_2_allows_partial_parallel(self):
         """Semaphore(2) 时 3 个工具仍有一定并行度。"""
-        with patch("app.agent.tool_node._MAX_CONCURRENT_TOOLS", 2):
+        with patch("app.agent.security.orchestrator._MAX_CONCURRENT_TOOLS", 2):
             tool_calls = [
                 _make_tool_call("slow_tool"),  # 50ms
                 _make_tool_call("fast_tool"),  # 10ms
@@ -316,7 +303,7 @@ class TestSemaphoreCapsConcurrency:
             state = _make_state(tool_calls)
 
             start = time.monotonic()
-            await safe_tools_node(state)
+            await secure_tools_node(state)
             elapsed = time.monotonic() - start
 
             # 3 个工具有 Semaphore(2)，前 2 个起步后第 3 个等一个空位
@@ -339,7 +326,7 @@ class TestToolCallIdInSSEEvents:
         ]
         state = _make_state(tool_calls)
 
-        result = await safe_tools_node(state)
+        result = await secure_tools_node(state)
         sse_events = result["sse_events"]
 
         # 过滤出 tool_result 事件
@@ -368,7 +355,7 @@ class TestToolMessageOrder:
         ]
         state = _make_state(tool_calls)
 
-        result = await safe_tools_node(state)
+        result = await secure_tools_node(state)
 
         # 验证 ToolMessage 顺序与 tool_calls 一致
         for i, msg in enumerate(result["messages"]):
@@ -387,7 +374,7 @@ class TestToolMessageOrder:
         ]
         state = _make_state(tool_calls)
 
-        result = await safe_tools_node(state)
+        result = await secure_tools_node(state)
 
         assert len(result["messages"]) == 3
         assert result["messages"][0].tool_call_id == "call_1"
@@ -404,7 +391,7 @@ class TestOutputStructure:
         tool_calls = [_make_tool_call("fast_tool")]
         state = _make_state(tool_calls)
 
-        result = await safe_tools_node(state)
+        result = await secure_tools_node(state)
 
         assert "messages" in result
         assert "sse_events" in result
@@ -418,7 +405,7 @@ class TestOutputStructure:
         # 使上次消息不含 tool_calls
         state["messages"] = [AIMessage(content="你好")]
 
-        result = await safe_tools_node(state)
+        result = await secure_tools_node(state)
         assert "sse_events" in result
         assert "messages" not in result or result["messages"] == []
 
@@ -444,7 +431,7 @@ class TestToolResultExportFields:
         mock_registry = {"query_tool": _MockTool(_return_query_result)}
         with patch("app.agent.tools.registry.TOOL_REGISTRY", mock_registry):
             state = _make_state([_make_tool_call("query_tool", {"sql": "SELECT * FROM t"})])
-            result = await safe_tools_node(state)
+            result = await secure_tools_node(state)
 
         tool_result_events = [e for e in result["sse_events"] if e.get("type") == "tool_result"]
         assert len(tool_result_events) == 1
@@ -462,7 +449,7 @@ class TestToolResultExportFields:
         mock_registry = {"plain_tool": _MockTool(_return_summary)}
         with patch("app.agent.tools.registry.TOOL_REGISTRY", mock_registry):
             state = _make_state([_make_tool_call("plain_tool")])
-            result = await safe_tools_node(state)
+            result = await secure_tools_node(state)
 
         tool_result_events = [e for e in result["sse_events"] if e.get("type") == "tool_result"]
         assert len(tool_result_events) == 1
