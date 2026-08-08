@@ -35,7 +35,7 @@ STAGE_REGISTRY: dict[str, type[SecurityStage]] = {
 }
 
 # =============================================================================
-# 安全注册表：11 个工具 → SecurityProfile（安全策略单一事实源）
+# 安全注册表：12 个工具 → SecurityProfile（安全策略单一事实源）
 # =============================================================================
 
 SECURITY_REGISTRY: dict[str, SecurityProfile] = {
