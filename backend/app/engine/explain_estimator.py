@@ -3,7 +3,7 @@ EXPLAIN 多维度安全评估引擎。
 
 核心职责：
   1. 指标提取 — 解析 MySQL / PostgreSQL / Oracle 的 EXPLAIN 输出为标准化 ExplainMetrics
-  2. 规则引擎 — 基于硬编码阈值的决策矩阵，CRITICAL 阻断 / WARNING 告警
+  2. 规则引擎 — 基于硬编码阈值的决策矩阵，CRITICAL 阻断 / LOW 放行（WARNING 级别已移除）
   3. 结果截断 — 保护 LLM 上下文窗口，截断超量查询结果
 
 依据 docs/explain-row-estimation-plan.md 方案设计。
@@ -46,7 +46,7 @@ class ExplainDecision:
 
     Attributes:
         allowed: 是否允许执行。
-        risk_level: 风险级别（LOW / WARNING / CRITICAL）。
+        risk_level: 风险级别（LOW / CRITICAL；WARNING 级别已移除）。
         reasons: 阻断或警告原因列表。
         metrics: 评估所用的指标（供上游日志记录）。
     """

@@ -75,7 +75,7 @@ class AgentState(TypedDict, total=False):
         error: 错误信息（若有）。
 
         # ── 防改写死循环 ──
-        consecutive_blocks: 连续被 RowEstimationCheck 拦截的次数。
+        consecutive_blocks: 连续被 RowEstimationStage 拦截的次数。
             safe_tools_node 中递增，本轮无 RE 拦截时重置为 0。
 
         # ── 上下文压缩（context-compression-plan） ──
@@ -111,7 +111,7 @@ class AgentState(TypedDict, total=False):
     error: str | None
 
     # ── 防改写死循环 ──
-    consecutive_blocks: int  # 连续被 RowEstimationCheck 拦截的次数，safe_tools_node 递增，无拦截/切换工具时重置为 0
+    consecutive_blocks: int  # 连续被 RowEstimationStage 拦截的次数，safe_tools_node 递增，无拦截/切换工具时重置为 0
 
     # ── 上下文压缩（context-compression-plan） ──
     history_digest: str | None  # 当前轮之前的历史摘要（抽取式文本）

@@ -282,13 +282,13 @@ DB-Pilot 采用**单一声明式安全流水线**（`backend/app/agent/security/
 
 ### 2. 安全阶段（`agent/security/stages.py`）
 - **SQLAuditStage**：sqlglot 解析审计，拦截 DROP / ALTER / TRUNCATE / CREATE / GRANT / REVOKE 等危险 DDL、非 admin 的 DELETE / UPDATE / INSERT / MERGE 与多语句注入。**写操作在确认前先过此关**，审计通过才进确认流。
-- **RowEstimationStage**：EXPLAIN 提取 5 维标准化指标（访问方式 / 扫描行数 / 返回行数 / 查询成本 / 额外操作），6 条 CRITICAL 规则评估，命中则阻断并引导 LLM 改写；EXPLAIN 失败时降级放行。
+- **RowEstimationStage**：EXPLAIN 提取 5 维标准化指标（访问方式 / 扫描行数 / 返回行数 / 查询成本 / 额外操作），7 条 CRITICAL 规则评估，命中则阻断并引导 LLM 改写；EXPLAIN 失败时降级放行。
 - **ConfirmStage**：标记型阶段，驱动批量确认（`sql_write` / `connection_kill` / `generic` 分类）。
 - **连续拦截保护**：防 LLM 反复改写绕过 —— 结构化 `ROW_ESTIMATION_BLOCKED` 识别，第 3 次拦截返回强建议 ToolMessage，第 5 次强制终止。
 
 ### 3. 纵深防护
 - **参数化查询**：禁止字符串拼接 SQL，一律使用参数绑定。
-- **结果脱敏**：敏感列（密码 / token 等）自动掩码；结果截断（200 行 / 80K 字符）防上下文溢出。
+- **结果脱敏**：敏感列（密码 / token 等）自动掩码；结果截断（默认 100 行 / 40K 字符）防上下文溢出。
 - **连接密码内存态**：目标库密码仅存于请求内存 state，绝不持久化。
 - **LLM 全局限流**：`LLMLimiter` 进程级 Semaphore 硬上限，防 provider 429 与成本失控。
 - **软删除感知**：`describe_table` 标注软删除标识列，系统提示词强制"删除用 UPDATE 置标而非 DELETE"。
