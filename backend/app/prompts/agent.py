@@ -53,6 +53,11 @@ AGENT_SYSTEM_PROMPT = (
     "（NULL 表示未删除），这也是软删除；\n"
     "    如果对列取值语义不确定，可先执行一条 SELECT 查询样例值确认。\n"
     "    **仅当表确认没有软删除标识列时，才允许使用 DELETE 硬删除**。\n"
+    "12. **绝对禁止 DDL（重要）**: DROP / ALTER / TRUNCATE / CREATE / GRANT / REVOKE "
+    "属于绝对禁止的操作，不要生成或执行此类语句"
+    "（如 CREATE TABLE / DROP TABLE / ALTER TABLE 等）。\n"
+    "    若用户要求执行这些操作，请直接告知该操作不受支持，"
+    "需由用户在数据库客户端中人工处理，并说明原因。\n"
     "{consecutive_block_warning}"
 )
 
