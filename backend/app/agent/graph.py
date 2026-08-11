@@ -263,7 +263,7 @@ async def agent_node(state: AgentState) -> dict[str, Any]:
         )
 
     # ── 构建消息列表：压缩路径为 摘要 + 近K轮 + 当前轮，否则全量 ──
-    llm_messages = _build_llm_messages(state, history_digest=digest)
+    llm_messages = _build_llm_messages(state, history_digest=digest, window_k=k)
 
     # ── 记录本轮输入增量（避免重复打印全量历史） ──
     if settings.AGENT_DEBUG:
@@ -1024,6 +1024,7 @@ def _build_system_prompt(state: AgentState) -> str:
 def _build_llm_messages(
     state: AgentState,
     history_digest: str | None = None,
+    window_k: int | None = None,
 ) -> list:
     """构建发送给 LangChain Chat 模型的消息列表（任务 4：标准化重构）。
 
@@ -1050,11 +1051,20 @@ def _build_llm_messages(
     Args:
         state: 当前 AgentState。
         history_digest: 跨轮摘要文本（_ensure_digest 返回）。None 表示不压缩。
+        window_k: 近 K 轮窗口大小。agent_node 传入本轮 _effective_window_k 的最新决策
+            （闲置衰减时 K=0 → 窗口清空、全部进摘要，首轮即生效）；未传入时回退读
+            checkpoint 的 context_window_k（兼容直接调用/测试）。
 
     Returns:
         [SystemMessage, ...历史消息] 列表。
     """
-    k = state.get("context_window_k", settings.AGENT_KEEP_RECENT_TURNS)
+    # window_k 显式传入优先：与 _partition_turns 摘要切分共用同一 K 来源，
+    # 避免首轮读到旧 checkpoint 值导致"闲置衰减 K=0 但窗口仍保留近 K 轮"的偏差。
+    k = (
+        window_k
+        if window_k is not None
+        else state.get("context_window_k", settings.AGENT_KEEP_RECENT_TURNS)
+    )
     history, window, current = _partition_turns(state.get("messages", []), k)
     system_text = _build_system_prompt(state)
 

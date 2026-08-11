@@ -536,6 +536,28 @@ class TestBuildLlmMessages:
         assert not any(m.content == "问题1" for m in out), "远古轮 HumanMessage 不单独出现"
         assert "问题1" in out[1].content, "远古轮信息应在摘要中"
 
+    def test_window_k_zero_after_idle_decay(self) -> None:
+        """闲置衰减首轮：window_k=0 时窗口清空，只发摘要 + 当前轮（修复 stale-read）。
+
+        模拟 agent_node 首轮调用：_effective_window_k 算出 K=0（闲置衰减），
+        state_updates 尚未合并，state.context_window_k 仍是旧值 1——
+        但 window_k 显式传入 0 后，窗口必须为空，旧 K 轮不再逐字保留。
+        """
+        state = self._compressed_state()  # state["context_window_k"] = 1
+        assert state["context_window_k"] == 1, "前置：checkpoint 仍持旧 K"
+        out = _build_llm_messages(
+            state,
+            history_digest=state["history_digest"],
+            window_k=0,
+        )
+        # 结构 = system + 摘要 + 当前轮，无窗口逐字
+        assert isinstance(out[0], SystemMessage)
+        assert isinstance(out[1], HumanMessage) and "历史对话摘要" in out[1].content
+        assert out[-1].content == "问题3", "当前轮逐字保留"
+        # 远古轮与旧窗口轮都不作为独立消息出现（全部进摘要）
+        assert not any(m.content == "问题1" for m in out), "远古轮不单独出现"
+        assert not any(m.content == "问题2" for m in out), "旧窗口轮不单独出现"
+
     def test_non_compressed_full_history(self) -> None:
         """非压缩路径：与旧逻辑一致，全量发送。"""
         state = self._compressed_state()
