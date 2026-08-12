@@ -44,18 +44,28 @@ SECURITY_REGISTRY: dict[str, SecurityProfile] = {
     "list_tables": SecurityProfile(),
     "describe_table": SecurityProfile(),
     # execute_readonly_sql：前置 sql 审计（PRE_CONFIRM 纯审计）
+    # + 语句类型白名单（只放行只读语句，堵住 GRANT/REPLACE/MERGE 等 Command 回退绕过）
     # + 确认后 EXPLAIN 安全评估（PRE_EXECUTE，只跑一遍）
     "execute_readonly_sql": SecurityProfile(
         stages=(
-            StageRef("sql_audit", StagePhase.PRE_CONFIRM),
+            StageRef(
+                "sql_audit",
+                StagePhase.PRE_CONFIRM,
+                params={"allowed_stmt_types": ("SELECT", "SHOW", "EXPLAIN", "UNION", "USE", "SET")},
+            ),
             StageRef("row_estimation", StagePhase.PRE_EXECUTE),
         ),
     ),
     # execute_write_sql：★ 补审计缺口——写操作确认前先过 SQLAuditCheck，
     # 红线 DDL / 非 admin 写操作在确认流之前即被拦（不再弹确认卡片）
+    # + 语句类型白名单（只放行 INSERT/UPDATE/DELETE，同堵 Command 回退绕过）
     "execute_write_sql": SecurityProfile(
         stages=(
-            StageRef("sql_audit", StagePhase.PRE_CONFIRM),
+            StageRef(
+                "sql_audit",
+                StagePhase.PRE_CONFIRM,
+                params={"allowed_stmt_types": ("INSERT", "UPDATE", "DELETE")},
+            ),
             StageRef("confirm", StagePhase.CONFIRM, params={"category": "sql_write"}),
         ),
     ),
@@ -63,9 +73,7 @@ SECURITY_REGISTRY: dict[str, SecurityProfile] = {
     "get_slow_queries": SecurityProfile(),
     # explain_query：前置 sql 审计（EXPLAIN 自身的 sql 也需审计）
     "explain_query": SecurityProfile(
-        stages=(
-            StageRef("sql_audit", StagePhase.PRE_CONFIRM),
-        ),
+        stages=(StageRef("sql_audit", StagePhase.PRE_CONFIRM),),
     ),
     # ── 故障排查类工具 ──
     "check_connections": SecurityProfile(),
@@ -73,9 +81,7 @@ SECURITY_REGISTRY: dict[str, SecurityProfile] = {
     "analyze_locks": SecurityProfile(),
     # kill_transaction：终止连接是危险操作，走 connection_kill 确认流
     "kill_transaction": SecurityProfile(
-        stages=(
-            StageRef("confirm", StagePhase.CONFIRM, params={"category": "connection_kill"}),
-        ),
+        stages=(StageRef("confirm", StagePhase.CONFIRM, params={"category": "connection_kill"}),),
     ),
     "check_replication": SecurityProfile(),
     # ── 健康巡检类工具 ──

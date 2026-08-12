@@ -51,6 +51,16 @@ class TestProfiles:
             ("sql_audit", StagePhase.PRE_CONFIRM),
             ("row_estimation", StagePhase.PRE_EXECUTE),
         ]
+        # sql_audit 声明只读语句类型白名单
+        audit_ref = profile.stages[0]
+        assert audit_ref.params.get("allowed_stmt_types") == (
+            "SELECT",
+            "SHOW",
+            "EXPLAIN",
+            "UNION",
+            "USE",
+            "SET",
+        )
 
     def test_execute_write_sql_profile_has_pre_confirm_audit(self):
         """execute_write_sql：★ 审计缺口已补——sql_audit 前置 + confirm。"""
@@ -59,6 +69,13 @@ class TestProfiles:
             ("sql_audit", StagePhase.PRE_CONFIRM),
             ("confirm", StagePhase.CONFIRM),
         ]
+        # sql_audit 声明写语句类型白名单（只放行 DML）
+        audit_ref = profile.stages[0]
+        assert audit_ref.params.get("allowed_stmt_types") == (
+            "INSERT",
+            "UPDATE",
+            "DELETE",
+        )
         # confirm 阶段携带 sql_write 分类
         confirm_ref = profile.confirm_ref()
         assert confirm_ref is not None

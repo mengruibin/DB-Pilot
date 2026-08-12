@@ -27,9 +27,11 @@ logger = structlog.get_logger(__name__)
 # 数据类型
 # =============================================================================
 
+
 @dataclass
 class Violation:
     """违规项：记录被拦截的 SQL 违规详情。"""
+
     type: str  # 违规类型，如 "DDL_STATEMENT"、"DML_WITHOUT_ADMIN"
     message: str  # 面向用户的违规说明
     location: str  # 违规位置（SQL 片段或行号）
@@ -38,6 +40,7 @@ class Violation:
 @dataclass
 class AuditResult:
     """审计结果。"""
+
     passed: bool  # 是否通过审计
     is_readonly: bool  # 是否为纯只读查询
     violations: list[Violation] = field(default_factory=list)
@@ -88,6 +91,7 @@ _DIALECT_MAP: dict[str, str] = {
 # 核心审计函数
 # =============================================================================
 
+
 def audit(
     sql: str,
     db_type: str = "mysql",
@@ -118,11 +122,13 @@ def audit(
 
     # 检查 SELECT ... INTO OUTFILE（AC-4）
     if _has_data_export_pattern(sql_upper):
-        violations.append(Violation(
-            type="DATA_EXPORT",
-            message="SELECT ... INTO OUTFILE 存在数据导出风险，已被拦截",
-            location=sql[:80],
-        ))
+        violations.append(
+            Violation(
+                type="DATA_EXPORT",
+                message="SELECT ... INTO OUTFILE 存在数据导出风险，已被拦截",
+                location=sql[:80],
+            )
+        )
 
     # Step 2: 多语句检测（AC-5）
     # 若 SQL 包含多条语句，直接拦截
@@ -175,9 +181,13 @@ def audit(
     if result.passed:
         logger.info("SQL审计通过", sql=sql[:200], db_type=db_type, user_role=user_role)
     else:
-        logger.warning("SQL审计拦截", sql=sql[:200], db_type=db_type,
-                       user_role=user_role,
-                       violations=[v.type for v in result.violations])
+        logger.warning(
+            "SQL审计拦截",
+            sql=sql[:200],
+            db_type=db_type,
+            user_role=user_role,
+            violations=[v.type for v in result.violations],
+        )
 
     return result
 
@@ -185,6 +195,7 @@ def audit(
 # =============================================================================
 # 内部检测函数
 # =============================================================================
+
 
 def _check_multiple_statements(sql: str) -> Violation | None:
     """检测 SQL 是否包含多条语句。
@@ -300,3 +311,37 @@ def _extract_target_name(statement: exp.Expr) -> str:
     except Exception:
         pass
     return ""
+
+
+def get_statement_types(sql: str, db_type: str = "mysql") -> tuple[list[str], str | None]:
+    """解析 SQL 并返回顶层语句类型列表（供语句类型白名单校验，fail-closed）。
+
+    与 audit() 共享 sqlglot 解析，但独立处理：
+      - 过滤 Semicolon 占位节点（尾部分号不计为一条语句）
+      - 解析失败时返回错误信息而非抛异常——调用方据此 fail-closed 拦截，
+        堵住 sqlglot 对 GRANT/REPLACE 等的 Command 回退、对 MERGE/LOAD DATA 等的
+        解析异常绕过（这类语句无法被 AST 类型白名单确认，一律不放行）。
+
+    Args:
+        sql: SQL 语句。
+        db_type: 数据库类型（mysql / postgresql / oracle）。
+
+    Returns:
+        (types, error)：types 为语句类型列表（如 ["INSERT"]，与 _get_statement_type
+        的字符串一致）；error 非空表示解析失败（此时 types 为空列表）。
+    """
+    dialect = _DIALECT_MAP.get(db_type, "mysql")
+    try:
+        parsed = sqlglot.parse(sql, dialect=dialect)
+    except Exception as exc:
+        return [], f"SQL 语法解析失败：{exc}"
+
+    types: list[str] = []
+    for statement in parsed:
+        if statement is None:
+            continue
+        if isinstance(statement, exp.Semicolon):
+            # 尾部分号占位节点，不计入语句类型
+            continue
+        types.append(_get_statement_type(statement))
+    return types, None

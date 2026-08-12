@@ -48,8 +48,11 @@ def _conn(user_role: str = "readonly") -> dict:
 def _ctx(user_role: str = "readonly") -> SecurityContext:
     conn = _conn(user_role)
     return SecurityContext(
-        run_id="r", session_id="s1", conn_config=conn,
-        user_role=user_role, consecutive_blocks=0,
+        run_id="r",
+        session_id="s1",
+        conn_config=conn,
+        user_role=user_role,
+        consecutive_blocks=0,
     )
 
 
@@ -95,8 +98,7 @@ class TestSQLAuditStage:
     async def test_blocks_merge_for_non_admin(self):
         """★ MERGE 非 admin 必拦（审计缺口已补）。"""
         result = await self._check(
-            "MERGE INTO t1 USING t2 ON (t1.id = t2.id) "
-            "WHEN MATCHED THEN UPDATE SET t1.a = t2.a",
+            "MERGE INTO t1 USING t2 ON (t1.id = t2.id) WHEN MATCHED THEN UPDATE SET t1.a = t2.a",
             user_role="readonly",
         )
         assert result.blocked
@@ -109,8 +111,7 @@ class TestSQLAuditStage:
             "DELETE FROM t WHERE id = 1",
             "UPDATE t SET a = 1 WHERE id = 1",
             "INSERT INTO t VALUES (1)",
-            "MERGE INTO t1 USING t2 ON (t1.id = t2.id) "
-            "WHEN MATCHED THEN UPDATE SET t1.a = t2.a",
+            "MERGE INTO t1 USING t2 ON (t1.id = t2.id) WHEN MATCHED THEN UPDATE SET t1.a = t2.a",
         ):
             result = await self._check(sql, user_role="admin")
             assert not result.blocked, f"admin DML 被误拦: {sql}"
@@ -134,7 +135,8 @@ class TestSQLAuditStage:
         with patch("app.engine.sql_auditor.audit", side_effect=ImportError):
             result = await stage.check(
                 _tc("execute_readonly_sql", {"sql": "SELECT 1"}, "call_1"),
-                _conn(), _ctx(),
+                _conn(),
+                _ctx(),
             )
         assert not result.blocked
         assert result.warnings  # 非空警告
@@ -146,10 +148,106 @@ class TestSQLAuditStage:
         with patch("app.engine.sql_auditor.audit", side_effect=RuntimeError("boom")):
             result = await stage.check(
                 _tc("execute_readonly_sql", {"sql": "SELECT 1"}, "call_1"),
-                _conn(), _ctx(),
+                _conn(),
+                _ctx(),
             )
         assert not result.blocked
         assert result.warnings
+
+
+# =============================================================================
+# SQLAuditStage 语句类型白名单（allowed_stmt_types，fail-closed）
+# =============================================================================
+
+
+class TestSQLAuditStageStmtTypeWhitelist:
+    """语句类型白名单：fail-closed 硬约束，堵住 Command 回退 / 解析异常绕过。"""
+
+    WRITE_ALLOWED = ("INSERT", "UPDATE", "DELETE")
+    READ_ALLOWED = ("SELECT", "SHOW", "EXPLAIN", "UNION", "USE", "SET")
+
+    async def _check(
+        self,
+        sql: str,
+        allowed: tuple[str, ...],
+        user_role: str = "admin",
+    ) -> StageResult:
+        stage = SQLAuditStage(allowed_stmt_types=allowed)
+        return await stage.check(
+            _tc("execute_readonly_sql", {"sql": sql}, "call_1"),
+            _conn(user_role),
+            _ctx(user_role),
+        )
+
+    # ── 写工具：只放行 INSERT/UPDATE/DELETE ──
+    @pytest.mark.asyncio
+    async def test_write_tool_allows_dml(self):
+        """写工具白名单：INSERT/UPDATE/DELETE（含 WITH 前缀）放行。"""
+        for sql in (
+            "INSERT INTO t VALUES (1)",
+            "UPDATE t SET a = 1 WHERE id = 1",
+            "DELETE FROM t WHERE id = 1",
+            "WITH c AS (SELECT 1) DELETE FROM t WHERE id = 1",
+            "INSERT INTO t (a) SELECT * FROM src",  # INSERT...SELECT 仍是 Insert
+        ):
+            result = await self._check(sql, self.WRITE_ALLOWED)
+            assert not result.blocked, f"写工具误拦合法 DML: {sql}"
+
+    @pytest.mark.asyncio
+    async def test_write_tool_blocks_non_dml(self):
+        """写工具白名单：非 DML（SELECT/GRANT/REPLACE/MERGE/DDL）一律拦截。"""
+        for sql in (
+            "SELECT * FROM t",
+            "GRANT ALL ON *.* TO u",  # Command 回退
+            "REPLACE INTO t (a) VALUES (1)",  # Command 回退
+            "MERGE INTO t1 USING t2 ON (t1.id = t2.id) "
+            "WHEN MATCHED THEN UPDATE SET t1.a = t2.a",  # Merge 类型 / 解析异常
+            "RENAME TABLE a TO b",  # Command 回退
+            "SET GLOBAL slow_query_log = ON",
+            "CREATE USER u IDENTIFIED BY p",  # Command 回退
+            "DROP TABLE t",
+        ):
+            result = await self._check(sql, self.WRITE_ALLOWED)
+            assert result.blocked, f"写工具放行非 DML: {sql}"
+            assert result.block_code == "SQL_STMT_TYPE_BLOCKED"
+
+    @pytest.mark.asyncio
+    async def test_write_tool_blocks_multi_statement(self):
+        """写工具白名单：多语句（白名单内类型也不行）拦截。"""
+        result = await self._check("DELETE FROM t WHERE id = 1; DELETE FROM t2", self.WRITE_ALLOWED)
+        assert result.blocked
+        assert result.block_code == "SQL_STMT_TYPE_BLOCKED"
+
+    # ── 只读工具：只放行只读语句，拦写语句（即使 admin） ──
+    @pytest.mark.asyncio
+    async def test_readonly_tool_allows_read(self):
+        """只读工具白名单：SELECT/SHOW/DESC/EXPLAIN/UNION/USE/SET 放行。"""
+        for sql in (
+            "SELECT * FROM t",
+            "SELECT 1 UNION SELECT 2",  # 顶层 UNION
+            "SHOW TABLES",
+            "DESC t",  # Describe → EXPLAIN
+            "EXPLAIN SELECT * FROM t",
+            "USE mydb",
+            "SET NAMES utf8mb4",
+        ):
+            result = await self._check(sql, self.READ_ALLOWED)
+            assert not result.blocked, f"只读工具误拦合法只读语句: {sql}"
+
+    @pytest.mark.asyncio
+    async def test_readonly_tool_blocks_writes(self):
+        """只读工具白名单：写语句（即使 admin）一律拦截。"""
+        for sql in (
+            "INSERT INTO t VALUES (1)",
+            "UPDATE t SET a = 1 WHERE id = 1",
+            "DELETE FROM t WHERE id = 1",
+            "REPLACE INTO t (a) VALUES (1)",
+            "GRANT ALL ON *.* TO u",
+            "WITH c AS (SELECT 1) DELETE FROM t WHERE id = 1",  # WITH 前缀藏不住
+        ):
+            result = await self._check(sql, self.READ_ALLOWED)
+            assert result.blocked, f"只读工具放行写语句: {sql}"
+            assert result.block_code == "SQL_STMT_TYPE_BLOCKED"
 
 
 # =============================================================================
@@ -185,7 +283,8 @@ class TestRowEstimationStage:
         with patch.object(stage, "_create_temp_adapter", AsyncMock(return_value=_mock_adapter())):
             result = await stage.check(
                 _tc("execute_readonly_sql", {"sql": "SELECT * FROM big_table"}, "call_1"),
-                _conn(), _ctx(),
+                _conn(),
+                _ctx(),
             )
         assert result.blocked
         assert result.block_code == "ROW_ESTIMATION_BLOCKED"
@@ -198,7 +297,8 @@ class TestRowEstimationStage:
         with patch.object(stage, "_create_temp_adapter", AsyncMock(return_value=_mock_adapter())):
             result = await stage.check(
                 _tc("execute_readonly_sql", {"sql": "SHOW TABLES"}, "call_1"),
-                _conn(), _ctx(),
+                _conn(),
+                _ctx(),
             )
         assert not result.blocked
 
@@ -218,7 +318,8 @@ class TestRowEstimationStage:
         with patch.object(stage, "_create_temp_adapter", AsyncMock(return_value=adapter)):
             result = await stage.check(
                 _tc("execute_readonly_sql", {"sql": "SELECT * FROM t"}, "call_1"),
-                _conn(), _ctx(),
+                _conn(),
+                _ctx(),
             )
         assert not result.blocked
         assert result.warnings
@@ -232,7 +333,8 @@ class TestRowEstimationStage:
         ):
             result = await stage.check(
                 _tc("execute_readonly_sql", {"sql": "SELECT * FROM t"}, "call_1"),
-                _conn(), _ctx(),
+                _conn(),
+                _ctx(),
             )
         assert not result.blocked
         assert result.warnings
@@ -250,7 +352,8 @@ class TestRowEstimationStage:
         with patch.object(stage, "_create_temp_adapter", AsyncMock(return_value=adapter)):
             result = await stage.check(
                 _tc("execute_readonly_sql", {"sql": "SELECT * FROM t WHERE id = 1"}, "call_1"),
-                _conn(), _ctx(),
+                _conn(),
+                _ctx(),
             )
         assert not result.blocked
 
@@ -266,7 +369,8 @@ class TestConfirmStage:
         """标记型阶段：check 恒 blocked=False。"""
         result = await ConfirmStage().check(
             _tc("execute_write_sql", {"sql": "INSERT INTO t VALUES (1)"}, "call_1"),
-            _conn(), _ctx(),
+            _conn(),
+            _ctx(),
         )
         assert not result.blocked
 

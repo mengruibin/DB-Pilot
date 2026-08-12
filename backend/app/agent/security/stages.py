@@ -74,22 +74,59 @@ class SQLAuditStage(SecurityStage):
     name = "sql_audit"
     phase = StagePhase.PRE_CONFIRM
 
+    def __init__(self, allowed_stmt_types: tuple[str, ...] | None = None) -> None:
+        """初始化 SQL 审计阶段。
+
+        Args:
+            allowed_stmt_types: 语句类型白名单（如 ("INSERT", "UPDATE", "DELETE")）。
+                经 SECURITY_REGISTRY 的 StageRef.params 注入。配置后强制校验 SQL
+                顶层语句类型必须落在名单内（fail-closed）：解析失败 / 多语句 /
+                未知类型一律拦截，堵住 sqlglot Command 回退（GRANT/REPLACE 等）与
+                解析异常（MERGE/LOAD DATA 等）导致的审计绕过。
+                未配置时保持原审计行为（fail-open 语义不变）。
+        """
+        self._allowed_stmt_types = frozenset(allowed_stmt_types) if allowed_stmt_types else None
+
     async def check(
         self,
         tool_call: Mapping[str, Any],
         conn_config: dict[str, Any],
         ctx: SecurityContext,
     ) -> StageResult:
-        """对 SQL 类工具调用执行审计检查。"""
+        """对 SQL 类工具调用执行审计检查（含语句类型白名单硬约束）。"""
         sql = (tool_call.get("args") or {}).get("sql", "")
         if not sql:
             return StageResult(blocked=False)
 
+        db_type = conn_config.get("db_type", "mysql")
+        user_role = conn_config.get("user_role", "readonly")
+
+        # ── Step 1: 语句类型白名单（工具契约硬约束，fail-closed）──
+        # 白名单配置后，SQL 顶层语句类型必须落在名单内；解析失败 / 多语句 /
+        # 未知类型一律拦截（不允许"无法确认即放行"），
+        # 堵住 sqlglot Command 回退（GRANT/REPLACE 等）与解析异常（MERGE 等）绕过。
+        if self._allowed_stmt_types is not None:
+            from app.engine.sql_auditor import get_statement_types
+
+            stmt_types, parse_error = get_statement_types(sql, db_type)
+            allowed_str = " / ".join(sorted(self._allowed_stmt_types))
+            if parse_error:
+                return StageResult(
+                    blocked=True,
+                    block_code="SQL_STMT_TYPE_BLOCKED",
+                    reason=f"SQL 无法解析，无法确认语句类型（仅允许 {allowed_str}），已拦截",
+                )
+            if len(stmt_types) != 1 or stmt_types[0] not in self._allowed_stmt_types:
+                actual = stmt_types[0] if stmt_types else "（空）"
+                return StageResult(
+                    blocked=True,
+                    block_code="SQL_STMT_TYPE_BLOCKED",
+                    reason=(f"该工具只允许 {allowed_str} 类型语句，实际为 {actual}，已拦截"),
+                )
+
+        # ── Step 2: 现有 sqlglot 审计（fail-open 语义保留）──
         try:
             from app.engine.sql_auditor import audit
-
-            db_type = conn_config.get("db_type", "mysql")
-            user_role = conn_config.get("user_role", "readonly")
 
             result = audit(sql, db_type, user_role=user_role)
 
@@ -370,6 +407,17 @@ class ConfirmStage(SecurityStage):
 
     name = "confirm"
     phase = StagePhase.CONFIRM
+
+    def __init__(self, category: str = "generic") -> None:
+        """初始化确认阶段。
+
+        Args:
+            category: 确认卡片分类（sql_write / connection_kill / generic）。
+                经 STAGE_REGISTRY[ref.name](**ref.params) 注入；check() 不消费，
+                实际分类在 build_action 调用处（orchestrator 读取 ref.params）使用，
+                构造函数仅接收以保证 orchestrator 统一传参。
+        """
+        self.category = category
 
     async def check(
         self,

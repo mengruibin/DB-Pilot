@@ -185,7 +185,8 @@ async def _run_tool_pre_confirm(
     for ref in profile.stages:
         if ref.phase is not StagePhase.PRE_CONFIRM:
             continue
-        stage = STAGE_REGISTRY[ref.name]()
+        # StageRef.params 注入阶段构造参数（如 SQLAuditStage 的 allowed_stmt_types）
+        stage = STAGE_REGISTRY[ref.name](**ref.params)
         result = await stage.check(tc, conn_config, ctx)
         if result.blocked:
             return result
@@ -207,6 +208,7 @@ async def run_pre_confirm(
     PRE_CONFIRM 阶段必须纯（无 DB 副作用）——interrupt 重放会跑两遍。
     阶段异常按 fail-open 放行（与现状 run_safety_checks 语义一致），不阻断流程。
     """
+
     async def _one(tc: Mapping[str, Any]) -> tuple[str, StageResult | None]:
         async with semaphore:
             profile = profiles.get(tc["name"]) or get_security_profile(tc["name"])
@@ -432,16 +434,11 @@ async def _execute_tool(
                 )
             # 只读查询结果：附加导出元信息（供前端渲染「导出完整结果」按钮）
             export_meta = {}
-            if (
-                result.get("is_readonly") is True
-                and isinstance(result.get("columns"), list)
-            ):
+            if result.get("is_readonly") is True and isinstance(result.get("columns"), list):
                 export_meta = {
                     "export_sql": tool_args.get("sql", ""),
                     # 截断后 total_rows 保留原始总数，_original_total_rows 兼容兜底
-                    "total_rows": result.get(
-                        "_original_total_rows", result.get("total_rows", 0)
-                    ),
+                    "total_rows": result.get("_original_total_rows", result.get("total_rows", 0)),
                 }
             local_sse.append(
                 {
@@ -489,7 +486,8 @@ async def _run_phase3_tool(
     for ref in profile.stages:
         if ref.phase is not StagePhase.PRE_EXECUTE:
             continue
-        stage = STAGE_REGISTRY[ref.name]()
+        # StageRef.params 注入阶段构造参数（如 SQLAuditStage 的 allowed_stmt_types）
+        stage = STAGE_REGISTRY[ref.name](**ref.params)
         result = await stage.check(tc, conn_config, ctx)
         if result.blocked:
             is_re = result.block_code == "ROW_ESTIMATION_BLOCKED"
@@ -526,11 +524,10 @@ async def run_phase3(
 
     返回按输入顺序排列的 ToolOutcome 列表（re_blocked / blocked / executed / not_found）。
     """
+
     async def _one(tc: Mapping[str, Any]) -> ToolOutcome:
         profile = profiles.get(tc["name"]) or get_security_profile(tc["name"])
-        return await _run_phase3_tool(
-            tc, profile, conn_config, ctx, run_id, iteration, semaphore
-        )
+        return await _run_phase3_tool(tc, profile, conn_config, ctx, run_id, iteration, semaphore)
 
     results = await asyncio.gather(
         *[_one(tc) for tc in tool_calls],
@@ -609,9 +606,7 @@ def _assemble_messages_and_sse(
                 )
             else:
                 content = f"操作被安全策略拦截: {o.reason}"
-            messages.append(
-                ToolMessage(content=content, tool_call_id=tc["id"], name=tool_name)
-            )
+            messages.append(ToolMessage(content=content, tool_call_id=tc["id"], name=tool_name))
             ev = {
                 "type": "tool_result",
                 "tool": tool_name,
@@ -719,8 +714,7 @@ async def run_security_pipeline(
     pending_ids = {
         tc["id"]
         for tc in tool_calls
-        if tc["id"] not in ctx.blocked_calls
-        and (profiles[tc["name"]].confirm_ref() is not None)
+        if tc["id"] not in ctx.blocked_calls and (profiles[tc["name"]].confirm_ref() is not None)
     }
     resume_pass = False
     denied_calls: list[Mapping[str, Any]] = []
@@ -749,9 +743,7 @@ async def run_security_pipeline(
 
     # ── consecutive_blocks（先算 new） ──
     re_blocked_in_order = [o for o in outcomes if o.kind == "re_blocked"]
-    new_consecutive = (
-        ctx.consecutive_blocks + 1 if re_blocked_in_order else 0
-    )
+    new_consecutive = ctx.consecutive_blocks + 1 if re_blocked_in_order else 0
 
     # ── 装配 messages + SSE（advisory 序号基于入口值递增） ──
     messages, new_events = _assemble_messages_and_sse(outcomes, run_id, iteration, ctx)
@@ -790,8 +782,7 @@ async def run_security_pipeline(
                         "type": "error",
                         "error_code": "CONSECUTIVE_BLOCKS_EXCEEDED",
                         "user_message": (
-                            f"连续 {new_consecutive} 次被 EXPLAIN 安全评估拦截，"
-                            "Agent 已自动终止"
+                            f"连续 {new_consecutive} 次被 EXPLAIN 安全评估拦截，Agent 已自动终止"
                         ),
                         "severity": "warning",
                     }
@@ -831,9 +822,7 @@ def _merge_outcomes(
             outcomes.append(phase3_by_id[tc_id])
         else:
             # 防御：理论上不会到达（每个 tool_call 必属于三阶段之一）
-            logger.warning(
-                "tool_call 无 outcome（防御分支）", run_id=None, tool_call_id=tc_id
-            )
+            logger.warning("tool_call 无 outcome（防御分支）", run_id=None, tool_call_id=tc_id)
             outcomes.append(
                 ToolOutcome(tc=tc, kind="executed", content=f"工具 '{tc['name']}' 未处理")
             )

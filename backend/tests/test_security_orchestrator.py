@@ -136,15 +136,11 @@ class TestSinglePassReadonly:
         """单遍只读：无 interrupt，执行一次，ToolMessage 与 tool_call 配对。"""
         counter = {"readonly": 0, "write": 0}
         registry = {
-            "execute_readonly_sql": _MockTool(
-                lambda **kw: _fake_readonly_sql(counter, **kw)
-            ),
+            "execute_readonly_sql": _MockTool(lambda **kw: _fake_readonly_sql(counter, **kw)),
         }
         tcs = [_tc("execute_readonly_sql", {"sql": "SELECT * FROM t"}, "call_ro")]
         with _make_tool_registry(registry):
-            res = await run_security_pipeline(
-                tcs, _profiles(tcs), _CONN, _ctx(), "r", 1, "s1", []
-            )
+            res = await run_security_pipeline(tcs, _profiles(tcs), _CONN, _ctx(), "r", 1, "s1", [])
 
         assert counter["readonly"] == 1
         assert len(res["messages"]) == 1
@@ -165,9 +161,7 @@ class TestPreConfirmBlocks:
         """readonly 发 INSERT 到 execute_write_sql：确认前被 SQL_AUDIT_BLOCKED 拦。"""
         counter = {"readonly": 0, "write": 0}
         registry = {
-            "execute_write_sql": _MockTool(
-                lambda **kw: _fake_write_sql(counter, **kw)
-            ),
+            "execute_write_sql": _MockTool(lambda **kw: _fake_write_sql(counter, **kw)),
         }
         tcs = [_tc("execute_write_sql", {"sql": "INSERT INTO t VALUES (1)"}, "call_w")]
         # conn_config 必须与 ctx 的角色一致（SQLAuditStage 读 conn_config.user_role）
@@ -186,20 +180,20 @@ class TestPreConfirmBlocks:
 
     @pytest.mark.asyncio
     async def test_ddl_blocked_before_confirm(self):
-        """任何人发 DROP TABLE 到 write 工具：确认前被拦，不弹确认卡片。"""
+        """任何人发 DROP TABLE 到 write 工具：确认前被拦，不弹确认卡片。
+
+        现由语句类型白名单在审计之前拦截（DROP 不在 INSERT/UPDATE/DELETE 名单内），
+        仍满足"确认前拦截、不弹确认卡片"语义。
+        """
         counter = {"write": 0}
         registry = {
-            "execute_write_sql": _MockTool(
-                lambda **kw: _fake_write_sql(counter, **kw)
-            ),
+            "execute_write_sql": _MockTool(lambda **kw: _fake_write_sql(counter, **kw)),
         }
         tcs = [_tc("execute_write_sql", {"sql": "DROP TABLE t"}, "call_ddl")]
         with _make_tool_registry(registry):
-            res = await run_security_pipeline(
-                tcs, _profiles(tcs), _CONN, _ctx(), "r", 1, "s1", []
-            )
+            res = await run_security_pipeline(tcs, _profiles(tcs), _CONN, _ctx(), "r", 1, "s1", [])
 
-        assert "SQL 审计未通过" in res["messages"][0].content
+        assert "只允许 DELETE / INSERT / UPDATE" in res["messages"][0].content
         assert counter["write"] == 0
         assert "confirm_required" not in [e["type"] for e in res["sse_events"]]
 
@@ -215,9 +209,7 @@ class TestWriteConfirmFlow:
         """首遍抛 GraphInterrupt；resume 后执行恰一次。"""
         counter = {"write": 0}
         registry = {
-            "execute_write_sql": _MockTool(
-                lambda **kw: _fake_write_sql(counter, **kw)
-            ),
+            "execute_write_sql": _MockTool(lambda **kw: _fake_write_sql(counter, **kw)),
         }
         tcs = [_tc("execute_write_sql", {"sql": "INSERT INTO t VALUES (1)"}, "call_w")]
         profiles = _profiles(tcs)
@@ -225,7 +217,14 @@ class TestWriteConfirmFlow:
         # ── 首遍：interrupt 抛 GraphInterrupt，节点被终止 ──
         with _make_tool_registry(registry), pytest.raises(GraphInterrupt):
             await run_security_pipeline(
-                tcs, profiles, _CONN, _ctx(), "r", 1, "s1", [],
+                tcs,
+                profiles,
+                _CONN,
+                _ctx(),
+                "r",
+                1,
+                "s1",
+                [],
                 interrupt_fn=_interrupt_raises,
             )
         assert counter["write"] == 0  # 首遍绝不执行
@@ -234,7 +233,14 @@ class TestWriteConfirmFlow:
         decision = {"approved_tool_call_ids": ["call_w"], "denied_tool_call_ids": []}
         with _make_tool_registry(registry):
             res = await run_security_pipeline(
-                tcs, profiles, _CONN, _ctx(), "r", 1, "s1", [],
+                tcs,
+                profiles,
+                _CONN,
+                _ctx(),
+                "r",
+                1,
+                "s1",
+                [],
                 interrupt_fn=_interrupt_returns(decision),
             )
         assert counter["write"] == 1
@@ -245,15 +251,20 @@ class TestWriteConfirmFlow:
         """拒绝确认 → 取消消息 + 不执行。"""
         counter = {"write": 0}
         registry = {
-            "execute_write_sql": _MockTool(
-                lambda **kw: _fake_write_sql(counter, **kw)
-            ),
+            "execute_write_sql": _MockTool(lambda **kw: _fake_write_sql(counter, **kw)),
         }
         tcs = [_tc("execute_write_sql", {"sql": "INSERT INTO t VALUES (1)"}, "call_w")]
         decision = {"approved_tool_call_ids": [], "denied_tool_call_ids": ["call_w"]}
         with _make_tool_registry(registry):
             res = await run_security_pipeline(
-                tcs, _profiles(tcs), _CONN, _ctx(), "r", 1, "s1", [],
+                tcs,
+                _profiles(tcs),
+                _CONN,
+                _ctx(),
+                "r",
+                1,
+                "s1",
+                [],
                 interrupt_fn=_interrupt_returns(decision),
             )
 
@@ -267,9 +278,7 @@ class TestWriteConfirmFlow:
         counter = {"write": 0, "readonly": 0}
         registry = {
             "execute_write_sql": _MockTool(lambda **kw: _fake_write_sql(counter, **kw)),
-            "execute_readonly_sql": _MockTool(
-                lambda **kw: _fake_readonly_sql(counter, **kw)
-            ),
+            "execute_readonly_sql": _MockTool(lambda **kw: _fake_readonly_sql(counter, **kw)),
         }
         tcs = [
             _tc("execute_write_sql", {"sql": "INSERT INTO t VALUES (1)"}, "call_w"),
@@ -283,7 +292,14 @@ class TestWriteConfirmFlow:
 
         with _make_tool_registry(registry), pytest.raises(GraphInterrupt):
             await run_security_pipeline(
-                tcs, _profiles(tcs), _CONN, _ctx(), "r", 1, "s1", [],
+                tcs,
+                _profiles(tcs),
+                _CONN,
+                _ctx(),
+                "r",
+                1,
+                "s1",
+                [],
                 interrupt_fn=_capture_interrupt,
             )
 
@@ -315,9 +331,7 @@ class TestMixedRoundAndTruncation:
         counter = {"readonly": 0, "write": 0}
         registry = {
             "execute_write_sql": _MockTool(lambda **kw: _fake_write_sql(counter, **kw)),
-            "execute_readonly_sql": _MockTool(
-                lambda **kw: _fake_readonly_sql(counter, **kw)
-            ),
+            "execute_readonly_sql": _MockTool(lambda **kw: _fake_readonly_sql(counter, **kw)),
         }
         re_counter = {"calls": 0}
 
@@ -332,24 +346,45 @@ class TestMixedRoundAndTruncation:
         profiles = _profiles(tcs)
 
         # 首遍：interrupt 抛异常 → Phase 3（含 EXPLAIN）不可达
-        with _make_tool_registry(registry), patch(
-            "app.agent.security.stages.RowEstimationStage.check",
-            _mock_re_check,
-        ), pytest.raises(GraphInterrupt):
+        with (
+            _make_tool_registry(registry),
+            patch(
+                "app.agent.security.stages.RowEstimationStage.check",
+                _mock_re_check,
+            ),
+            pytest.raises(GraphInterrupt),
+        ):
             await run_security_pipeline(
-                tcs, profiles, _CONN, _ctx(), "r", 1, "s1", [],
+                tcs,
+                profiles,
+                _CONN,
+                _ctx(),
+                "r",
+                1,
+                "s1",
+                [],
                 interrupt_fn=_interrupt_raises,
             )
         assert re_counter["calls"] == 0  # 首遍 EXPLAIN = 0
 
         # resume 遍：批准写 → 只读 EXPLAIN 恰一次 + 两个工具各执行一次
         decision = {"approved_tool_call_ids": ["call_w"], "denied_tool_call_ids": []}
-        with _make_tool_registry(registry), patch(
-            "app.agent.security.stages.RowEstimationStage.check",
-            _mock_re_check,
+        with (
+            _make_tool_registry(registry),
+            patch(
+                "app.agent.security.stages.RowEstimationStage.check",
+                _mock_re_check,
+            ),
         ):
             res = await run_security_pipeline(
-                tcs, profiles, _CONN, _ctx(), "r", 1, "s1", [],
+                tcs,
+                profiles,
+                _CONN,
+                _ctx(),
+                "r",
+                1,
+                "s1",
+                [],
                 interrupt_fn=_interrupt_returns(decision),
             )
         assert re_counter["calls"] == 1  # EXPLAIN 恰一次
@@ -379,7 +414,14 @@ class TestMixedRoundAndTruncation:
         decision = {"approved_tool_call_ids": ["call_w"], "denied_tool_call_ids": []}
         with _make_tool_registry(registry):
             res = await run_security_pipeline(
-                tcs, _profiles(tcs), _CONN, _ctx(), "r", 1, "s1", initial_sse,
+                tcs,
+                _profiles(tcs),
+                _CONN,
+                _ctx(),
+                "r",
+                1,
+                "s1",
+                initial_sse,
                 interrupt_fn=_interrupt_returns(decision),
             )
 
@@ -392,9 +434,7 @@ class TestMixedRoundAndTruncation:
         """单遍（无 interrupt）：返回 历史 + 新事件（chat.py emitted_count 去重）。"""
         counter = {"readonly": 0}
         registry = {
-            "execute_readonly_sql": _MockTool(
-                lambda **kw: _fake_readonly_sql(counter, **kw)
-            ),
+            "execute_readonly_sql": _MockTool(lambda **kw: _fake_readonly_sql(counter, **kw)),
         }
         tcs = [_tc("execute_readonly_sql", {"sql": "SELECT * FROM t"}, "call_ro")]
         initial_sse = [{"type": "tool_call", "tool_call_id": "call_ro"}]
@@ -417,27 +457,35 @@ class TestConsecutiveBlocks:
         """RE 拦截 → consecutive_blocks 递增。"""
         counter = {"readonly": 0}
         registry = {
-            "execute_readonly_sql": _MockTool(
-                lambda **kw: _fake_readonly_sql(counter, **kw)
-            ),
+            "execute_readonly_sql": _MockTool(lambda **kw: _fake_readonly_sql(counter, **kw)),
         }
         tcs = [_tc("execute_readonly_sql", {"sql": "SELECT * FROM big"}, "call_ro")]
 
         async def _mock_re_block(self, tool_call, conn_config, ctx):
             from app.agent.security.models import StageResult
+
             return StageResult(
                 blocked=True,
                 block_code="ROW_ESTIMATION_BLOCKED",
                 reason="[EXPLAIN 安全评估] 查询被阻断\n原因: 全表扫描预估读取 5000000 行",
             )
 
-        with _make_tool_registry(registry), patch(
-            "app.agent.security.stages.RowEstimationStage.check",
-            _mock_re_block,
+        with (
+            _make_tool_registry(registry),
+            patch(
+                "app.agent.security.stages.RowEstimationStage.check",
+                _mock_re_block,
+            ),
         ):
             res = await run_security_pipeline(
-                tcs, _profiles(tcs), _CONN, _ctx(consecutive_blocks=1),
-                "r", 1, "s1", [],
+                tcs,
+                _profiles(tcs),
+                _CONN,
+                _ctx(consecutive_blocks=1),
+                "r",
+                1,
+                "s1",
+                [],
             )
         assert res["consecutive_blocks"] == 2
         assert counter["readonly"] == 0  # 被拦未执行
@@ -449,9 +497,7 @@ class TestConsecutiveBlocks:
         """同轮多个 RE 拦截 → advisory 序号递增（修复并行旧值）。"""
         counter = {"readonly": 0}
         registry = {
-            "execute_readonly_sql": _MockTool(
-                lambda **kw: _fake_readonly_sql(counter, **kw)
-            ),
+            "execute_readonly_sql": _MockTool(lambda **kw: _fake_readonly_sql(counter, **kw)),
         }
         tcs = [
             _tc("execute_readonly_sql", {"sql": "SELECT * FROM a"}, "call_a"),
@@ -461,19 +507,29 @@ class TestConsecutiveBlocks:
 
         async def _mock_re_block(self, tool_call, conn_config, ctx):
             from app.agent.security.models import StageResult
+
             return StageResult(
                 blocked=True,
                 block_code="ROW_ESTIMATION_BLOCKED",
                 reason="[EXPLAIN 安全评估] 查询被阻断",
             )
 
-        with _make_tool_registry(registry), patch(
-            "app.agent.security.stages.RowEstimationStage.check",
-            _mock_re_block,
+        with (
+            _make_tool_registry(registry),
+            patch(
+                "app.agent.security.stages.RowEstimationStage.check",
+                _mock_re_block,
+            ),
         ):
             res = await run_security_pipeline(
-                tcs, _profiles(tcs), _CONN, _ctx(consecutive_blocks=0),
-                "r", 1, "s1", [],
+                tcs,
+                _profiles(tcs),
+                _CONN,
+                _ctx(consecutive_blocks=0),
+                "r",
+                1,
+                "s1",
+                [],
             )
         # 入口 0 → k=1,2,3：第三个得到 advisory（第 3 次）
         msgs = res["messages"]
@@ -487,15 +543,19 @@ class TestConsecutiveBlocks:
         """本轮无 RE 拦截 → consecutive_blocks 重置为 0。"""
         counter = {"readonly": 0}
         registry = {
-            "execute_readonly_sql": _MockTool(
-                lambda **kw: _fake_readonly_sql(counter, **kw)
-            ),
+            "execute_readonly_sql": _MockTool(lambda **kw: _fake_readonly_sql(counter, **kw)),
         }
         tcs = [_tc("execute_readonly_sql", {"sql": "SELECT * FROM t"}, "call_ro")]
         with _make_tool_registry(registry):
             res = await run_security_pipeline(
-                tcs, _profiles(tcs), _CONN, _ctx(consecutive_blocks=3),
-                "r", 1, "s1", [],
+                tcs,
+                _profiles(tcs),
+                _CONN,
+                _ctx(consecutive_blocks=3),
+                "r",
+                1,
+                "s1",
+                [],
             )
         assert res["consecutive_blocks"] == 0
 
@@ -504,27 +564,35 @@ class TestConsecutiveBlocks:
         """连续拦截 >=5 → 强制终止（is_complete=True + error 事件）。"""
         counter = {"readonly": 0}
         registry = {
-            "execute_readonly_sql": _MockTool(
-                lambda **kw: _fake_readonly_sql(counter, **kw)
-            ),
+            "execute_readonly_sql": _MockTool(lambda **kw: _fake_readonly_sql(counter, **kw)),
         }
         tcs = [_tc("execute_readonly_sql", {"sql": "SELECT * FROM big"}, "call_ro")]
 
         async def _mock_re_block(self, tool_call, conn_config, ctx):
             from app.agent.security.models import StageResult
+
             return StageResult(
                 blocked=True,
                 block_code="ROW_ESTIMATION_BLOCKED",
                 reason="[EXPLAIN 安全评估] 查询被阻断",
             )
 
-        with _make_tool_registry(registry), patch(
-            "app.agent.security.stages.RowEstimationStage.check",
-            _mock_re_block,
+        with (
+            _make_tool_registry(registry),
+            patch(
+                "app.agent.security.stages.RowEstimationStage.check",
+                _mock_re_block,
+            ),
         ):
             res = await run_security_pipeline(
-                tcs, _profiles(tcs), _CONN, _ctx(consecutive_blocks=4),
-                "r", 1, "s1", [],
+                tcs,
+                _profiles(tcs),
+                _CONN,
+                _ctx(consecutive_blocks=4),
+                "r",
+                1,
+                "s1",
+                [],
             )
         assert res["is_complete"] is True
         assert res["consecutive_blocks"] == 5
@@ -542,9 +610,7 @@ class TestToolNotFound:
         """未知工具 → "未注册" ToolMessage。"""
         tcs = [_tc("no_such_tool", {}, "call_x")]
         with _make_tool_registry({}):
-            res = await run_security_pipeline(
-                tcs, _profiles(tcs), _CONN, _ctx(), "r", 1, "s1", []
-            )
+            res = await run_security_pipeline(tcs, _profiles(tcs), _CONN, _ctx(), "r", 1, "s1", [])
         assert "未注册" in res["messages"][0].content
         assert len(res["messages"]) == 1  # 配对
 
@@ -560,9 +626,7 @@ class TestMixedBlockedAndPending:
         """同轮 DDL 被拦 + 合法 INSERT：DDL 不弹卡、INSERT 弹卡。"""
         counter = {"write": 0}
         registry = {
-            "execute_write_sql": _MockTool(
-                lambda **kw: _fake_write_sql(counter, **kw)
-            ),
+            "execute_write_sql": _MockTool(lambda **kw: _fake_write_sql(counter, **kw)),
         }
         tcs = [
             _tc("execute_write_sql", {"sql": "DROP TABLE t"}, "call_ddl"),
@@ -576,7 +640,14 @@ class TestMixedBlockedAndPending:
 
         with _make_tool_registry(registry), pytest.raises(GraphInterrupt):
             await run_security_pipeline(
-                tcs, _profiles(tcs), _CONN, _ctx(), "r", 1, "s1", [],
+                tcs,
+                _profiles(tcs),
+                _CONN,
+                _ctx(),
+                "r",
+                1,
+                "s1",
+                [],
                 interrupt_fn=_capture_interrupt,
             )
 
