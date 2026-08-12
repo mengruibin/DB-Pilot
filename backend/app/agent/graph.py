@@ -210,9 +210,14 @@ async def agent_node(state: AgentState) -> dict[str, Any]:
             last_counted=last_counted,
             last_completion=last_completion,
         )
+        # 触发阈值：显式 AGENT_COMPACT_TRIGGER_TOKENS 优先，否则按模型上下文窗口×0.5
+        # 自动推导（context-window-plan，见 app/agent/context_window.py）。
+        from app.agent.context_window import resolve_compact_trigger
+
+        trigger_tokens = await resolve_compact_trigger()
         need_compress = (
             settings.AGENT_CONTEXT_COMPRESS_ENABLED
-            and est_tokens > settings.AGENT_COMPACT_TRIGGER_TOKENS
+            and est_tokens > trigger_tokens
         )
     if need_compress:
         history_msgs, _, _ = _partition_turns(messages, k)
@@ -240,7 +245,7 @@ async def agent_node(state: AgentState) -> dict[str, Any]:
                 run_id=run_id,
                 iteration=iteration,
                 est_tokens=est_tokens,
-                trigger_tokens=settings.AGENT_COMPACT_TRIGGER_TOKENS,
+                trigger_tokens=trigger_tokens,
                 counted_chars=counted_chars,
                 msg_count=len(messages),
                 digest_chars=digest_chars,

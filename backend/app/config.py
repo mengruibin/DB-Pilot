@@ -68,6 +68,15 @@ class Settings(BaseSettings):
         "开启后 LLM 输出分为 reasoning_content（内部推理）和 content（对外回答），"
         "前端分别渲染到思考面板和主聊天区。",
     )
+    LLM_CONTEXT_WINDOW: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "模型上下文窗口（token）。0=自动：自定义端点探测 /models → "
+            "内置模型注册表 → 默认 64K（见 app/agent/context_window.py）。"
+            "显式配置时覆盖自动推导——探测不到或注册表没有的私有模型必须手填。"
+        ),
+    )
 
     # ==================== 内部数据库 ====================
     DATABASE_URL: str = Field(
@@ -180,10 +189,10 @@ class Settings(BaseSettings):
         description="是否启用上下文压缩。关闭后 _build_llm_messages 全量发送历史（旧行为）。",
     )
     AGENT_COMPACT_TRIGGER_TOKENS: int = Field(
-        default=60_000,
-        ge=4_000,
-        description="懒触发阈值：LLM 输入估算 token 超过该值才启动压缩。"
-        "128K 窗口下约 47% 占用触发，留足当前轮与输出空间；小窗口用户可调低。",
+        default=0,
+        ge=0,
+        description="上下文压缩懒触发阈值（token）。0=自动：按模型上下文窗口 ×0.5 推导"
+        "（含 4K 下限与 12K 输出留白护栏，窗口来源见 LLM_CONTEXT_WINDOW）。>0 时显式覆盖自动推导。",
     )
     AGENT_KEEP_RECENT_TURNS: int = Field(
         default=5,

@@ -31,6 +31,11 @@ import structlog
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.config import settings
+from app.correlation import set_trace_id
+from app.log_setup import configure_logging
+from app.models.session import SessionManager
+
 # Windows：psycopg 异步模式不兼容默认的 ProactorEventLoop，必须使用
 # SelectorEventLoop（checkpointer-redis-migration-plan）。
 # uvicorn 0.51 在 Windows 硬编码返回 ProactorEventLoop，忽略事件循环策略，
@@ -45,11 +50,6 @@ def selector_loop_factory() -> asyncio.AbstractEventLoop:
     uvicorn 启动参数：--loop app.main:selector_loop_factory
     """
     return asyncio.SelectorEventLoop()
-
-from app.config import settings
-from app.correlation import set_trace_id
-from app.log_setup import configure_logging
-from app.models.session import SessionManager
 
 # 全局会话生命周期管理器（B-24）
 _session_manager = SessionManager()
@@ -177,6 +177,14 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     from app.agent.graph import init_checkpointer
 
     await init_checkpointer()  # 初始化 PG checkpointer 连接池 + 建表
+
+    # 模型上下文窗口：启动时探测一次（自定义端点 /models，失败静默降级），
+    # 供压缩触发阈值按窗口×0.5 自动推导（context-window-plan）。
+    from app.agent.context_window import resolve_context_window
+
+    context_window = await resolve_context_window()
+    logger.info("模型上下文窗口已解析", context_window=context_window)
+
     logger.info("服务启动", version=app.version)
 
     yield
