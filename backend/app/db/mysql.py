@@ -7,15 +7,27 @@ MySQL 数据库适配器实现。
   - readonly=True, autocommit=True
   - 参数化查询（%s 占位符），禁止拼接 SQL
   - 连接失败不回显密码
+执行超时保护（PRD §8.1 Layer 4，与 PostgreSQL 统一 30s）：
+  - 服务器端：执行前 best-effort 设置会话超时变量
+    （MySQL≥5.7.8 MAX_EXECUTION_TIME / MariaDB max_statement_time），
+    让数据库主动终止超时语句；版本不支持时静默降级。
+  - 客户端兜底：asyncio.wait_for 包裹执行+拉取，防止服务器端机制缺失时无限等待。
 """
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 from typing import Any
 
 import structlog
 
-from app.db.base import AdapterCapabilities, BaseAdapter
+from app.db.base import (
+    STATEMENT_EXEC_TIMEOUT_MS,
+    STATEMENT_EXEC_TIMEOUT_SEC,
+    AdapterCapabilities,
+    BaseAdapter,
+)
 from app.models.schemas import ConnectionCreateRequest
 
 logger = structlog.get_logger("app.db.mysql")
@@ -37,6 +49,8 @@ class MySQLAdapter(BaseAdapter):
 
     使用 aiomysql 异步连接池，默认只读 + 自动提交模式。
     连接时自动检测 MySQL/MariaDB 版本，供后续方法按版本适配查询方式。
+    执行超时保护：服务器端会话超时变量（MySQL≥5.7.8 MAX_EXECUTION_TIME /
+    MariaDB max_statement_time）+ 客户端 asyncio.wait_for 兜底，统一 30s。
     """
 
     def __init__(self, config: ConnectionCreateRequest) -> None:
@@ -46,6 +60,8 @@ class MySQLAdapter(BaseAdapter):
         # 版本检测结果（connect() 后填充）
         self._db_vendor: str = "unknown"  # "mysql" 或 "mariadb"
         self._version_int: int = 0  # 如 80000（MySQL 8.0）、50700（MySQL 5.7）
+        # 服务器端执行超时变量 SQL（connect() 版本检测后确定，execute() 内 best-effort 设置）
+        self._timeout_sql: str | None = None
 
     def is_mariadb(self) -> bool:
         """判断当前连接是否为 MariaDB。
@@ -102,6 +118,7 @@ class MySQLAdapter(BaseAdapter):
                 pool_recycle=3600,
                 maxsize=10,
                 minsize=1,
+                connect_timeout=10,  # TCP 建连超时（秒），避免连不上的主机长时间阻塞
             )
 
             # SAFETY: admin 角色可执行写操作（仍受上层 SQL 审计管控）
@@ -133,6 +150,16 @@ class MySQLAdapter(BaseAdapter):
                         version_str=version_str,
                         version_int=self._version_int,
                     )
+
+            # 服务器端执行超时保护变量（版本感知，execute() 内按会话 best-effort 设置）：
+            #   - MySQL ≥5.7.8 : MAX_EXECUTION_TIME（毫秒，仅 SELECT，超时即中断）
+            #   - MariaDB      : max_statement_time（秒，对全部语句生效）
+            #   - 其余旧版本   : 不支持会话超时变量 → 依赖客户端 asyncio.wait_for 兜底
+            self._timeout_sql = None
+            if self.is_mariadb():
+                self._timeout_sql = f"SET SESSION max_statement_time = {STATEMENT_EXEC_TIMEOUT_SEC}"
+            elif self._version_int >= 50708:
+                self._timeout_sql = f"SET SESSION MAX_EXECUTION_TIME = {STATEMENT_EXEC_TIMEOUT_MS}"
 
             self._connected = True
             logger.info(
@@ -203,6 +230,12 @@ class MySQLAdapter(BaseAdapter):
 
         SAFETY: 使用 %s 参数化占位符，禁止拼接 SQL 字符串。
         AGENTS.md §数据库操作原则：所有 SQL 通过占位符传递。
+
+        超时保护（与 PostgreSQL 统一 30s，见 base.STATEMENT_EXEC_TIMEOUT_*）：
+          - 服务器端：执行前 best-effort 设置会话超时变量，让数据库主动终止超时语句；
+            版本不支持（旧 MySQL）时静默降级到客户端兜底。
+          - 客户端兜底：asyncio.wait_for 包住执行+拉取，触发时连接状态已不可信，
+            关闭连接让池重建（aiomysql putconn 会丢弃已关闭连接）。
         """
         if not self._connected or self._pool is None:
             raise ConnectionError("MySQL 未连接，请先调用 connect()")
@@ -211,14 +244,32 @@ class MySQLAdapter(BaseAdapter):
 
         start = time.monotonic()
 
+        conn = None
         try:
-            async with self._pool.acquire() as conn, conn.cursor() as cur:
-                # 参数化查询：params dict 转为位置参数列表
+            conn = await self._pool.acquire()
+            try:
+                # 参数化查询：params dict 转为位置参数列表（禁止拼接 SQL）
                 param_values = list(params.values()) if params else []
-                # cur.execute() 返回值：SELECT 返回行数，INSERT/UPDATE/DELETE 返回影响行数
-                affected = await cur.execute(sql, param_values)
-                rows = await cur.fetchall() if cur.description else []
-                columns = [desc[0] for desc in cur.description] if cur.description else []
+                async with conn.cursor() as cur:
+                    # 服务器端执行超时保护（best-effort：版本不支持会话超时变量时静默降级）
+                    if self._timeout_sql:
+                        # 旧版本不支持 → 静默降级，依赖客户端 asyncio.wait_for 兜底
+                        with contextlib.suppress(Exception):
+                            await cur.execute(self._timeout_sql)
+
+                    # 客户端兜底：asyncio.wait_for 包住执行+拉取，防止服务器端机制缺失时无限等待。
+                    # 兜底超时（35s）略高于服务器端（30s），让 DB 先主动终止语句、连接保持可复用。
+                    affected, rows = await asyncio.wait_for(
+                        self._run_query(cur, sql, param_values),
+                        timeout=STATEMENT_EXEC_TIMEOUT_SEC + 5,
+                    )
+                    columns = [desc[0] for desc in cur.description] if cur.description else []
+            except TimeoutError:
+                # 客户端兜底触发：语句可能仍在服务器执行，连接状态已不可信。
+                # 关闭连接（池 putconn 会丢弃已关闭连接并新建），避免脏连接被复用。
+                conn.close()
+                logger.warning("MySQL 查询超时（客户端兜底）", sql=sql[:200])
+                raise TimeoutError("MySQL 查询超时（>30s）") from None
 
             elapsed = int((time.monotonic() - start) * 1000)
             logger.debug(
@@ -239,11 +290,33 @@ class MySQLAdapter(BaseAdapter):
             }
 
         except TimeoutError:
-            logger.warning("MySQL 查询超时", sql=sql[:200])
-            raise TimeoutError("MySQL 查询超时（>30s）") from None
+            raise  # 已在上层转换为带消息的 TimeoutError，直接透传
         except Exception as exc:
+            # 服务器端 max_execution_time / max_statement_time 主动终止
+            # （MySQL 3024 ER_QUERY_TIMEOUT / MariaDB 1969 ER_STATEMENT_TIMEOUT）
+            # 同样归为超时，让 Agent 提示 LLM 改写查询而非当作普通 SQL 错误
+            if getattr(exc, "args", None) and exc.args and exc.args[0] in (3024, 1969):
+                logger.warning("MySQL 查询超时（服务器端终止）", sql=sql[:200])
+                raise TimeoutError("MySQL 查询超时（>30s）") from None
             logger.error("MySQL 查询异常", sql=sql[:200], error=str(exc)[:200])
             raise ValueError(f"SQL 执行错误：{exc}") from exc
+        finally:
+            if conn is not None:
+                self._pool.release(conn)
+
+    @staticmethod
+    async def _run_query(
+        cur: Any,
+        sql: str,
+        param_values: list[Any],
+    ) -> tuple[int, list[Any]]:
+        """执行参数化查询并拉取全部结果（供 asyncio.wait_for 客户端兜底包裹）。
+
+        cur.execute() 返回值：SELECT 返回行数，INSERT/UPDATE/DELETE 返回影响行数。
+        """
+        affected = await cur.execute(sql, param_values)
+        rows = await cur.fetchall() if cur.description else []
+        return affected, rows
 
     async def stream_query(
         self,
@@ -262,6 +335,13 @@ class MySQLAdapter(BaseAdapter):
         # 参数化查询：params dict 转为位置参数列表（与 execute 一致，禁止拼接）
         param_values = list(params.values()) if params else []
         async with self._pool.acquire() as conn, conn.cursor() as cur:
+            # 服务器端执行超时保护（best-effort，同 execute()）：
+            # 流式场景不做 asyncio.wait_for 客户端兜底（生成器按批产出，
+            # 取消语义复杂），服务器端会话超时变量已足以终止超时语句
+            if self._timeout_sql:
+                # 版本不支持 → 无超时保护（流式导出场景低频，可接受）
+                with contextlib.suppress(Exception):
+                    await cur.execute(self._timeout_sql)
             await cur.execute(sql, param_values)
             # 无结果集（如 SET 语句）→ 无产出
             if not cur.description:

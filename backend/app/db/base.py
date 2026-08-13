@@ -16,6 +16,29 @@ from typing import Any
 from app.models.schemas import ConnectionCreateRequest
 
 # =============================================================================
+# SQL 执行超时保护（统一策略，PRD §8.1 Layer 4：执行保护默认 30s）
+# 三个数据库适配器共用同一时长，保证行为一致：
+#   - 服务器端超时（首选）：让数据库主动终止超时语句，真正回收服务器资源
+#       * PostgreSQL : SET statement_timeout（毫秒）
+#       * MySQL ≥5.7.8 : SET SESSION MAX_EXECUTION_TIME（毫秒，仅 SELECT）
+#       * MariaDB     : SET SESSION max_statement_time（秒，全部语句）
+#       * Oracle      : AsyncConnection.call_timeout（毫秒，中断在途语句，连接仍可用）
+#   - 客户端兜底（服务器端机制缺失/不生效时）：asyncpg command_timeout /
+#     asyncio.wait_for，防止应用无限等待
+# 时长依据（30s）：本应用正常业务查询（元数据/诊断/健康巡检/EXPLAIN）耗时均远
+# 低于 30s；30s 主要用于拦截 LLM 生成的失控查询（缺 WHERE 全表扫描、笛卡尔积、
+# 错误执行计划等）。超时后由 Agent 提示 LLM 改写查询，而非长时间占用数据库
+# CPU/IO/锁资源。与并行工具执行（默认 5 并发）配合，最坏情况为 5 条语句各占用
+# 30s，资源占用有界。
+# =============================================================================
+STATEMENT_EXEC_TIMEOUT_SEC = 30
+"""SQL 语句执行超时（秒），服务器端优先由数据库主动终止。"""
+
+STATEMENT_EXEC_TIMEOUT_MS = 30_000
+"""SQL 语句执行超时（毫秒），供按毫秒计时的机制使用（statement_timeout /
+MAX_EXECUTION_TIME / call_timeout）。"""
+
+# =============================================================================
 # AdapterCapabilities：适配器能力声明
 # 各适配器返回不同的能力组合（如 MySQL 支持复制但 Oracle 不支持）。
 # 默认全部 False，由具体适配器按需覆盖。

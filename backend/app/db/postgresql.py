@@ -15,7 +15,12 @@ from typing import Any
 
 import structlog
 
-from app.db.base import AdapterCapabilities, BaseAdapter
+from app.db.base import (
+    STATEMENT_EXEC_TIMEOUT_MS,
+    STATEMENT_EXEC_TIMEOUT_SEC,
+    AdapterCapabilities,
+    BaseAdapter,
+)
 from app.models.schemas import ConnectionCreateRequest
 
 logger = structlog.get_logger("app.db.postgresql")
@@ -34,7 +39,7 @@ except ImportError as exc:
 class PostgresAdapter(BaseAdapter):
     """PostgreSQL 数据库适配器。
 
-    使用 asyncpg 异步连接池，默认 statement_timeout=30s。
+    使用 asyncpg 异步连接池，默认 statement_timeout=30s（统一策略，见 base.py）。
     """
 
     def __init__(self, config: ConnectionCreateRequest) -> None:
@@ -51,7 +56,8 @@ class PostgresAdapter(BaseAdapter):
     ) -> bool:
         """建立到 PostgreSQL 的连接池。
 
-        使用 statement_timeout=30000（PRD §8.1 Layer 4：执行保护默认 30s）。
+        使用 statement_timeout=30000（PRD §8.1 Layer 4：执行保护默认 30s，
+        统一策略见 base.STATEMENT_EXEC_TIMEOUT_*）。
         连接失败时异常消息仅包含 host:port，不暴露密码。
 
         Args:
@@ -73,8 +79,8 @@ class PostgresAdapter(BaseAdapter):
                 database=config.database,
                 min_size=1,
                 max_size=10,
-                # SAFETY: 执行超时保护（PRD §8.1 Layer 4）
-                command_timeout=30,
+                # SAFETY: 执行超时保护（PRD §8.1 Layer 4，统一 30s，见 base.py）
+                command_timeout=STATEMENT_EXEC_TIMEOUT_SEC,
                 # SSL 配置
                 ssl="require" if config.ssl_enabled else "prefer",
             )
@@ -157,8 +163,8 @@ class PostgresAdapter(BaseAdapter):
             )
 
             async with self._pool.acquire() as conn:
-                # 设置当前会话的 statement_timeout（30s 执行保护）
-                await conn.execute("SET statement_timeout = '30000'")
+                # 设置当前会话的 statement_timeout（服务器端执行超时保护，统一 30s）
+                await conn.execute(f"SET statement_timeout = '{STATEMENT_EXEC_TIMEOUT_MS}'")
 
                 if is_write:
                     # 写操作：execute() 返回状态字符串如 "INSERT 0 1"、"UPDATE 3"

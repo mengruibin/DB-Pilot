@@ -8,6 +8,11 @@ Oracle 数据库适配器实现。
   - 从 ALL_TABLES / ALL_TAB_COLUMNS 查询元数据
   - EXPLAIN PLAN FOR + DBMS_XPLAN.DISPLAY 获取执行计划
   - 连接失败不回显密码
+执行超时保护（PRD §8.1 Layer 4，与 PostgreSQL 统一 30s）：
+  - 客户端 + 服务器端中断：AsyncConnection.call_timeout（毫秒）超时后中断在途语句，
+    连接通常仍可用（DPI-1067）。
+  - 说明：真正的服务器端强制回收（Resource Manager max_execution_time）需 DBA
+    配置资源计划，适配器层无法替代。
 """
 
 from __future__ import annotations
@@ -16,7 +21,11 @@ from typing import Any
 
 import structlog
 
-from app.db.base import AdapterCapabilities, BaseAdapter
+from app.db.base import (
+    STATEMENT_EXEC_TIMEOUT_MS,
+    AdapterCapabilities,
+    BaseAdapter,
+)
 from app.models.schemas import ConnectionCreateRequest
 
 logger = structlog.get_logger("app.db.oracle")
@@ -32,11 +41,24 @@ except ImportError as exc:
     _ORACLEDB_ERR = str(exc)
 
 
+def _is_call_timeout_error(exc: Exception) -> bool:
+    """判断 oracledb 异常是否为 call_timeout 触发。
+
+    call_timeout 超时错误消息均含 "call timeout"
+    （如 DPI-1067 "call timeout of 30000 milliseconds exceeded"、
+    DPY-4024 "call timeout of 30000 ms exceeded"、DPI-1080 "connection was closed
+    by call timeout ..."）。用消息匹配兜底（本地未安装 oracledb，无法按错误码
+    常量精确判断；"call timeout" 字符串足够精确）。
+    """
+    return "call timeout" in str(exc).lower()
+
+
 class OracleAdapter(BaseAdapter):
     """Oracle 数据库适配器。
 
     使用 oracledb 异步模式，适用于 Oracle 19c+。
     Oracle 适配器能力有限：不支持慢查询自动检索（需 AWR license），不支持复制检测。
+    执行超时保护：AsyncConnection.call_timeout（毫秒，统一 30s）中断超时语句。
     """
 
     def __init__(self, config: ConnectionCreateRequest) -> None:
@@ -72,11 +94,20 @@ class OracleAdapter(BaseAdapter):
             dsn = oracledb.makedsn(config.host, config.port or 1521, config.database)
 
             # SAFETY: 参数化连接配置，不拼接连接串
+            # tcp_connect_timeout：TCP 建连超时（秒），避免连不上的主机长时间阻塞
             self._conn = await oracledb.connect_async(
                 user=config.user,
                 password=config.password or "",
                 dsn=dsn,
+                tcp_connect_timeout=10,
             )
+            # 语句执行超时保护（PRD §8.1 Layer 4，与 PostgreSQL 统一 30s）：
+            # call_timeout 为单次数据库往返最大耗时（毫秒），超时后中断在途语句；
+            # 超时后连接通常仍可用（DPI-1067），保持连接不关闭（异步模式在
+            # call_timeout 后立即 close 存在已知缺陷，见 python-oracledb#386）。
+            # 注意：真正的服务器端强制回收（Resource Manager max_execution_time）
+            # 需 DBA 配置资源计划，适配器层无法替代。
+            self._conn.call_timeout = STATEMENT_EXEC_TIMEOUT_MS
             self._connected = True
             logger.info(
                 "Oracle 连接成功", host=config.host, port=config.port, database=config.database
@@ -170,6 +201,12 @@ class OracleAdapter(BaseAdapter):
             logger.warning("Oracle 查询超时", sql=sql[:200])
             raise TimeoutError("Oracle 查询超时（>30s）") from None
         except Exception as exc:
+            # call_timeout 触发时 oracledb 抛 DatabaseError（DPI-1067/DPY-4024，
+            # 消息含 "call timeout"），归为超时让 Agent 提示 LLM 改写查询，
+            # 而非当作普通 SQL 错误
+            if _is_call_timeout_error(exc):
+                logger.warning("Oracle 查询超时（call_timeout）", sql=sql[:200])
+                raise TimeoutError("Oracle 查询超时（>30s）") from None
             logger.error("Oracle 查询异常", sql=sql[:200], error=str(exc)[:200])
             raise ValueError(f"SQL 执行错误：{exc}") from exc
 
