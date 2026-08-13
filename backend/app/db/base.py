@@ -13,6 +13,9 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any
 
+import sqlglot
+from sqlglot import exp
+
 from app.models.schemas import ConnectionCreateRequest
 
 # =============================================================================
@@ -37,6 +40,84 @@ STATEMENT_EXEC_TIMEOUT_SEC = 30
 STATEMENT_EXEC_TIMEOUT_MS = 30_000
 """SQL 语句执行超时（毫秒），供按毫秒计时的机制使用（statement_timeout /
 MAX_EXECUTION_TIME / call_timeout）。"""
+
+# =============================================================================
+# 结果集行数上限（LIMIT 下推）— 进程内存防护
+# 三层防护中的"DB 端限行"：truncate_result_for_llm 只保护 LLM 上下文窗口，
+# 不保护 Python 进程内存——适配器 fetchall 会把 DB 返回的全部行物化进堆。
+# 失控查询（缺 WHERE 全表扫描）× 并发请求 → 单进程内存可能被打爆。
+# 对只读 SELECT 自动追加 LIMIT max+1（Oracle 12c+ 用 FETCH FIRST），
+# DB 只传输有限行数，单次查询内存峰值有界（≤ max+1 行 × 行宽）。
+# =============================================================================
+STATEMENT_MAX_RESULT_ROWS = 1000
+"""SQL 结果集行数上限（DB 端 LIMIT 下推，进程内存防护）。
+
+阈值依据：truncate_result_for_llm 上限 100 行 / 40K 字符，1000 行留出
+字符数减半削减的空间；LIMIT max+1 的 +1 用于探测触顶（返回 max+1 行
+说明实际结果更多）。与超时常量一致 hardcode，不依赖 .env 配置。
+"""
+
+
+def apply_read_limit(
+    sql: str,
+    dialect: str,
+    max_rows: int = STATEMENT_MAX_RESULT_ROWS,
+) -> tuple[str, bool]:
+    """只读 SELECT 结果集 LIMIT 下推：让 DB 只返回有限行数（进程内存防护）。
+
+    对顶层 SELECT / WITH(...)SELECT / UNION 追加 LIMIT max_rows+1；
+    顶层已有 ≤ max_rows 的数值 LIMIT 时原样返回（已足够有界）；
+    非 SELECT / 解析失败 / 占位符 LIMIT 等无法安全改写时一律原样返回
+    （fail-safe，不阻塞业务，体积级截断仍由 truncate_result_for_llm 兜底）。
+
+    Args:
+        sql: 原始 SQL（只读查询）。
+        dialect: sqlglot 方言（"mysql" / "postgres" / "oracle"）。
+        max_rows: 行数上限，DB 实际返回 ≤ max_rows+1 行。
+
+    Returns:
+        (要执行的 SQL, 是否改写)。改写失败返回 (原 SQL, False)。
+    """
+    if not sql or not sql.strip():
+        return sql, False
+    try:
+        # 只解析单条语句（多语句 sqlglot 抛错 → fail-safe 原样放行；
+        # 上游 sql_audit 已拦截多语句，这里是纵深防御）
+        parsed = sqlglot.parse_one(sql.strip().rstrip(";"), read=dialect)
+    except Exception:
+        return sql, False
+
+    # 定位顶层 SELECT：Select 本体 / With(...) 包裹的 SELECT / UNION
+    if isinstance(parsed, exp.Select):
+        select = parsed
+    elif isinstance(parsed, exp.With):
+        inner = parsed.expression
+        select = inner if isinstance(inner, (exp.Select, exp.Union)) else None
+    elif isinstance(parsed, exp.Union):
+        select = parsed
+    else:
+        # 非只读查询（INSERT/UPDATE/SHOW/SET/EXPLAIN 等）→ 不动
+        return sql, False
+    if select is None:
+        return sql, False
+
+    # 顶层已有 LIMIT：数值 ≤ max → 已足够有界，原样返回；
+    # 数值 > max → 收敛到 max+1；占位符/表达式 → 无法安全判断，原样返回
+    existing = select.args.get("limit")
+    if existing is not None:
+        count = existing.expression
+        if isinstance(count, exp.Literal) and count.is_number:
+            limit_value = int(count.name)
+            if limit_value <= max_rows:
+                return sql, False
+            # 收敛超大 LIMIT 到 max+1（LLM 上下文本就容纳不下更大结果）
+            return select.limit(max_rows + 1).sql(dialect=dialect), True
+        return sql, False
+
+    # 无 LIMIT → 追加 max+1。注意 sqlglot .limit() 默认 copy=True 返回新
+    # 表达式，必须直接链式调用 .sql()（原地调用不会生效）
+    return select.limit(max_rows + 1).sql(dialect=dialect), True
+
 
 # =============================================================================
 # AdapterCapabilities：适配器能力声明

@@ -25,8 +25,10 @@ import structlog
 from app.db.base import (
     STATEMENT_EXEC_TIMEOUT_MS,
     STATEMENT_EXEC_TIMEOUT_SEC,
+    STATEMENT_MAX_RESULT_ROWS,
     AdapterCapabilities,
     BaseAdapter,
+    apply_read_limit,
 )
 from app.models.schemas import ConnectionCreateRequest
 
@@ -250,6 +252,17 @@ class MySQLAdapter(BaseAdapter):
             try:
                 # 参数化查询：params dict 转为位置参数列表（禁止拼接 SQL）
                 param_values = list(params.values()) if params else []
+                # 结果集行数上限（LIMIT 下推）：只读 SELECT 自动追加 LIMIT，
+                # 让 DB 只返回有限行数，保护进程内存（truncate_result_for_llm
+                # 只护 LLM 上下文窗口，不护堆内存）。非 SELECT / 解析失败时
+                # fail-safe 原样放行。
+                sql_eff, rewritten = apply_read_limit(sql, dialect="mysql")
+                if rewritten:
+                    logger.debug(
+                        "SQL LIMIT 下推（进程内存防护）",
+                        sql_before=sql[:200],
+                        sql_after=sql_eff[:200],
+                    )
                 async with conn.cursor() as cur:
                     # 服务器端执行超时保护（best-effort：版本不支持会话超时变量时静默降级）
                     if self._timeout_sql:
@@ -260,7 +273,7 @@ class MySQLAdapter(BaseAdapter):
                     # 客户端兜底：asyncio.wait_for 包住执行+拉取，防止服务器端机制缺失时无限等待。
                     # 兜底超时（35s）略高于服务器端（30s），让 DB 先主动终止语句、连接保持可复用。
                     affected, rows = await asyncio.wait_for(
-                        self._run_query(cur, sql, param_values),
+                        self._run_query(cur, sql_eff, param_values),
                         timeout=STATEMENT_EXEC_TIMEOUT_SEC + 5,
                     )
                     columns = [desc[0] for desc in cur.description] if cur.description else []
@@ -279,7 +292,7 @@ class MySQLAdapter(BaseAdapter):
                 rows_returned=len(rows),
                 affected_rows=affected,
             )
-            return {
+            result: dict[str, Any] = {
                 "columns": columns,
                 "rows": [list(row) for row in rows],
                 "total_rows": len(rows),
@@ -288,6 +301,12 @@ class MySQLAdapter(BaseAdapter):
                 "is_readonly": True,
                 "audit_status": "passed",
             }
+            # 触顶检测：LIMIT 下推返回 max+1 行说明结果被 DB 端截断，
+            # 附加元数据透传给 LLM（truncate_result_for_llm 保留其它键）
+            if len(rows) > STATEMENT_MAX_RESULT_ROWS:
+                result["truncated_by_db_limit"] = True
+                result["db_row_limit"] = STATEMENT_MAX_RESULT_ROWS
+            return result
 
         except TimeoutError:
             raise  # 已在上层转换为带消息的 TimeoutError，直接透传

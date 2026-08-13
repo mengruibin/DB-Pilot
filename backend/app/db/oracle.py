@@ -23,8 +23,10 @@ import structlog
 
 from app.db.base import (
     STATEMENT_EXEC_TIMEOUT_MS,
+    STATEMENT_MAX_RESULT_ROWS,
     AdapterCapabilities,
     BaseAdapter,
+    apply_read_limit,
 )
 from app.models.schemas import ConnectionCreateRequest
 
@@ -166,8 +168,18 @@ class OracleAdapter(BaseAdapter):
             # Oracle 使用 :1, :2 位置参数
             param_values = list(params.values()) if params else []
 
+            # 结果集行数上限（LIMIT 下推）：只读 SELECT 自动追加
+            # FETCH FIRST（Oracle 12c+ 语法），保护进程内存。
+            # 非 SELECT / 解析失败时 fail-safe 原样放行。
+            sql_eff, rewritten = apply_read_limit(sql, dialect="oracle")
+            if rewritten:
+                logger.debug(
+                    "SQL LIMIT 下推（进程内存防护）",
+                    sql_before=sql[:200],
+                    sql_after=sql_eff[:200],
+                )
             async with self._conn.cursor() as cur:
-                await cur.execute(sql, param_values)
+                await cur.execute(sql_eff, param_values)
                 if cur.description:
                     # 读操作：有结果集返回
                     rows = await cur.fetchall()
@@ -187,7 +199,7 @@ class OracleAdapter(BaseAdapter):
                 rows_returned=len(rows),
                 affected_rows=affected,
             )
-            return {
+            result: dict[str, Any] = {
                 "columns": columns,
                 "rows": [list(row) for row in rows],
                 "total_rows": len(rows),
@@ -196,6 +208,12 @@ class OracleAdapter(BaseAdapter):
                 "is_readonly": True,
                 "audit_status": "passed",
             }
+            # 触顶检测：LIMIT 下推返回 max+1 行说明结果被 DB 端截断，
+            # 附加元数据透传给 LLM（truncate_result_for_llm 保留其它键）
+            if len(rows) > STATEMENT_MAX_RESULT_ROWS:
+                result["truncated_by_db_limit"] = True
+                result["db_row_limit"] = STATEMENT_MAX_RESULT_ROWS
+            return result
 
         except TimeoutError:
             logger.warning("Oracle 查询超时", sql=sql[:200])

@@ -423,6 +423,10 @@ async def _run_sql(
             if not is_readonly
             else f"返回 {result['total_rows']} 行"
         )
+        # DB 端 LIMIT 下推触顶：结果被限行截断，告知 LLM 实际结果更多
+        truncated_by_db_limit = bool(result.get("truncated_by_db_limit"))
+        if truncated_by_db_limit:
+            summary += f"（已达 DB 行数上限 {result['db_row_limit']}，实际更多）"
         return {
             "columns": result["columns"],
             "rows": masked_rows,
@@ -431,6 +435,8 @@ async def _run_sql(
             "audit_status": "passed",
             "is_readonly": is_readonly,
             "summary": summary,
+            # 结构化透传 DB 端限行元数据（truncate_result_for_llm 会保留该键）
+            "truncated_by_db_limit": truncated_by_db_limit,
         }
 
     except Exception as exc:

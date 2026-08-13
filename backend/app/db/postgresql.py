@@ -18,8 +18,10 @@ import structlog
 from app.db.base import (
     STATEMENT_EXEC_TIMEOUT_MS,
     STATEMENT_EXEC_TIMEOUT_SEC,
+    STATEMENT_MAX_RESULT_ROWS,
     AdapterCapabilities,
     BaseAdapter,
+    apply_read_limit,
 )
 from app.models.schemas import ConnectionCreateRequest
 
@@ -176,7 +178,16 @@ class PostgresAdapter(BaseAdapter):
                     columns = []
                 else:
                     # 读操作：使用 fetch() 返回所有行
-                    rows = await conn.fetch(sql, *param_values)
+                    # 结果集行数上限（LIMIT 下推）：只读 SELECT 自动追加 LIMIT，
+                    # 保护进程内存（truncate_result_for_llm 只护 LLM 上下文窗口）
+                    sql_eff, rewritten = apply_read_limit(sql, dialect="postgres")
+                    if rewritten:
+                        logger.debug(
+                            "SQL LIMIT 下推（进程内存防护）",
+                            sql_before=sql[:200],
+                            sql_after=sql_eff[:200],
+                        )
+                    rows = await conn.fetch(sql_eff, *param_values)
                     columns = list(rows[0].keys()) if rows else []
                     affected = len(rows)
 
@@ -188,7 +199,7 @@ class PostgresAdapter(BaseAdapter):
                 rows_returned=len(rows),
                 affected_rows=affected,
             )
-            return {
+            result: dict[str, Any] = {
                 "columns": columns,
                 "rows": [list(row.values()) for row in rows],
                 "total_rows": len(rows),
@@ -197,6 +208,12 @@ class PostgresAdapter(BaseAdapter):
                 "is_readonly": True,
                 "audit_status": "passed",
             }
+            # 触顶检测：LIMIT 下推返回 max+1 行说明结果被 DB 端截断，
+            # 附加元数据透传给 LLM（truncate_result_for_llm 保留其它键）
+            if len(rows) > STATEMENT_MAX_RESULT_ROWS:
+                result["truncated_by_db_limit"] = True
+                result["db_row_limit"] = STATEMENT_MAX_RESULT_ROWS
+            return result
 
         except TimeoutError:
             logger.warning("PostgreSQL 查询超时", sql=sql[:200])
