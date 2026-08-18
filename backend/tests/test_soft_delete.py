@@ -131,6 +131,14 @@ class TestSystemPromptSoftDeleteRule:
         )
         assert "重要警告" in prompt_blocked
 
+    def test_system_prompt_contains_where_guard_rule(self):
+        """build_agent_system_prompt 应包含写操作必须带 WHERE 规则（write-where-guard-plan）。"""
+        from app.prompts.agent import build_agent_system_prompt
+
+        prompt = build_agent_system_prompt("mysql", "testdb", "127.0.0.1", "3306")
+        assert "必须携带 WHERE" in prompt
+        assert "WHERE 1=1" in prompt
+
 
 class TestSoftDeleteMixed:
     """混合场景与字段完整性。"""

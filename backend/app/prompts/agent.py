@@ -58,6 +58,11 @@ AGENT_SYSTEM_PROMPT = (
     "（如 CREATE TABLE / DROP TABLE / ALTER TABLE 等）。\n"
     "    若用户要求执行这些操作，请直接告知该操作不受支持，"
     "需由用户在数据库客户端中人工处理，并说明原因。\n"
+    "13. **写操作必须带 WHERE（重要）**: UPDATE / DELETE 必须携带 WHERE 条件限定操作范围。\n"
+    "    系统会强制拦截无 WHERE（或 WHERE 为恒真表达式，如 WHERE 1=1 / WHERE TRUE）的"
+    "全表更新/删除，并拒绝执行。\n"
+    "    清空或整体修改某表数据属高危操作，请先询问用户确认意图，"
+    "给出明确的 WHERE 条件后再执行。\n"
     "{consecutive_block_warning}"
 )
 
