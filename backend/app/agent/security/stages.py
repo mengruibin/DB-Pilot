@@ -174,7 +174,8 @@ class SQLAuditStage(SecurityStage):
                     blocked=True,
                     block_code="WRITE_NO_WHERE_BLOCKED",
                     reason=(
-                        f"UPDATE/DELETE 缺少有效的 WHERE 条件，将影响表 {target} 的全部行，已拦截。\n"
+                        f"UPDATE/DELETE 缺少有效的 WHERE 条件，"
+                        f"将影响表 {target} 的全部行，已拦截。\n"
                         "请补充具体的 WHERE 条件（如主键/唯一键/时间范围）限定操作范围后重试。\n"
                         "全表更新/删除属高危操作，无法经本工具执行；如确需全表操作，"
                         "请先在数据库客户端中确认数据量后手动执行。"
