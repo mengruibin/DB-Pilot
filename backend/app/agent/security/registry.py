@@ -67,7 +67,7 @@ SECURITY_REGISTRY: dict[str, SecurityProfile] = {
                 StagePhase.PRE_CONFIRM,
                 params={
                     "allowed_stmt_types": ("INSERT", "UPDATE", "DELETE"),
-                    "require_where": True,   # 无 WHERE 全表删改 → WRITE_NO_WHERE_BLOCKED
+                    "require_where": True,  # 无 WHERE 全表删改 → WRITE_NO_WHERE_BLOCKED
                 },
             ),
             StageRef("confirm", StagePhase.CONFIRM, params={"category": "sql_write"}),
