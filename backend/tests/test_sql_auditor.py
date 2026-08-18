@@ -13,7 +13,7 @@ SQL 安全审计引擎基线测试。
 
 from __future__ import annotations
 
-from app.engine.sql_auditor import audit
+from app.engine.sql_auditor import audit, check_write_scope
 
 
 class TestSqlAuditorBaseline:
@@ -157,3 +157,71 @@ class TestSqlAuditorExtended:
         result = audit("DROP TABLE IF EXISTS users", db_type="mysql")
         assert result.passed is False
         assert any("DROP" in v.type for v in result.violations)
+
+
+class TestCheckWriteScope:
+    """check_write_scope：UPDATE/DELETE 操作范围静态分析（write-where-guard-plan）。"""
+
+    def test_delete_no_where_is_full_table(self):
+        """无 WHERE 的 DELETE → 等价全表。"""
+        result = check_write_scope("DELETE FROM t", db_type="mysql")
+        assert result.is_full_table is True
+        assert result.target_table == "t"
+        assert result.has_where is False
+
+    def test_update_no_where_is_full_table(self):
+        """无 WHERE 的 UPDATE → 等价全表。"""
+        result = check_write_scope("UPDATE t SET a = 1", db_type="mysql")
+        assert result.is_full_table is True
+
+    def test_constant_where_is_full_table(self):
+        """WHERE 纯常量（不含列引用）→ 等价全表。"""
+        for sql in (
+            "DELETE FROM t WHERE 1 = 1",
+            "UPDATE t SET a = 1 WHERE TRUE",
+            "DELETE FROM t WHERE 'a' = 'a'",
+            "DELETE FROM t WHERE 1 = 1 AND 'x' = 'x'",
+            "DELETE FROM t WHERE NOW() > '2020-01-01'",
+        ):
+            result = check_write_scope(sql, db_type="mysql")
+            assert result.is_full_table is True, f"常量 WHERE 未判全表: {sql}"
+
+    def test_column_where_is_not_full_table(self):
+        """含列引用的 WHERE → 数据相关，非全表。"""
+        for sql in (
+            "DELETE FROM t WHERE id = 1",
+            "UPDATE t SET a = 1 WHERE id = 1",
+            "DELETE FROM t WHERE id > 0",  # 近全表但数据相关，静态无法判定 → 接受
+            "DELETE FROM t WHERE deleted_at IS NOT NULL",  # 软删除清理合法写法
+            "DELETE FROM t WHERE id IN (SELECT id FROM x)",  # 子查询 → 数据相关
+        ):
+            result = check_write_scope(sql, db_type="mysql")
+            assert result.is_full_table is False, f"含列 WHERE 误判全表: {sql}"
+            assert result.has_where is True
+
+    def test_non_update_delete_not_applicable(self):
+        """非 UPDATE/DELETE（INSERT/SELECT/SHOW）→ 范围检查不适用。"""
+        for sql in ("INSERT INTO t VALUES (1)", "SELECT * FROM t", "SHOW TABLES"):
+            result = check_write_scope(sql, db_type="mysql")
+            assert result.is_update_or_delete is False
+            assert result.is_full_table is False
+
+    def test_multi_statement_defensive_pass(self):
+        """多语句 → 防御性放行（类型兜底由语句类型白名单 fail-closed 负责）。"""
+        result = check_write_scope("DELETE FROM t; DELETE FROM t2", db_type="mysql")
+        assert result.is_update_or_delete is False
+        assert result.is_full_table is False
+
+    def test_parse_error_defensive_pass(self):
+        """解析失败（不完整 WHERE）→ 防御性放行。"""
+        result = check_write_scope("DELETE FROM t WHERE", db_type="mysql")
+        assert result.is_full_table is False
+
+    def test_dialects_consistent(self):
+        """三方言行为一致。"""
+        for db_type in ("mysql", "postgresql", "oracle"):
+            assert check_write_scope("DELETE FROM t", db_type=db_type).is_full_table is True
+            assert (
+                check_write_scope("DELETE FROM t WHERE id = 1", db_type=db_type).is_full_table
+                is False
+            )

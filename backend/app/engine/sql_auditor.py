@@ -47,6 +47,28 @@ class AuditResult:
     """违规列表（passed=True 时为空）"""
 
 
+@dataclass
+class WriteScopeResult:
+    """UPDATE/DELETE 操作范围分析结果（纯静态，无 DB 依赖，write-where-guard-plan）。
+
+    Attributes:
+        is_update_or_delete: 顶层语句是否为 UPDATE/DELETE（非则范围检查不适用）。
+        target_table: 目标表名（可能为空）。
+        has_where: 是否存在 WHERE 子句。
+        where_is_constant: WHERE 是否不含列引用/子查询（纯常量表达式，恒全表）。
+    """
+
+    is_update_or_delete: bool
+    target_table: str = ""
+    has_where: bool = False
+    where_is_constant: bool = False
+
+    @property
+    def is_full_table(self) -> bool:
+        """是否等价全表操作（无 WHERE 或 WHERE 为纯常量表达式）。"""
+        return self.is_update_or_delete and (not self.has_where or self.where_is_constant)
+
+
 # =============================================================================
 # 危险操作定义
 # =============================================================================
@@ -345,3 +367,64 @@ def get_statement_types(sql: str, db_type: str = "mysql") -> tuple[list[str], st
             continue
         types.append(_get_statement_type(statement))
     return types, None
+
+
+def check_write_scope(sql: str, db_type: str = "mysql") -> WriteScopeResult:
+    """分析 UPDATE/DELETE 的操作范围，判断是否等价全表删改（write-where-guard-plan）。
+
+    判定"等价全表"的依据：WHERE 不存在，或 WHERE 为不含任何列引用/子查询的
+    纯常量表达式（`WHERE 1=1` / `WHERE TRUE` / `WHERE 'a'='a'` 等）——
+    这类条件不依赖行数据，对每行恒成立，等价全表操作。
+
+    **刻意不拦**含列引用的条件（如 `WHERE id=1`、`WHERE deleted_at IS NOT NULL`）：
+    即使命中行数多，也属数据相关，静态无法判定，避免误伤合法范围删除。
+
+    Args:
+        sql: SQL 语句。
+        db_type: 数据库类型（mysql / postgresql / oracle），影响解析方言。
+
+    Returns:
+        WriteScopeResult。解析失败 / 多语句 / 非 UPDATE/DELETE 时返回
+        is_update_or_delete=False（类型与语法兜底由语句类型白名单 fail-closed 负责，
+        本函数不重复拦截，防御性 fail-open）。
+    """
+    dialect = _DIALECT_MAP.get(db_type, "mysql")
+    try:
+        parsed = sqlglot.parse(sql, dialect=dialect)
+    except Exception:
+        return WriteScopeResult(is_update_or_delete=False)
+
+    statements = [s for s in parsed if s is not None and not isinstance(s, exp.Semicolon)]
+    if len(statements) != 1:
+        return WriteScopeResult(is_update_or_delete=False)
+
+    stmt = statements[0]
+    if not isinstance(stmt, (exp.Delete, exp.Update)):
+        return WriteScopeResult(is_update_or_delete=False)
+
+    # 目标表名提取（异常时为空字符串，不影响拦截判定）
+    target_table = ""
+    try:
+        target_table = stmt.this.sql() if stmt.this else ""
+    except Exception:
+        target_table = ""
+
+    where = stmt.args.get("where")
+    if where is None:
+        # 无 WHERE → 影响全表
+        return WriteScopeResult(
+            is_update_or_delete=True, target_table=target_table, has_where=False
+        )
+
+    # WHERE 恒真判定：不含列引用、不含子查询的纯常量表达式（对每行恒成立）
+    nodes = list(where.this.walk())
+    has_column = any(isinstance(n, exp.Column) for n in nodes)
+    has_subquery = any(
+        isinstance(n, (exp.Select, exp.Subquery, exp.Union, exp.Exists)) for n in nodes
+    )
+    return WriteScopeResult(
+        is_update_or_delete=True,
+        target_table=target_table,
+        has_where=True,
+        where_is_constant=not has_column and not has_subquery,
+    )
