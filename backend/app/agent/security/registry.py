@@ -59,12 +59,16 @@ SECURITY_REGISTRY: dict[str, SecurityProfile] = {
     # execute_write_sql：★ 补审计缺口——写操作确认前先过 SQLAuditCheck，
     # 红线 DDL / 非 admin 写操作在确认流之前即被拦（不再弹确认卡片）
     # + 语句类型白名单（只放行 INSERT/UPDATE/DELETE，同堵 Command 回退绕过）
+    # + require_where（无 WHERE 全表删改硬拦，write-where-guard-plan）
     "execute_write_sql": SecurityProfile(
         stages=(
             StageRef(
                 "sql_audit",
                 StagePhase.PRE_CONFIRM,
-                params={"allowed_stmt_types": ("INSERT", "UPDATE", "DELETE")},
+                params={
+                    "allowed_stmt_types": ("INSERT", "UPDATE", "DELETE"),
+                    "require_where": True,   # 无 WHERE 全表删改 → WRITE_NO_WHERE_BLOCKED
+                },
             ),
             StageRef("confirm", StagePhase.CONFIRM, params={"category": "sql_write"}),
         ),

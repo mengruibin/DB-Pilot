@@ -76,6 +76,8 @@ class TestProfiles:
             "UPDATE",
             "DELETE",
         )
+        # sql_audit 声明 require_where（无 WHERE 全表删改硬拦，write-where-guard-plan）
+        assert audit_ref.params.get("require_where") is True
         # confirm 阶段携带 sql_write 分类
         confirm_ref = profile.confirm_ref()
         assert confirm_ref is not None
