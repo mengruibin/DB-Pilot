@@ -154,6 +154,65 @@ class TestSQLAuditStage:
         assert not result.blocked
         assert result.warnings
 
+    # ── require_where（write-where-guard-plan）：无 WHERE 全表删改硬拦 ──
+
+    async def _check_require_where(self, sql: str, user_role: str = "admin") -> StageResult:
+        return await SQLAuditStage(require_where=True).check(
+            _tc("execute_write_sql", {"sql": sql}, "call_1"), _conn(user_role), _ctx(user_role)
+        )
+
+    @pytest.mark.asyncio
+    async def test_require_where_blocks_no_where_delete(self):
+        """require_where：无 WHERE 的 DELETE → WRITE_NO_WHERE_BLOCKED。"""
+        result = await self._check_require_where("DELETE FROM t")
+        assert result.blocked
+        assert result.block_code == "WRITE_NO_WHERE_BLOCKED"
+
+    @pytest.mark.asyncio
+    async def test_require_where_blocks_no_where_update(self):
+        """require_where：无 WHERE 的 UPDATE → WRITE_NO_WHERE_BLOCKED。"""
+        result = await self._check_require_where("UPDATE t SET a = 1")
+        assert result.blocked
+        assert result.block_code == "WRITE_NO_WHERE_BLOCKED"
+
+    @pytest.mark.asyncio
+    async def test_require_where_blocks_constant_where(self):
+        """require_where：WHERE 恒真（1=1 / TRUE）→ WRITE_NO_WHERE_BLOCKED。"""
+        for sql in ("DELETE FROM t WHERE 1 = 1", "UPDATE t SET a = 1 WHERE TRUE"):
+            result = await self._check_require_where(sql)
+            assert result.blocked, f"常量 WHERE 未拦截: {sql}"
+            assert result.block_code == "WRITE_NO_WHERE_BLOCKED"
+
+    @pytest.mark.asyncio
+    async def test_require_where_allows_column_where(self):
+        """require_where：含列 WHERE 放行。"""
+        for sql in (
+            "DELETE FROM t WHERE id = 1",
+            "UPDATE t SET a = 1 WHERE id = 1",
+            "DELETE FROM t WHERE deleted_at IS NOT NULL",
+        ):
+            result = await self._check_require_where(sql)
+            assert not result.blocked, f"含列 WHERE 误拦: {sql}"
+
+    @pytest.mark.asyncio
+    async def test_require_where_allows_insert(self):
+        """require_where：INSERT 不受影响。"""
+        result = await self._check_require_where("INSERT INTO t VALUES (1)")
+        assert not result.blocked
+
+    @pytest.mark.asyncio
+    async def test_require_where_default_off(self):
+        """require_where 默认 False：无 WHERE DELETE 行为不变（不新增拦截）。"""
+        result = await self._check("DELETE FROM t", user_role="admin")
+        assert not result.blocked
+
+    @pytest.mark.asyncio
+    async def test_require_where_readonly_still_audit_blocked(self):
+        """readonly + 无 WHERE DELETE：仍被既有角色审计拦（SQL_AUDIT_BLOCKED 优先）。"""
+        result = await self._check_require_where("DELETE FROM t", user_role="readonly")
+        assert result.blocked
+        assert result.block_code == "SQL_AUDIT_BLOCKED"
+
 
 # =============================================================================
 # SQLAuditStage 语句类型白名单（allowed_stmt_types，fail-closed）

@@ -74,7 +74,11 @@ class SQLAuditStage(SecurityStage):
     name = "sql_audit"
     phase = StagePhase.PRE_CONFIRM
 
-    def __init__(self, allowed_stmt_types: tuple[str, ...] | None = None) -> None:
+    def __init__(
+        self,
+        allowed_stmt_types: tuple[str, ...] | None = None,
+        require_where: bool = False,
+    ) -> None:
         """初始化 SQL 审计阶段。
 
         Args:
@@ -84,8 +88,12 @@ class SQLAuditStage(SecurityStage):
                 未知类型一律拦截，堵住 sqlglot Command 回退（GRANT/REPLACE 等）与
                 解析异常（MERGE/LOAD DATA 等）导致的审计绕过。
                 未配置时保持原审计行为（fail-open 语义不变）。
+            require_where: 为 True 时，UPDATE/DELETE 缺少 WHERE（或 WHERE 为不含
+                列引用的纯常量恒真表达式）→ 拦截（block_code="WRITE_NO_WHERE_BLOCKED"）。
+                经 SECURITY_REGISTRY 的 StageRef.params 注入；默认 False 保持原行为。
         """
         self._allowed_stmt_types = frozenset(allowed_stmt_types) if allowed_stmt_types else None
+        self._require_where = require_where
 
     async def check(
         self,
@@ -150,6 +158,29 @@ class SQLAuditStage(SecurityStage):
                 blocked=False,
                 warnings=[f"SQL 审计异常（已放行）: {str(exc)[:100]}"],
             )
+
+        # ── Step 3: UPDATE/DELETE 范围检查（require_where 硬约束）──
+        # 无 WHERE（或 WHERE 为纯常量恒真表达式）的 UPDATE/DELETE 等价全表删改，
+        # 属高危操作，确认卡之前即拦截（与红线 DDL 同策略，fail-closed）。
+        # 置于既有审计（Step 2）之后：readonly 的权限不足先报 SQL_AUDIT_BLOCKED，
+        # 只有审计通过的 admin 写操作才进入本检查（WRITE_NO_WHERE_BLOCKED）。
+        if self._require_where:
+            from app.engine.sql_auditor import check_write_scope
+
+            scope = check_write_scope(sql, db_type)
+            if scope.is_full_table:
+                target = scope.target_table or "（未知表）"
+                return StageResult(
+                    blocked=True,
+                    block_code="WRITE_NO_WHERE_BLOCKED",
+                    reason=(
+                        f"UPDATE/DELETE 缺少有效的 WHERE 条件，将影响表 {target} 的全部行，已拦截。\n"
+                        "请补充具体的 WHERE 条件（如主键/唯一键/时间范围）限定操作范围后重试。\n"
+                        "全表更新/删除属高危操作，无法经本工具执行；如确需全表操作，"
+                        "请先在数据库客户端中确认数据量后手动执行。"
+                    ),
+                    context={"write_scope": scope},
+                )
 
         return StageResult(blocked=False)
 
