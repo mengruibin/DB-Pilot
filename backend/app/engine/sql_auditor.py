@@ -372,9 +372,11 @@ def get_statement_types(sql: str, db_type: str = "mysql") -> tuple[list[str], st
 def check_write_scope(sql: str, db_type: str = "mysql") -> WriteScopeResult:
     """分析 UPDATE/DELETE 的操作范围，判断是否等价全表删改（write-where-guard-plan）。
 
-    判定"等价全表"的依据：WHERE 不存在，或 WHERE 为不含任何列引用/子查询的
-    纯常量表达式（`WHERE 1=1` / `WHERE TRUE` / `WHERE 'a'='a'` 等）——
-    这类条件不依赖行数据，对每行恒成立，等价全表操作。
+    判定"等价全表"的依据：WHERE 不存在，或 WHERE 经布尔化简 + 常量折叠
+    （sqlglot optimizer.simplify）后为不含任何列引用/子查询的纯常量表达式——
+    `WHERE 1=1` / `WHERE TRUE` 是纯常量；`WHERE 1=1 OR id=1` 恒真分支污染整式、
+    `WHERE 1=1 AND id=1` 恒真被 AND 吸收（≡ id=1）也由化简正确区分。
+    这类化简后无列的条件不依赖行数据，等价全表操作。
 
     **刻意不拦**含列引用的条件（如 `WHERE id=1`、`WHERE deleted_at IS NOT NULL`）：
     即使命中行数多，也属数据相关，静态无法判定，避免误伤合法范围删除。
@@ -416,8 +418,21 @@ def check_write_scope(sql: str, db_type: str = "mysql") -> WriteScopeResult:
             is_update_or_delete=True, target_table=target_table, has_where=False
         )
 
-    # WHERE 恒真判定：不含列引用、不含子查询的纯常量表达式（对每行恒成立）
-    nodes = list(where.this.walk())
+    # 布尔化简 + 常量折叠（sqlglot optimizer.simplify）：
+    # 先把恒真/恒假的常量分支折叠掉——`1=1 OR id=1` → 恒真（WHERE 被整体丢弃）、
+    # `1=2 OR id=1` → 化简为 `id=1`，再判化简后的 WHERE 是否不含列引用。
+    # 化简失败回退原始表达式（fail-safe：宁可不化简也不放宽判定）。
+    simplified_where = _simplify_where_expression(where.this, dialect)
+
+    # 判定：化简后 WHERE 不含列引用/子查询（含恒真被折叠为 None）→ 等价全表
+    if simplified_where is None:
+        return WriteScopeResult(
+            is_update_or_delete=True,
+            target_table=target_table,
+            has_where=True,
+            where_is_constant=True,
+        )
+    nodes = list(simplified_where.walk())
     has_column = any(isinstance(n, exp.Column) for n in nodes)
     has_subquery = any(
         isinstance(n, (exp.Select, exp.Subquery, exp.Union, exp.Exists)) for n in nodes
@@ -428,3 +443,31 @@ def check_write_scope(sql: str, db_type: str = "mysql") -> WriteScopeResult:
         has_where=True,
         where_is_constant=not has_column and not has_subquery,
     )
+
+
+def _simplify_where_expression(where_expr: exp.Expr, dialect: str) -> exp.Expr | None:
+    """对 WHERE 表达式做布尔化简 + 常量折叠（sqlglot optimizer.simplify）。
+
+    OR 传播恒真（`X OR TRUE = TRUE`）、AND 吸收恒真（`X AND TRUE = X`）、
+    恒假湮灭（`X AND FALSE = FALSE`）、幂等（`X OR X = X`）等由优化器处理，
+    覆盖 `WHERE 1=1 OR id=1` 这类"恒真分支污染整式"的绕过变体。
+
+    Args:
+        where_expr: WHERE 表达式节点（exp.Where.this）。
+        dialect: 方言（mysql / postgres / oracle）。
+
+    Returns:
+        化简后的 WHERE 表达式；恒真被折叠（WHERE 整体被优化器丢弃）时返回 None。
+        化简异常时返回原表达式（fail-safe 回退——外层仍按"化简后是否有列"判定，
+        无列才拦，不会因化简失败放宽安全）。
+    """
+    from sqlglot.optimizer.simplify import simplify
+
+    try:
+        simplified = simplify(
+            exp.select("1").where(where_expr, dialect=dialect), dialect=dialect
+        )
+    except Exception:
+        return where_expr
+    new_where = simplified.args.get("where")
+    return new_where.this if new_where is not None else None

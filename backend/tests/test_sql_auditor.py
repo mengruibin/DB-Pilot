@@ -218,10 +218,68 @@ class TestCheckWriteScope:
         assert result.is_full_table is False
 
     def test_dialects_consistent(self):
-        """三方言行为一致。"""
+        """三方言行为一致（含 OR 恒真绕过）。"""
         for db_type in ("mysql", "postgresql", "oracle"):
             assert check_write_scope("DELETE FROM t", db_type=db_type).is_full_table is True
             assert (
                 check_write_scope("DELETE FROM t WHERE id = 1", db_type=db_type).is_full_table
                 is False
             )
+            # OR 恒真绕过三方言一致拦截
+            assert (
+                check_write_scope(
+                    "DELETE FROM t WHERE 1 = 1 OR id = 1", db_type=db_type
+                ).is_full_table
+                is True
+            )
+
+    # ── 布尔化简（write-where-guard-plan v2）：OR 恒真传播 / AND 恒真吸收 ──
+
+    def test_or_constant_bypass_blocked(self):
+        """OR 恒真分支污染整式（1=1 OR id=1）→ 等价全表（布尔化简后恒真）。"""
+        for sql in (
+            "DELETE FROM t WHERE 1 = 1 OR id = 1",
+            "DELETE FROM t WHERE id = 1 OR 1 = 1",
+            "DELETE FROM t WHERE 1 = 1 OR id = 1 OR y = 2",
+            "DELETE FROM t WHERE (1 = 1 OR id = 1) OR y = 1",
+        ):
+            result = check_write_scope(sql, db_type="mysql")
+            assert result.is_full_table is True, f"OR 恒真未判全表: {sql}"
+
+    def test_or_constant_false_simplified(self):
+        """恒假 OR 含列 → 化简为真实条件（1=2 OR id=1 ≡ id=1）→ 放行。"""
+        result = check_write_scope("DELETE FROM t WHERE 1 = 2 OR id = 1", db_type="mysql")
+        assert result.is_full_table is False
+        assert result.where_is_constant is False
+
+    def test_or_absorbed_by_and(self):
+        """内层 OR 恒真被外层 AND 吸收（≡ 其余条件）→ 放行。"""
+        for sql in (
+            "DELETE FROM t WHERE 1 = 1 AND id = 1",
+            "DELETE FROM t WHERE (1 = 1 OR id = 1) AND y = 1",
+        ):
+            result = check_write_scope(sql, db_type="mysql")
+            assert result.is_full_table is False, f"AND 吸收恒真误判全表: {sql}"
+
+    def test_idempotent_or_and(self):
+        """幂等律（X OR X = X / X AND X = X）化简后仍含列 → 放行。"""
+        for sql in (
+            "DELETE FROM t WHERE id = 1 OR id = 1",
+            "DELETE FROM t WHERE id = 1 AND id = 1",
+        ):
+            result = check_write_scope(sql, db_type="mysql")
+            assert result.is_full_table is False, f"幂等化简后误判全表: {sql}"
+
+    def test_constant_false_where_blocked(self):
+        """恒假条件（WHERE 1=2 / NOT(1=1)）→ 保守拦截（与既有纯常量策略一致）。"""
+        for sql in (
+            "DELETE FROM t WHERE 1 = 2",
+            "DELETE FROM t WHERE NOT (1 = 1)",
+        ):
+            result = check_write_scope(sql, db_type="mysql")
+            assert result.is_full_table is True, f"恒假未拦截: {sql}"
+
+    def test_null_is_null_constant(self):
+        """NULL IS NULL 为常量恒真 → 拦截。"""
+        result = check_write_scope("DELETE FROM t WHERE NULL IS NULL", db_type="mysql")
+        assert result.is_full_table is True
