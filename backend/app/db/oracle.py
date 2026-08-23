@@ -17,6 +17,7 @@ Oracle 数据库适配器实现。
 
 from __future__ import annotations
 
+import contextlib
 from typing import Any
 
 import structlog
@@ -226,6 +227,72 @@ class OracleAdapter(BaseAdapter):
                 logger.warning("Oracle 查询超时（call_timeout）", sql=sql[:200])
                 raise TimeoutError("Oracle 查询超时（>30s）") from None
             logger.error("Oracle 查询异常", sql=sql[:200], error=str(exc)[:200])
+            raise ValueError(f"SQL 执行错误：{exc}") from exc
+
+    async def execute_transaction(self, statements: list[str]) -> dict[str, Any]:
+        """在单个数据库事务中执行多条写 SQL（原子性）。
+
+        Oracle 单连接常驻、默认手动提交（从未设 autocommit），首个 DML 即隐式
+        开启事务。逐条在同一连接执行，全部成功 commit，任一失败 rollback——
+        显式 commit/rollback 恰好清理该常驻连接上可能遗留的隐式事务，行为更干净。
+
+        Args:
+            statements: 待执行的写 SQL 语句列表（按顺序执行，仅限 DML）。
+
+        Returns:
+            {"columns": [], "rows": [], "total_rows": 0, "affected_rows": int,
+             "execution_time_ms": int, "is_readonly": False, "audit_status": "passed",
+             "per_statement": [{"sql": str, "affected_rows": int}, ...]}
+            影响行数来自 cur.rowcount（DML；DDL 为 -1，但审计只放行 DML）。
+
+        Raises:
+            ValueError: 任一语句执行失败（事务已回滚）。
+            TimeoutError: call_timeout 超时（事务已回滚）。
+        """
+        if not self._connected or self._conn is None:
+            raise ConnectionError("Oracle 未连接，请先调用 connect()")
+        if not statements:
+            raise ValueError("空语句列表，无法执行事务")
+
+        import time
+
+        start = time.monotonic()
+        try:
+            per_statement: list[dict[str, Any]] = []
+            total_affected = 0
+            async with self._conn.cursor() as cur:
+                for stmt in statements:
+                    await cur.execute(stmt)
+                    affected = int(cur.rowcount or 0)  # DML 返回影响行数
+                    total_affected += affected
+                    per_statement.append({"sql": stmt, "affected_rows": affected})
+            await self._conn.commit()
+            elapsed = int((time.monotonic() - start) * 1000)
+            logger.info(
+                "Oracle 事务提交成功",
+                statements=len(statements),
+                affected_rows=total_affected,
+                execution_time_ms=elapsed,
+            )
+            return {
+                "columns": [],
+                "rows": [],
+                "total_rows": 0,
+                "affected_rows": total_affected,
+                "execution_time_ms": elapsed,
+                "is_readonly": False,
+                "audit_status": "passed",
+                "per_statement": per_statement,
+            }
+        except Exception as exc:
+            # 失败 → rollback（连接通常仍健康，可复用）
+            with contextlib.suppress(Exception):
+                await self._conn.rollback()
+            # call_timeout 触发 → 归为超时（复用 _is_call_timeout_error）
+            if _is_call_timeout_error(exc):
+                logger.warning("Oracle 事务执行超时（call_timeout，已回滚）")
+                raise TimeoutError("Oracle 事务执行超时（>30s），事务已回滚") from None
+            logger.error("Oracle 事务执行异常（已回滚）", error=str(exc)[:200])
             raise ValueError(f"SQL 执行错误：{exc}") from exc
 
     async def stream_query(

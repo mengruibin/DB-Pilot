@@ -17,6 +17,8 @@ MySQL 适配器层集成测试。
 
 from __future__ import annotations
 
+import contextlib
+
 import pytest
 
 from app.db.factory import AdapterFactory
@@ -34,6 +36,22 @@ async def mysql_adapter(mysql_test_config):
 
     adapter = AdapterFactory.create("mysql", mysql_test_config)
     await adapter.connect(mysql_test_config)
+    yield adapter
+    await adapter.disconnect()
+
+
+@pytest.fixture
+async def mysql_admin_adapter(mysql_test_config):
+    """创建并连接 MySQL 适配器（admin 角色，可执行写事务），测试后自动断开。
+
+    事务集成测试需要写权限——默认连接为 readonly（SET SESSION TRANSACTION READ
+    ONLY），写语句会失败，故此处显式以 admin 角色建连（跳过只读 SET）。
+    """
+    if mysql_test_config is None:
+        pytest.skip("TEST_MYSQL_URL not configured")
+
+    adapter = AdapterFactory.create("mysql", mysql_test_config)
+    await adapter.connect(mysql_test_config, user_role="admin")
     yield adapter
     await adapter.disconnect()
 
@@ -151,3 +169,89 @@ class TestMySQLAdapter:
         assert len(batches) == 1
         assert batches[0][0] == ["a"]
         assert batches[0][1] == []
+
+
+# =============================================================================
+# execute_transaction 事务原子性集成测试
+# =============================================================================
+
+
+@pytest.mark.integration
+class TestMySQLExecuteTransaction:
+    """MySQL execute_transaction：多语句要么全成要么全回滚。
+
+    使用普通测试表（非 TEMPORARY）——事务在连接池的不同连接上执行，临时表
+    是连接级可见的会丢失；普通表 schema 级可见，测试结束 drop 清理。
+    """
+
+    async def _create_table(self, adapter, name: str) -> None:
+        """建测试表（先 drop 兜底再建）。"""
+        await adapter.execute(f"DROP TABLE IF EXISTS `{name}`")
+        await adapter.execute(f"CREATE TABLE `{name}` (id INT PRIMARY KEY, v VARCHAR(32))")
+
+    async def _drop_table(self, adapter, name: str) -> None:
+        """清理测试表（失败静默，不影响用例结果）。"""
+        with contextlib.suppress(Exception):
+            await adapter.execute(f"DROP TABLE IF EXISTS `{name}`")
+
+    async def test_transaction_commit_path(self, mysql_admin_adapter) -> None:
+        """全部语句成功 → 统一提交，全部数据可见。"""
+        adapter = mysql_admin_adapter
+        name = "tx_commit_t"
+        await self._create_table(adapter, name)
+        try:
+            result = await adapter.execute_transaction(
+                [
+                    f"INSERT INTO `{name}` (id, v) VALUES (1, 'a')",
+                    f"INSERT INTO `{name}` (id, v) VALUES (2, 'b')",
+                    f"UPDATE `{name}` SET v = 'b2' WHERE id = 2",
+                ]
+            )
+            assert result["affected_rows"] == 3
+            assert len(result["per_statement"]) == 3
+            assert result["per_statement"][0]["affected_rows"] == 1
+            assert result["is_readonly"] is False
+            assert result["audit_status"] == "passed"
+            # 提交后全部可见
+            check = await adapter.execute(f"SELECT COUNT(*) FROM `{name}`")
+            assert check["rows"][0][0] == 2
+        finally:
+            await self._drop_table(adapter, name)
+
+    async def test_transaction_rollback_path(self, mysql_admin_adapter) -> None:
+        """第 2 条主键冲突失败 → 第 1 条已回滚（不残留脏数据）。"""
+        adapter = mysql_admin_adapter
+        name = "tx_rollback_t"
+        await self._create_table(adapter, name)
+        try:
+            with pytest.raises(ValueError):
+                await adapter.execute_transaction(
+                    [
+                        f"INSERT INTO `{name}` (id) VALUES (1)",
+                        f"INSERT INTO `{name}` (id) VALUES (1)",  # 主键冲突 → 失败
+                    ]
+                )
+            # 第一条未提交 → 回滚生效
+            check = await adapter.execute(f"SELECT COUNT(*) FROM `{name}`")
+            assert check["rows"][0][0] == 0
+        finally:
+            await self._drop_table(adapter, name)
+
+    async def test_transaction_restores_autocommit(self, mysql_admin_adapter) -> None:
+        """事务结束后普通 execute 仍可用（autocommit 已还原，连接未被污染）。"""
+        adapter = mysql_admin_adapter
+        name = "tx_restore_t"
+        await self._create_table(adapter, name)
+        try:
+            await adapter.execute_transaction([f"INSERT INTO `{name}` (id, v) VALUES (1, 'a')"])
+            # 事务后的普通 execute（autocommit 模式）仍正常提交
+            await adapter.execute(f"INSERT INTO `{name}` (id, v) VALUES (2, 'b')")
+            check = await adapter.execute(f"SELECT COUNT(*) FROM `{name}`")
+            assert check["rows"][0][0] == 2
+        finally:
+            await self._drop_table(adapter, name)
+
+    async def test_empty_statements_raises(self, mysql_admin_adapter) -> None:
+        """空语句列表 → ValueError。"""
+        with pytest.raises(ValueError, match="空语句列表"):
+            await mysql_admin_adapter.execute_transaction([])

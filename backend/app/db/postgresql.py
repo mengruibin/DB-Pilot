@@ -222,6 +222,75 @@ class PostgresAdapter(BaseAdapter):
             logger.error("PostgreSQL 查询异常", sql=sql[:200], error=str(exc)[:200])
             raise ValueError(f"SQL 执行错误：{exc}") from exc
 
+    async def execute_transaction(self, statements: list[str]) -> dict[str, Any]:
+        """在单个数据库事务中执行多条写 SQL（原子性）。
+
+        复用 asyncpg 原生事务上下文管理器 async with conn.transaction()：
+          - 正常退出自动 COMMIT，异常退出自动 ROLLBACK（原子性由驱动保证）
+          - asyncpg 单次 execute 禁止多语句，逐条循环天然满足
+        事务内补一次 statement_timeout 保证每条语句受服务器端超时约束。
+
+        Args:
+            statements: 待执行的写 SQL 语句列表（按顺序执行，仅限 DML）。
+
+        Returns:
+            {"columns": [], "rows": [], "total_rows": 0, "affected_rows": int,
+             "execution_time_ms": int, "is_readonly": False, "audit_status": "passed",
+             "per_statement": [{"sql": str, "affected_rows": int}, ...]}
+            影响行数从 execute() 状态串 "INSERT 0 1" / "UPDATE 3" 解析。
+
+        Raises:
+            ValueError: 任一语句执行失败（事务已回滚）。
+            TimeoutError: 任一语句超时（事务已回滚）。
+        """
+        if not self._connected or self._pool is None:
+            raise ConnectionError("PostgreSQL 未连接，请先调用 connect()")
+        if not statements:
+            raise ValueError("空语句列表，无法执行事务")
+
+        import time
+
+        start = time.monotonic()
+        try:
+            async with self._pool.acquire() as conn:
+                # 事务内补一次 statement_timeout，保证每条语句受服务器端超时约束
+                await conn.execute(f"SET statement_timeout = '{STATEMENT_EXEC_TIMEOUT_MS}'")
+                async with conn.transaction():  # 自动 BEGIN / COMMIT / ROLLBACK
+                    per_statement: list[dict[str, Any]] = []
+                    total_affected = 0
+                    for stmt in statements:
+                        # execute() 返回状态字符串如 "INSERT 0 1"、"UPDATE 3"
+                        status = await conn.execute(stmt)
+                        parts = status.split()
+                        affected = int(parts[-1]) if parts and parts[-1].isdigit() else 0
+                        total_affected += affected
+                        per_statement.append({"sql": stmt, "affected_rows": affected})
+            elapsed = int((time.monotonic() - start) * 1000)
+            logger.info(
+                "PostgreSQL 事务提交成功",
+                statements=len(statements),
+                affected_rows=total_affected,
+                execution_time_ms=elapsed,
+            )
+            return {
+                "columns": [],
+                "rows": [],
+                "total_rows": 0,
+                "affected_rows": total_affected,
+                "execution_time_ms": elapsed,
+                "is_readonly": False,
+                "audit_status": "passed",
+                "per_statement": per_statement,
+            }
+        except TimeoutError:
+            # command_timeout → asyncio.TimeoutError；transaction 上下文已自动 ROLLBACK
+            logger.warning("PostgreSQL 事务执行超时（已回滚）", statements=len(statements))
+            raise TimeoutError("PostgreSQL 事务执行超时（>30s），事务已回滚") from None
+        except Exception as exc:
+            # transaction 上下文异常退出已自动 ROLLBACK，连接可复用
+            logger.error("PostgreSQL 事务执行异常（已回滚）", error=str(exc)[:200])
+            raise ValueError(f"SQL 执行错误：{exc}") from exc
+
     async def stream_query(
         self,
         sql: str,

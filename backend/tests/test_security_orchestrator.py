@@ -125,6 +125,20 @@ async def _fake_write_sql(counter: dict, **kwargs) -> dict:
     }
 
 
+async def _fake_transaction_write(counter: dict, **kwargs) -> dict:
+    counter["tx"] += 1
+    statements = kwargs.get("statements") or []
+    return {
+        "summary": "事务提交成功",
+        "affected_rows": len(statements),
+        "total_rows": 0,
+        "execution_time_ms": 1,
+        "audit_status": "passed",
+        "is_readonly": False,
+        "per_statement": [{"sql": stmt, "affected_rows": 1} for stmt in statements],
+    }
+
+
 # =============================================================================
 # 1. 单遍只读执行 + 消息配对
 # =============================================================================
@@ -655,3 +669,134 @@ class TestMixedBlockedAndPending:
         writes = captured["payload"]["writes"]
         assert [w["tool_call_id"] for w in writes] == ["call_ins"]
         assert captured["payload"]["safe_tool_count"] == 1  # DDL 被拦，不计数为 write
+
+
+# =============================================================================
+# 事务写工具（execute_write_transaction）确认流
+# =============================================================================
+
+
+class TestTransactionWriteFlow:
+    @pytest.mark.asyncio
+    async def test_readonly_transaction_blocked_before_confirm(self):
+        """readonly 发事务写：确认前被逐条审计拦，不弹确认卡片、不执行。"""
+        counter = {"tx": 0}
+        registry = {
+            "execute_write_transaction": _MockTool(
+                lambda **kw: _fake_transaction_write(counter, **kw)
+            ),
+        }
+        tcs = [
+            _tc(
+                "execute_write_transaction",
+                {"statements": ["INSERT INTO t VALUES (1)"]},
+                "call_tx",
+            )
+        ]
+        # conn_config 必须与 ctx 的角色一致（TransactionAuditStage 读 conn_config.user_role）
+        ctx = _ctx(user_role="readonly")
+        with _make_tool_registry(registry):
+            res = await run_security_pipeline(
+                tcs, _profiles(tcs), ctx.conn_config, ctx, "r", 1, "s1", []
+            )
+
+        assert "SQL 审计未通过" in res["messages"][0].content
+        assert counter["tx"] == 0  # 未执行
+        assert "confirm_required" not in [e["type"] for e in res["sse_events"]]
+
+    @pytest.mark.asyncio
+    async def test_admin_transaction_interrupt_then_resume_executes_once(self):
+        """admin 合法事务：首遍 interrupt 抛 GraphInterrupt，resume 批准后执行恰一次。"""
+        counter = {"tx": 0}
+        registry = {
+            "execute_write_transaction": _MockTool(
+                lambda **kw: _fake_transaction_write(counter, **kw)
+            ),
+        }
+        tcs = [
+            _tc(
+                "execute_write_transaction",
+                {"statements": ["INSERT INTO orders (id) VALUES (1)"]},
+                "call_tx",
+            )
+        ]
+        profiles = _profiles(tcs)
+
+        # ── 首遍：interrupt 抛 GraphInterrupt，节点被终止，绝不执行 ──
+        with _make_tool_registry(registry), pytest.raises(GraphInterrupt):
+            await run_security_pipeline(
+                tcs,
+                profiles,
+                _CONN,
+                _ctx(),
+                "r",
+                1,
+                "s1",
+                [],
+                interrupt_fn=_interrupt_raises,
+            )
+        assert counter["tx"] == 0
+
+        # ── resume 遍：批准 → 执行恰一次 ──
+        decision = {"approved_tool_call_ids": ["call_tx"], "denied_tool_call_ids": []}
+        with _make_tool_registry(registry):
+            res = await run_security_pipeline(
+                tcs,
+                profiles,
+                _CONN,
+                _ctx(),
+                "r",
+                1,
+                "s1",
+                [],
+                interrupt_fn=_interrupt_returns(decision),
+            )
+        assert counter["tx"] == 1
+        assert "事务提交成功" in res["messages"][0].content
+
+    @pytest.mark.asyncio
+    async def test_transaction_confirm_payload_sql(self):
+        """确认 payload：事务工具 category=sql_write 且 details.sql 为 join 后全部语句。"""
+        counter = {"tx": 0}
+        registry = {
+            "execute_write_transaction": _MockTool(
+                lambda **kw: _fake_transaction_write(counter, **kw)
+            ),
+        }
+        statements = [
+            "INSERT INTO orders (id, qty) VALUES (1, 10)",
+            "UPDATE inventory SET stock = stock - 10 WHERE sku = 'A'",
+        ]
+        tcs = [_tc("execute_write_transaction", {"statements": statements}, "call_tx")]
+        captured: dict = {}
+
+        def _capture_interrupt(payload):
+            captured["payload"] = payload
+            raise GraphInterrupt()
+
+        with _make_tool_registry(registry), pytest.raises(GraphInterrupt):
+            await run_security_pipeline(
+                tcs,
+                _profiles(tcs),
+                _CONN,
+                _ctx(),
+                "r",
+                1,
+                "s1",
+                [],
+                interrupt_fn=_capture_interrupt,
+            )
+
+        writes = captured["payload"]["writes"]
+        assert len(writes) == 1
+        w = writes[0]
+        assert w["tool_call_id"] == "call_tx"
+        assert w["tool"] == "execute_write_transaction"
+        assert w["category"] == "sql_write"
+        assert w["details"]["sql"] == (
+            "INSERT INTO orders (id, qty) VALUES (1, 10);\n"
+            "UPDATE inventory SET stock = stock - 10 WHERE sku = 'A'"
+        )
+        # 连接注入参数被过滤（details 干净）
+        for injected in ("password", "connection_id", "user_role"):
+            assert injected not in w["details"]

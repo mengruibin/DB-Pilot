@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import json as _json
 from collections.abc import Mapping
 from typing import Any
 
@@ -108,7 +109,15 @@ class SQLAuditStage(SecurityStage):
 
         db_type = conn_config.get("db_type", "mysql")
         user_role = conn_config.get("user_role", "readonly")
+        return self._audit_single_sql(sql, db_type, user_role)
 
+    def _audit_single_sql(self, sql: str, db_type: str, user_role: str) -> StageResult:
+        """对单条 SQL 执行三步审计（语句类型白名单 → sqlglot 审计 → require_where）。
+
+        单语句审计（check）与事务审计（TransactionAuditStage 逐条复用）的单一事实源。
+        blocked=False 表示通过；fail-open 语义（审计模块 ImportError / 审计异常 →
+        放行带 warning）保持。
+        """
         # ── Step 1: 语句类型白名单（工具契约硬约束，fail-closed）──
         # 白名单配置后，SQL 顶层语句类型必须落在名单内；解析失败 / 多语句 /
         # 未知类型一律拦截（不允许"无法确认即放行"），
@@ -184,6 +193,80 @@ class SQLAuditStage(SecurityStage):
                 )
 
         return StageResult(blocked=False)
+
+
+# =============================================================================
+# TransactionAuditStage — 事务写工具逐条审计（PRE_CONFIRM）
+# =============================================================================
+
+
+class TransactionAuditStage(SQLAuditStage):
+    """事务写工具（execute_write_transaction）审计阶段（PRE_CONFIRM，纯审计）。
+
+    对 statements 列表逐条复用 SQLAuditStage._audit_single_sql——与
+    execute_write_sql 同一套类型白名单 + sqlglot 审计 + require_where 规则，
+    不引入独立审计引擎逻辑（安全行为单一事实源）。任一语句被拦 → 整事务拦截，
+    reason 带上语句索引与预览。空列表 / 非列表 / 空白语句 fail-closed。
+    """
+
+    name = "transaction_sql_audit"
+    phase = StagePhase.PRE_CONFIRM
+
+    async def check(
+        self,
+        tool_call: Mapping[str, Any],
+        conn_config: dict[str, Any],
+        ctx: SecurityContext,
+    ) -> StageResult:
+        """逐条审计 statements（PRE_CONFIRM 纯审计，无 DB 副作用）。"""
+        statements = (tool_call.get("args") or {}).get("statements")
+        db_type = conn_config.get("db_type", "mysql")
+        user_role = conn_config.get("user_role", "readonly")
+
+        # 参数形态归一：PRE_CONFIRM 阶段看到的是 LLM 原始参数——部分 LLM（如
+        # DeepSeek）会把 list 参数传成 JSON 字符串（orchestrator._coerce_tool_args
+        # 只在 Phase3 执行前修正），此处同样尝试解析，避免合法调用被误拦。
+        if isinstance(statements, str):
+            try:
+                parsed = _json.loads(statements)
+            except (_json.JSONDecodeError, TypeError):
+                parsed = None
+            if isinstance(parsed, list):
+                statements = parsed
+
+        # 参数形态 fail-closed：非列表 / 空列表 → 拦（不允许"确认空事务"或传错类型）
+        if not isinstance(statements, list) or not statements:
+            return StageResult(
+                blocked=True,
+                block_code="TRANSACTION_INVALID_ARGUMENTS",
+                reason=(
+                    "execute_write_transaction 的 statements 参数必须是非空字符串列表，"
+                    "实际收到空值或非列表，已拦截"
+                ),
+            )
+
+        all_warnings: list[str] = []
+        for idx, raw in enumerate(statements):
+            sql = str(raw).strip()
+            if not sql:
+                return StageResult(
+                    blocked=True,
+                    block_code="TRANSACTION_INVALID_ARGUMENTS",
+                    reason=f"第 {idx + 1} 条语句为空或纯空白，已拦截（事务不允许空语句）",
+                )
+            result = self._audit_single_sql(sql, db_type, user_role)
+            if result.blocked:
+                preview = sql[:120] + ("..." if len(sql) > 120 else "")
+                # 保留原始 block_code（SQL_STMT_TYPE_BLOCKED / SQL_AUDIT_BLOCKED /
+                # WRITE_NO_WHERE_BLOCKED），reason 补语句索引 + 预览
+                return StageResult(
+                    blocked=True,
+                    block_code=result.block_code or "SQL_AUDIT_BLOCKED",
+                    reason=f"第 {idx + 1} 条语句被拦截：{result.reason}\n语句预览：{preview}",
+                    context=result.context,
+                )
+            all_warnings.extend(result.warnings)
+        return StageResult(blocked=False, warnings=all_warnings)
 
 
 # =============================================================================
@@ -488,6 +571,13 @@ class ConfirmStage(SecurityStage):
             parts.append(f"{k}={v_str}")
         arg_desc = ", ".join(parts)
         description = tool_name + (f": {arg_desc}" if arg_desc else "")
+
+        # 事务写工具（execute_write_transaction）：statements 列表 → 注入
+        # details.sql（分号换行连接），前端 sql_write 确认卡片据此在单个代码块
+        # 展示全部 SQL（WriteConfirmation.vue 渲染 details?.sql ?? description）。
+        # 仅对含 statements 列表的调用生效，不影响其它工具（table_names 等）。
+        if isinstance(key_args.get("statements"), list):
+            key_args["sql"] = ";\n".join(str(s) for s in key_args["statements"])
 
         return {
             "tool_call_id": tool_call["id"],

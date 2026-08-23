@@ -22,6 +22,7 @@ from app.agent.tools.query import (
     describe_table,
     execute_readonly_sql,
     execute_write_sql,
+    execute_write_transaction,
     list_tables,
 )
 from app.agent.tools.troubleshoot import (
@@ -42,6 +43,7 @@ AGENT_TOOLS = [
     describe_table,  # 获取指定表的结构
     execute_readonly_sql,  # 执行只读 SQL 查询（SELECT / SHOW / EXPLAIN 等）
     execute_write_sql,  # 执行写 SQL（INSERT / UPDATE / DELETE，需用户确认）
+    execute_write_transaction,  # 事务型写 SQL（多条语句原子回滚，一次确认）
     # 诊断类工具
     get_slow_queries,  # 获取慢查询日志
     explain_query,  # 分析 SQL 执行计划

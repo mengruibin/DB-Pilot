@@ -25,6 +25,7 @@ from app.agent.security.stages import (
     ConfirmStage,
     RowEstimationStage,
     SQLAuditStage,
+    TransactionAuditStage,
 )
 
 
@@ -310,6 +311,130 @@ class TestSQLAuditStageStmtTypeWhitelist:
 
 
 # =============================================================================
+# TransactionAuditStage（事务写工具 statements 逐条审计）
+# =============================================================================
+
+
+class TestTransactionAuditStage:
+    """execute_write_transaction 的 statements 逐条审计。
+
+    复用 execute_write_sql 同一套规则（类型白名单 + sqlglot 审计 + require_where），
+    任一语句被拦 → 整事务拦截；空列表 / 非列表 / 空白语句 fail-closed。
+    """
+
+    async def _check(self, statements, user_role: str = "admin") -> StageResult:
+        stage = TransactionAuditStage(
+            allowed_stmt_types=("INSERT", "UPDATE", "DELETE"),
+            require_where=True,
+        )
+        return await stage.check(
+            _tc("execute_write_transaction", {"statements": statements}, "call_tx"),
+            _conn(user_role),
+            _ctx(user_role),
+        )
+
+    @pytest.mark.asyncio
+    async def test_empty_list_blocked(self):
+        """空列表 → TRANSACTION_INVALID_ARGUMENTS（fail-closed）。"""
+        result = await self._check([])
+        assert result.blocked
+        assert result.block_code == "TRANSACTION_INVALID_ARGUMENTS"
+
+    @pytest.mark.asyncio
+    async def test_non_list_blocked(self):
+        """非列表参数（字符串 / None / 数字）→ 拦。"""
+        for bad in ("INSERT INTO t VALUES (1)", None, 123):
+            result = await self._check(bad)
+            assert result.blocked, f"非列表参数未拦截: {bad!r}"
+            assert result.block_code == "TRANSACTION_INVALID_ARGUMENTS"
+
+    @pytest.mark.asyncio
+    async def test_json_string_list_coerced(self):
+        """LLM 把 list 传成 JSON 字符串 → 解析后正常逐条审计（不误拦）。"""
+        statements = '["INSERT INTO t (id) VALUES (1)", "UPDATE t SET a=1 WHERE id=1"]'
+        result = await self._check(statements)
+        assert not result.blocked
+
+    @pytest.mark.asyncio
+    async def test_blank_statement_blocked(self):
+        """含空白元素 → 拦，reason 带语句索引。"""
+        result = await self._check(["INSERT INTO t (id) VALUES (1)", "   "])
+        assert result.blocked
+        assert result.block_code == "TRANSACTION_INVALID_ARGUMENTS"
+        assert "第 2 条" in (result.reason or "")
+
+    @pytest.mark.asyncio
+    async def test_mixed_select_blocked(self):
+        """混入 SELECT（纯写契约）→ 整事务拦 SQL_STMT_TYPE_BLOCKED。"""
+        result = await self._check(["INSERT INTO t (id) VALUES (1)", "SELECT * FROM t"])
+        assert result.blocked
+        assert result.block_code == "SQL_STMT_TYPE_BLOCKED"
+        assert "第 2 条" in (result.reason or "")
+
+    @pytest.mark.asyncio
+    async def test_mixed_ddl_blocked(self):
+        """混入红线 DDL（DROP）→ 类型白名单拦 SQL_STMT_TYPE_BLOCKED。"""
+        result = await self._check(["INSERT INTO t (id) VALUES (1)", "DROP TABLE t"])
+        assert result.blocked
+        assert result.block_code == "SQL_STMT_TYPE_BLOCKED"
+        assert "第 2 条" in (result.reason or "")
+
+    @pytest.mark.asyncio
+    async def test_multi_statement_in_one_element_blocked(self):
+        """单元素内塞多语句（; 分隔）→ 类型白名单拦（双保险）。"""
+        result = await self._check(["INSERT INTO t (id) VALUES (1); DELETE FROM t"])
+        assert result.blocked
+        assert result.block_code == "SQL_STMT_TYPE_BLOCKED"
+
+    @pytest.mark.asyncio
+    async def test_no_where_update_blocked(self):
+        """事务内 UPDATE 无 WHERE → WRITE_NO_WHERE_BLOCKED。"""
+        result = await self._check(["INSERT INTO t (id) VALUES (1)", "UPDATE t SET a = 1"])
+        assert result.blocked
+        assert result.block_code == "WRITE_NO_WHERE_BLOCKED"
+        assert "第 2 条" in (result.reason or "")
+
+    @pytest.mark.asyncio
+    async def test_all_valid_dml_allowed(self):
+        """全部 admin 合法 DML（带 WHERE）→ 放行。"""
+        result = await self._check(
+            [
+                "INSERT INTO orders (id, qty) VALUES (1, 10)",
+                "UPDATE inventory SET stock = stock - 10 WHERE sku = 'A'",
+                "DELETE FROM tmp WHERE created_at < NOW()",
+            ]
+        )
+        assert not result.blocked
+
+    @pytest.mark.asyncio
+    async def test_readonly_user_blocked(self):
+        """readonly 发事务写 → 逐条审计拦 SQL_AUDIT_BLOCKED。"""
+        result = await self._check(["INSERT INTO t (id) VALUES (1)"], user_role="readonly")
+        assert result.blocked
+        assert result.block_code == "SQL_AUDIT_BLOCKED"
+
+    @pytest.mark.asyncio
+    async def test_fail_open_on_audit_exception(self):
+        """逐条审计异常 → fail-open 放行带 warning（与单语句语义一致）。"""
+        stage = TransactionAuditStage(
+            allowed_stmt_types=("INSERT", "UPDATE", "DELETE"),
+            require_where=True,
+        )
+        with patch("app.engine.sql_auditor.audit", side_effect=RuntimeError("boom")):
+            result = await stage.check(
+                _tc(
+                    "execute_write_transaction",
+                    {"statements": ["INSERT INTO t VALUES (1)"]},
+                    "call_tx",
+                ),
+                _conn(),
+                _ctx(),
+            )
+        assert not result.blocked
+        assert result.warnings
+
+
+# =============================================================================
 # RowEstimationStage
 # =============================================================================
 
@@ -465,3 +590,38 @@ class TestConfirmStage:
         tc = _tc("some_new_tool", {"a": 1}, "call_x")
         action = ConfirmStage.build_action(tc)
         assert action["category"] == "generic"
+
+    def test_build_action_injects_sql_for_transaction(self):
+        """事务写工具：statements 列表 → 注入 details.sql（前端一个代码块展示全部 SQL）。"""
+        tc = _tc(
+            "execute_write_transaction",
+            {
+                "statements": [
+                    "INSERT INTO orders (id) VALUES (1)",
+                    "UPDATE inventory SET stock=1 WHERE id=1",
+                ]
+            },
+            "call_tx",
+        )
+        action = ConfirmStage.build_action(tc, category="sql_write")
+        assert action["tool"] == "execute_write_transaction"
+        assert action["category"] == "sql_write"
+        assert action["details"]["sql"] == (
+            "INSERT INTO orders (id) VALUES (1);\nUPDATE inventory SET stock=1 WHERE id=1"
+        )
+        assert action["details"]["statements"] == [
+            "INSERT INTO orders (id) VALUES (1)",
+            "UPDATE inventory SET stock=1 WHERE id=1",
+        ]
+
+    def test_build_action_no_injection_for_other_tools(self):
+        """非 statements 参数的工具（execute_write_sql / kill_transaction）不注入 sql。"""
+        # execute_write_sql：本身有 sql 字段，不受注入逻辑影响
+        tc_w = _tc("execute_write_sql", {"sql": "INSERT INTO t VALUES (1)"}, "call_w")
+        action_w = ConfirmStage.build_action(tc_w, category="sql_write")
+        assert action_w["details"] == {"sql": "INSERT INTO t VALUES (1)"}
+        # kill_transaction：thread_id 参数，details 不含 sql
+        tc_k = _tc("kill_transaction", {"thread_id": 12345}, "call_k")
+        action_k = ConfirmStage.build_action(tc_k, category="connection_kill")
+        assert "sql" not in action_k["details"]
+        assert action_k["details"] == {"thread_id": 12345}

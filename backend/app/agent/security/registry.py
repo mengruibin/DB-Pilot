@@ -2,7 +2,7 @@
 安全注册表——安全策略单一事实源（security-pipeline-north-star-plan §2.4）。
 
 STAGE_REGISTRY：阶段名 → 阶段类（orchestrator 按 StageRef.name 实例化）。
-SECURITY_REGISTRY：11 个 Agent 工具 → SecurityProfile（显式全列，含空 profile）。
+SECURITY_REGISTRY：13 个 Agent 工具 → SecurityProfile（显式全列，含空 profile）。
 
 约定（CLAUDE.md Key Conventions）：
   - 安全行为一律经本模块声明，禁止在工具 extras 或图节点里散落安全逻辑。
@@ -22,6 +22,7 @@ from app.agent.security.stages import (
     ConfirmStage,
     RowEstimationStage,
     SQLAuditStage,
+    TransactionAuditStage,
 )
 
 # =============================================================================
@@ -30,12 +31,13 @@ from app.agent.security.stages import (
 
 STAGE_REGISTRY: dict[str, type[SecurityStage]] = {
     "sql_audit": SQLAuditStage,  # sqlglot 纯审计（PRE_CONFIRM）
+    "transaction_sql_audit": TransactionAuditStage,  # 事务写工具逐条审计（PRE_CONFIRM）
     "row_estimation": RowEstimationStage,  # EXPLAIN 多维度评估（PRE_EXECUTE）
     "confirm": ConfirmStage,  # 用户确认标记（CONFIRM）
 }
 
 # =============================================================================
-# 安全注册表：12 个工具 → SecurityProfile（安全策略单一事实源）
+# 安全注册表：13 个工具 → SecurityProfile（安全策略单一事实源）
 # =============================================================================
 
 SECURITY_REGISTRY: dict[str, SecurityProfile] = {
@@ -68,6 +70,24 @@ SECURITY_REGISTRY: dict[str, SecurityProfile] = {
                 params={
                     "allowed_stmt_types": ("INSERT", "UPDATE", "DELETE"),
                     "require_where": True,  # 无 WHERE 全表删改 → WRITE_NO_WHERE_BLOCKED
+                },
+            ),
+            StageRef("confirm", StagePhase.CONFIRM, params={"category": "sql_write"}),
+        ),
+    ),
+    # execute_write_transaction：事务型写工具（多表/多步写操作的原子回滚）。
+    # ★ 逐条审计（transaction_sql_audit）——对 statements 列表逐条复用
+    #   execute_write_sql 同一套类型白名单 + require_where（事务审计阶段与
+    #   单语句审计共用 _audit_single_sql，单一事实源）
+    # + confirm(sql_write)：整个事务一次确认（卡片注入 details.sql 展示全部语句）
+    "execute_write_transaction": SecurityProfile(
+        stages=(
+            StageRef(
+                "transaction_sql_audit",
+                StagePhase.PRE_CONFIRM,
+                params={
+                    "allowed_stmt_types": ("INSERT", "UPDATE", "DELETE"),
+                    "require_where": True,  # 每条 UPDATE/DELETE 无 WHERE → 拦
                 },
             ),
             StageRef("confirm", StagePhase.CONFIRM, params={"category": "sql_write"}),

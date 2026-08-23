@@ -223,6 +223,28 @@ class BaseAdapter(ABC):
         """
 
     @abstractmethod
+    async def execute_transaction(self, statements: list[str]) -> dict[str, Any]:
+        """在单个数据库事务中执行多条写 SQL（原子性）。
+
+        全部语句成功后 COMMIT，任一语句失败/超时则 ROLLBACK（事务写工具
+        execute_write_transaction 依赖此保证"多表/多步写操作要么全成要么全回滚"）。
+        仅限写语句（INSERT/UPDATE/DELETE）——由上层安全审计（TransactionAuditStage
+        类型白名单 + require_where）保证纯写契约，本方法不重复校验类型。
+
+        Args:
+            statements: 待执行的写 SQL 语句列表（按顺序执行）。
+
+        Returns:
+            {"columns": [], "rows": [], "total_rows": 0, "affected_rows": int,
+             "execution_time_ms": int, "is_readonly": False, "audit_status": "passed",
+             "per_statement": [{"sql": str, "affected_rows": int}, ...]}
+
+        Raises:
+            ValueError: 任一语句语法错误或执行失败（事务已回滚）。
+            TimeoutError: 任一语句超时（>STATEMENT_EXEC_TIMEOUT_SEC，事务已回滚）。
+        """
+
+    @abstractmethod
     async def stream_query(
         self,
         sql: str,

@@ -323,6 +323,106 @@ class MySQLAdapter(BaseAdapter):
             if conn is not None:
                 self._pool.release(conn)
 
+    async def execute_transaction(self, statements: list[str]) -> dict[str, Any]:
+        """在单个数据库事务中执行多条写 SQL（原子性）。
+
+        通过连接池获取一条连接并临时关闭 autocommit，逐条执行全部写语句：
+          - 全部成功 → COMMIT，返回每条语句的影响行数（per_statement）
+          - 任一失败（服务器拒绝、连接健康）→ ROLLBACK 后复用连接
+          - 任一超时（客户端兜底触发 / 服务器端 3024/1969 终止）→ 关闭连接，
+            InnoDB 断连自动回滚未提交事务，事务原子性由数据库保证
+        事务结束必须还原 autocommit=True 再释放连接——池不重置会话状态，
+        残留 manual-commit 会污染池内下一位 acquire 者（超时分支已 close，
+        还原被 suppress，release 丢弃脏连接）。
+
+        Args:
+            statements: 待执行的写 SQL 语句列表（按顺序执行，仅限 DML）。
+
+        Returns:
+            {"columns": [], "rows": [], "total_rows": 0, "affected_rows": int,
+             "execution_time_ms": int, "is_readonly": False, "audit_status": "passed",
+             "per_statement": [{"sql": str, "affected_rows": int}, ...]}
+
+        Raises:
+            ValueError: 任一语句语法错误或执行失败（事务已回滚）。
+            TimeoutError: 任一语句超时（>30s，事务已回滚）。
+        """
+        if not self._connected or self._pool is None:
+            raise ConnectionError("MySQL 未连接，请先调用 connect()")
+        if not statements:
+            raise ValueError("空语句列表，无法执行事务")
+
+        import time
+
+        start = time.monotonic()
+        conn = None
+        try:
+            conn = await self._pool.acquire()
+            # 进入事务：关闭 autocommit（aiomysql 的 autocommit 是 async 方法）
+            await conn.autocommit(False)
+            per_statement: list[dict[str, Any]] = []
+            total_affected = 0
+            async with conn.cursor() as cur:
+                # 服务器端执行超时保护（best-effort，同 execute()）
+                if self._timeout_sql:
+                    with contextlib.suppress(Exception):
+                        await cur.execute(self._timeout_sql)
+                for stmt in statements:
+                    # 客户端兜底：逐条包 asyncio.wait_for，防止服务器端机制缺失时无限等待。
+                    # cur.execute 返回影响行数（DML）或行数（SELECT，审计已排除）。
+                    affected = await asyncio.wait_for(
+                        cur.execute(stmt),
+                        timeout=STATEMENT_EXEC_TIMEOUT_SEC + 5,
+                    )
+                    affected = int(affected or 0)
+                    total_affected += affected
+                    per_statement.append({"sql": stmt, "affected_rows": affected})
+            await conn.commit()
+            elapsed = int((time.monotonic() - start) * 1000)
+            logger.info(
+                "MySQL 事务提交成功",
+                statements=len(statements),
+                affected_rows=total_affected,
+                execution_time_ms=elapsed,
+            )
+            return {
+                "columns": [],
+                "rows": [],
+                "total_rows": 0,
+                "affected_rows": total_affected,
+                "execution_time_ms": elapsed,
+                "is_readonly": False,
+                "audit_status": "passed",
+                "per_statement": per_statement,
+            }
+        except TimeoutError:
+            # 客户端兜底触发：语句可能仍在服务器执行，连接状态不可信。
+            # 关闭连接让池丢弃重建；InnoDB 断连自动回滚未提交事务 → 原子性保持。
+            if conn is not None:
+                conn.close()
+            logger.warning(
+                "MySQL 事务语句超时，连接已关闭（事务回滚）",
+                statements=len(statements),
+            )
+            raise TimeoutError("MySQL 事务执行超时（>30s），事务已回滚") from None
+        except Exception as exc:
+            # 非超时异常：语句被服务器拒绝，连接仍健康 → 主动 rollback 后复用
+            if conn is not None:
+                with contextlib.suppress(Exception):
+                    await conn.rollback()
+            # 服务器端主动终止（MySQL 3024 ER_QUERY_TIMEOUT / MariaDB 1969
+            # ER_STATEMENT_TIMEOUT）→ 归为超时（同 execute() 的归类逻辑）
+            if getattr(exc, "args", None) and exc.args and exc.args[0] in (3024, 1969):
+                raise TimeoutError("MySQL 事务执行超时（>30s），事务已回滚") from None
+            logger.error("MySQL 事务执行异常（已回滚）", error=str(exc)[:200])
+            raise ValueError(f"SQL 执行错误：{exc}") from exc
+        finally:
+            if conn is not None:
+                # ★ 还原 autocommit 再释放：池不重置会话状态，残留 manual-commit 污染下一位
+                with contextlib.suppress(Exception):
+                    await conn.autocommit(True)
+                self._pool.release(conn)
+
     @staticmethod
     async def _run_query(
         cur: Any,

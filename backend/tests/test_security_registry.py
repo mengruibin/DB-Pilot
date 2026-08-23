@@ -2,7 +2,7 @@
 安全注册表单元测试（security-pipeline-north-star-plan / 任务 D2）。
 
 覆盖：
-  1. SECURITY_REGISTRY 显式收录全部 11 个 Agent 工具，profile 与预期阶段一致
+  1. SECURITY_REGISTRY 显式收录全部 13 个 Agent 工具，profile 与预期阶段一致
   2. 未收录工具 → 空 profile（无安全阶段）
   3. 加载期不变式：双 CONFIRM 抛错、阶段乱序抛错
   4. STAGE_REGISTRY 注册预期阶段名
@@ -34,12 +34,12 @@ from app.agent.tools.registry import TOOL_REGISTRY
 
 class TestRegistryCoverage:
     def test_all_tools_explicitly_listed(self):
-        """SECURITY_REGISTRY 显式收录全部 11 个工具（TOOL_REGISTRY 全覆盖）。"""
+        """SECURITY_REGISTRY 显式收录全部 13 个工具（TOOL_REGISTRY 全覆盖）。"""
         for tool_name in TOOL_REGISTRY:
             assert tool_name in SECURITY_REGISTRY, f"工具 {tool_name} 未收录"
 
     def test_registry_matches_tool_registry_size(self):
-        """SECURITY_REGISTRY 工具数与 TOOL_REGISTRY 一致（11 个）。"""
+        """SECURITY_REGISTRY 工具数与 TOOL_REGISTRY 一致（13 个）。"""
         assert set(SECURITY_REGISTRY) == set(TOOL_REGISTRY)
 
 
@@ -97,6 +97,31 @@ class TestProfiles:
             ("confirm", StagePhase.CONFIRM),
         ]
         assert profile.confirm_ref().params.get("category") == "connection_kill"
+
+    def test_execute_write_transaction_profile(self):
+        """execute_write_transaction：transaction_sql_audit 逐条审计 + confirm(sql_write)。
+
+        事务工具复用 execute_write_sql 同一套审计参数（类型白名单 + require_where），
+        阶段名为 transaction_sql_audit（逐条聚合审计）。
+        """
+        profile = get_security_profile("execute_write_transaction")
+        assert [(s.name, s.phase) for s in profile.stages] == [
+            ("transaction_sql_audit", StagePhase.PRE_CONFIRM),
+            ("confirm", StagePhase.CONFIRM),
+        ]
+        # 逐条审计声明写语句类型白名单（纯写契约，事务内禁止 SELECT）
+        audit_ref = profile.stages[0]
+        assert audit_ref.params.get("allowed_stmt_types") == (
+            "INSERT",
+            "UPDATE",
+            "DELETE",
+        )
+        # require_where：每条 UPDATE/DELETE 无 WHERE → 拦（事务内同样强制）
+        assert audit_ref.params.get("require_where") is True
+        # confirm 阶段复用 sql_write 分类（前端确认卡片零改动）
+        confirm_ref = profile.confirm_ref()
+        assert confirm_ref is not None
+        assert confirm_ref.params.get("category") == "sql_write"
 
     def test_no_audit_tools_empty_profile(self):
         """非 SQL 工具（list_tables/describe_table/check_locks 等）→ 空 profile。"""
@@ -172,8 +197,13 @@ class TestProfileInvariants:
 
 class TestStageRegistry:
     def test_stage_registry_keys(self):
-        """STAGE_REGISTRY 注册 sql_audit / row_estimation / confirm。"""
-        assert set(STAGE_REGISTRY) == {"sql_audit", "row_estimation", "confirm"}
+        """STAGE_REGISTRY 注册 sql_audit / transaction_sql_audit / row_estimation / confirm。"""
+        assert set(STAGE_REGISTRY) == {
+            "sql_audit",
+            "transaction_sql_audit",
+            "row_estimation",
+            "confirm",
+        }
 
     def test_stage_phases_match(self):
         """阶段类的相位声明与注册表语义一致。"""
@@ -181,12 +211,15 @@ class TestStageRegistry:
             ConfirmStage,
             RowEstimationStage,
             SQLAuditStage,
+            TransactionAuditStage,
         )
 
         assert STAGE_REGISTRY["sql_audit"].phase is StagePhase.PRE_CONFIRM
+        assert STAGE_REGISTRY["transaction_sql_audit"].phase is StagePhase.PRE_CONFIRM
         assert STAGE_REGISTRY["row_estimation"].phase is StagePhase.PRE_EXECUTE
         assert STAGE_REGISTRY["confirm"].phase is StagePhase.CONFIRM
         # 实例化后的相位与类声明一致
         assert SQLAuditStage().phase is StagePhase.PRE_CONFIRM
+        assert TransactionAuditStage().phase is StagePhase.PRE_CONFIRM
         assert RowEstimationStage().phase is StagePhase.PRE_EXECUTE
         assert ConfirmStage().phase is StagePhase.CONFIRM

@@ -31,6 +31,10 @@ _IS_READONLY_SQL = re.compile(
     re.IGNORECASE,
 )
 
+# 单次事务最大语句条数（事务型写工具 execute_write_transaction）
+# 限制长事务规模，防止累积占用连接池连接与超时窗口被拉长
+MAX_TRANSACTION_STATEMENTS = 50
+
 logger = structlog.get_logger(__name__)
 
 
@@ -489,9 +493,17 @@ async def execute_readonly_sql(
         同 _run_sql（成功时返回 columns/rows/total_rows 等字段）。
     """
     return await _run_sql(
-        sql, connection_id, db_type, host, port, database,
-        user, password, user_role=user_role,
-        ssl_enabled=ssl_enabled, ssl_ca_cert=ssl_ca_cert,
+        sql,
+        connection_id,
+        db_type,
+        host,
+        port,
+        database,
+        user,
+        password,
+        user_role=user_role,
+        ssl_enabled=ssl_enabled,
+        ssl_ca_cert=ssl_ca_cert,
         tool_name="execute_readonly_sql",
     )
 
@@ -527,8 +539,146 @@ async def execute_write_sql(
         同 _run_sql（成功时返回 columns/rows/total_rows 等字段）。
     """
     return await _run_sql(
-        sql, connection_id, db_type, host, port, database,
-        user, password, user_role=user_role,
-        ssl_enabled=ssl_enabled, ssl_ca_cert=ssl_ca_cert,
+        sql,
+        connection_id,
+        db_type,
+        host,
+        port,
+        database,
+        user,
+        password,
+        user_role=user_role,
+        ssl_enabled=ssl_enabled,
+        ssl_ca_cert=ssl_ca_cert,
         tool_name="execute_write_sql",
     )
+
+
+# =============================================================================
+# execute_write_transaction：执行事务型写 SQL（多语句原子回滚，需用户确认）
+# =============================================================================
+
+
+@tool
+async def execute_write_transaction(
+    statements: list[str],
+    connection_id: Annotated[str, InjectedToolArg],
+    db_type: Annotated[str, InjectedToolArg],
+    host: Annotated[str, InjectedToolArg],
+    port: Annotated[int, InjectedToolArg],
+    database: Annotated[str, InjectedToolArg],
+    user: Annotated[str, InjectedToolArg],
+    password: Annotated[str, InjectedToolArg],
+    user_role: Annotated[str, InjectedToolArg] = "readonly",
+    ssl_enabled: Annotated[bool, InjectedToolArg] = False,
+    ssl_ca_cert: Annotated[str | None, InjectedToolArg] = None,
+) -> dict[str, Any]:
+    """在单个数据库事务中执行多条写 SQL（INSERT / UPDATE / DELETE），
+    全部成功自动 COMMIT，任一失败整体 ROLLBACK（原子性）。
+
+    适用于涉及多个表或多行记录、需要整体要么成功要么回滚的业务操作
+    （如"先插入订单主表、再更新库存扣减"）。执行前系统会请求一次用户确认
+    （确认卡片一次性展示全部语句），批准后才实际执行。
+    只读查询（SELECT/SHOW/EXPLAIN）请使用 execute_readonly_sql；
+    单条写 SQL 请使用 execute_write_sql。
+    安全行为见 security/registry.py（transaction_sql_audit 逐条审计 + confirm）。
+
+    Args:
+        statements: 写 SQL 语句列表（按顺序执行，仅在全部成功后统一提交）。
+            每条必须为 INSERT/UPDATE/DELETE；UPDATE/DELETE 必须携带 WHERE 条件
+            （系统会逐条强制拦截无 WHERE 的全表删改）。
+
+    Returns:
+        成功: {
+            "columns": [], "rows": [], "total_rows": 0,
+            "affected_rows": int,           // 全部语句累计影响行数
+            "execution_time_ms": int,
+            "audit_status": "passed",
+            "is_readonly": False,
+            "per_statement": [{"sql": str, "affected_rows": int}, ...],  // 每条明细
+            "summary": str
+        }
+        失败（已整体回滚）: {
+            "error": str, "error_type": str, "detail": str,
+            "suggestion": str | null, "audit_status": "execution_error"
+        }
+    """
+    # ── 入参校验（fail-closed；与 TransactionAuditStage 双层防御）──
+    if not isinstance(statements, list) or not statements:
+        return {
+            "error": "execute_write_transaction 参数错误",
+            "detail": "statements 必须是非空字符串列表，请提供至少一条写 SQL",
+        }
+    cleaned = [str(s).strip() for s in statements if isinstance(s, str) and s.strip()]
+    if not cleaned:
+        return {
+            "error": "execute_write_transaction 参数错误",
+            "detail": "statements 中不包含有效的非空 SQL 语句",
+        }
+    if len(cleaned) > MAX_TRANSACTION_STATEMENTS:
+        return {
+            "error": "execute_write_transaction 参数错误",
+            "detail": (
+                f"单次事务最多执行 {MAX_TRANSACTION_STATEMENTS} 条语句，实际收到 {len(cleaned)} 条"
+            ),
+        }
+
+    try:
+        config = _build_config(
+            connection_id,
+            db_type,
+            host,
+            port,
+            database,
+            user,
+            password,
+            ssl_enabled,
+            ssl_ca_cert,
+        )
+        adapter = AdapterFactory.create(db_type, config)
+        await adapter.connect(config, user_role=user_role)
+        try:
+            result = await adapter.execute_transaction(cleaned)
+        finally:
+            # 无论成功失败都断开连接（kill_transaction 风格，异常也保证释放）
+            await adapter.disconnect()
+
+        logger.info(
+            "事务写操作执行成功",
+            tool="execute_write_transaction",
+            connection_id=connection_id,
+            statements=len(cleaned),
+            affected_rows=result["affected_rows"],
+            execution_time_ms=result["execution_time_ms"],
+        )
+        return {
+            "columns": [],
+            "rows": [],
+            "total_rows": 0,
+            "affected_rows": result["affected_rows"],
+            "execution_time_ms": result["execution_time_ms"],
+            "audit_status": "passed",
+            "is_readonly": False,
+            "per_statement": result["per_statement"],
+            "summary": (
+                f"事务提交成功，{len(cleaned)} 条语句全部执行，共影响 {result['affected_rows']} 行"
+            ),
+        }
+    except Exception as exc:
+        # 解析数据库原生错误返回结构化信息，帮助 LLM 自我纠正（事务已整体回滚）
+        parsed = parse_db_error(exc, db_type, "; ".join(cleaned))
+        logger.warning(
+            "事务写执行失败（已整体回滚）",
+            tool="execute_write_transaction",
+            connection_id=connection_id,
+            database=database,
+            error_type=parsed.error_type,
+            detail=parsed.detail,
+        )
+        return {
+            "error": f"事务执行失败（已整体回滚）：{parsed.detail}",
+            "error_type": parsed.error_type,
+            "detail": parsed.detail,
+            "suggestion": parsed.suggestion,
+            "audit_status": "execution_error",
+        }
