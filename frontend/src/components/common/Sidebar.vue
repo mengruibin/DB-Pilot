@@ -22,7 +22,7 @@ interface NavItem {
 const navItems: NavItem[] = [
   { path: '/', label: '对话', icon: 'chat' },
   { path: '/connections', label: '连接', icon: 'plug' },
-  { path: '/reports', label: '报告', icon: 'chart' },
+  // { path: '/reports', label: '报告', icon: 'chart' }, // 报告功能暂不需要，注释掉
 ]
 
 /** 当前路由是否匹配导航项 */
