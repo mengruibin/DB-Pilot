@@ -15,6 +15,7 @@
 ## 目录
 
 - [项目简介](#项目简介)
+- [界面预览](#界面预览)
 - [核心功能](#核心功能)
 - [系统架构](#系统架构)
 - [技术栈](#技术栈)
@@ -42,6 +43,34 @@ DB-Pilot 是一个基于大语言模型（LLM）与 LangGraph ReAct Agent 的**�
 | **后端** | FastAPI + LangGraph 构建的 ReAct Agent 服务，通过 SSE 流式输出；可插拔适配器层连接目标数据库 |
 | **前端** | Vue 3 + TypeScript 单页应用，流式对话界面 + 连接管理 + 巡检报告 |
 | **评测** | 两套独立的 Agent 评测体系（Text-to-SQL + 运维场景工具调用链验证） |
+
+---
+
+## 界面预览
+
+### 🔍 自然语言数据查询（NL2SQL）
+
+以自然语言提问，AI 自动生成并执行 SQL，全程可视化思考过程与工具调用链（工具参数、执行耗时、结果导出）。
+
+![自然语言查询 → SQL → 结果](./docs/screenshots/chat-nl2sql.png)
+
+### ⚠️ 危险操作确认
+
+写操作在执行前经 sqlglot 安全审计与 EXPLAIN 多维评估，通过后以内联确认卡片等待用户确认——SQL 高亮展示，确认 / 取消一目了然。
+
+![写操作确认卡片](./docs/screenshots/write-confirm.png)
+
+### 🔌 多数据库连接管理
+
+MySQL / PostgreSQL / Oracle 统一适配，连接卡片一键激活目标数据库，连通状态实时可见。
+
+![连接管理](./docs/screenshots/connections.png)
+
+### 📊 数据库健康巡检
+
+一键发起 20 项多维健康检查，结果按类别分组（连接 / 性能 / 慢查询 / 存储 / 安全 / 复制），附优化建议与总结。
+
+![健康巡检结果](./docs/screenshots/health-check.png)
 
 ---
 

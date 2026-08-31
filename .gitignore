@@ -18,3 +18,5 @@ backend.log
 
 logs/
 docs/*
+!docs/screenshots/
+!docs/screenshots/*
