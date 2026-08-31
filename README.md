@@ -124,7 +124,7 @@ MySQL / PostgreSQL / Oracle 统一适配，连接卡片一键激活目标数据�
 
 ### 架构要点
 
-- **LangGraph ReAct Agent** — LLM 通过 `bind_tools()` 自主决定工具调用顺序，条件边自动路由 `agent ↔ tools` 循环；最多 10 轮防无限循环，另有连续拦截保护在第 5 次 RE 拦截时强制终止。
+- **LangGraph ReAct Agent** — LLM 通过 `bind_tools()` 自主决定工具调用顺序，条件边自动路由 `agent ↔ tools` 循环；最多 10 轮防无限循环，另有连续拦截保护在第 4 次 RE 拦截时强制终止。
 - **SSE 双通道流式** — `astream(stream_mode=["updates", "messages"])` 将逐 token 文本流与节点状态增量分离，前端可同时渲染打字机效果与工具调用进度。
 - **推理与回答分离** — 模型原生 `reasoning_content`（DeepSeek / GLM / Claude extended thinking）作为独立 `reasoning` 事件推送；普通内容采用"乐观渲染 + 收编"模式。
 - **并行工具执行** — 同轮多 `tool_calls` 用 `asyncio.gather()` 并发执行，`asyncio.Semaphore` 限制最大并发（默认 5），前端用 `tool_call_id` 精确关联结果。
@@ -313,7 +313,7 @@ DB-Pilot 采用**单一声明式安全流水线**（`backend/app/agent/security/
 - **SQLAuditStage**：sqlglot 解析审计，拦截 DROP / ALTER / TRUNCATE / CREATE / GRANT / REVOKE 等危险 DDL、非 admin 的 DELETE / UPDATE / INSERT / MERGE 与多语句注入。**写操作在确认前先过此关**，审计通过才进确认流。
 - **RowEstimationStage**：EXPLAIN 提取 5 维标准化指标（访问方式 / 扫描行数 / 返回行数 / 查询成本 / 额外操作），7 条 CRITICAL 规则评估，命中则阻断并引导 LLM 改写；EXPLAIN 失败时降级放行。
 - **ConfirmStage**：标记型阶段，驱动批量确认（`sql_write` / `connection_kill` / `generic` 分类）。
-- **连续拦截保护**：防 LLM 反复改写绕过 —— 结构化 `ROW_ESTIMATION_BLOCKED` 识别，第 3 次拦截返回强建议 ToolMessage，第 5 次强制终止。
+- **连续拦截保护**：防 LLM 反复改写绕过 —— 结构化 `ROW_ESTIMATION_BLOCKED` 识别，第 3 次拦截返回强建议 ToolMessage，第 4 次强制终止。
 
 ### 3. 纵深防护
 - **参数化查询**：禁止字符串拼接 SQL，一律使用参数绑定。

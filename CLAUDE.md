@@ -125,7 +125,7 @@ frontend/
 
 ### Architecture Principles
 
-1. **LangGraph ReAct Agent** — LLM 通过 `model.bind_tools()` 决定工具调用顺序，LangGraph 条件边自动路由 `agent ↔ tools` 循环。最多 20 次迭代防无限循环（`_MAX_AGENT_ITERATIONS`），另有连续拦截保护在第 5 次 RE 拦截时强制终止。
+1. **LangGraph ReAct Agent** — LLM 通过 `model.bind_tools()` 决定工具调用顺序，LangGraph 条件边自动路由 `agent ↔ tools` 循环。最多 20 次迭代防无限循环（`_MAX_AGENT_ITERATIONS`），另有连续拦截保护在第 4 次 RE 拦截时强制终止。
 
 2. **SSE 双通道流式** — `astream(stream_mode=["updates", "messages"])` 双通道分离：
    - "messages" 通道：`(AIMessageChunk, metadata)` 逐 token 流，处理 `reasoning_content` / `tool_call_chunks` / `content`
@@ -149,7 +149,7 @@ frontend/
        `confirm_category`（sql_write / connection_kill / generic）渲染确认卡片。
    - **连续拦截保护**（防改写死循环）：`AgentState.consecutive_blocks` 跟踪连续被
      RowEstimationStage 拦截的次数（结构化 `ROW_ESTIMATION_BLOCKED` 识别，非字符串特征）。
-     同一轮无 RE 拦截时自动重置。第 3 次拦截返回强建议 ToolMessage，第 5 次强制终止
+     同一轮无 RE 拦截时自动重置。第 3 次拦截返回强建议 ToolMessage，第 4 次强制终止
      （`is_complete=True` + `CONSECUTIVE_BLOCKS_EXCEEDED` error 事件）。
 
 5. **并行工具执行** — 当 LLM 在同一轮返回多个 `tool_calls` 时，`secure_tools_node`（`security/orchestrator.py`）在 PRE_CONFIRM 与 Phase 3 用 `asyncio.gather(return_exceptions=True)` 并发执行它们。总耗时 ≈ 最慢工具而非耗时之和。通过 `asyncio.Semaphore` 限制最大并发数（默认 5），防止 DB 连接池耗尽。前端的 `onToolResult` 匹配从 `findLastRunningToolCall()` 改为 `tool_call_id` 精确匹配，支持并行安全的结果关联。SSE 事件中的 `tool_call` 和 `tool_result` 均携带 `tool_call_id` 字段用于前后端关联。
@@ -259,7 +259,7 @@ frontend/
 - 连接密码仅存于内存 state，不持久化到数据库
 - SQL 审计默认拦截 DROP/ALTER/TRUNCATE/CREATE/GRANT/REVOKE，多语句直接拦截
 - **EXPLAIN 安全评估**：`execute_readonly_sql` 的 `row_estimation` 阶段（PRE_EXECUTE，确认后只跑一遍）通过 EXPLAIN 提取多维度指标并用规则引擎评估。`execute_write_sql` 走 `sql_audit`(PRE_CONFIRM) 前置审计 + `confirm`(sql_write) 确认，不走 row_estimation。阈值硬编码在 `explain_estimator.py`，不依赖 .env
-- **连续拦截保护**（防改写死循环）：`AgentState.consecutive_blocks` 跟踪连续被 RowEstimationStage 拦截次数。第 1-2 次返回普通拦截消息，第 3 次起返回强建议 ToolMessage（含 SQL + EXPLAIN 建议）+ System Prompt 警告引导 LLM 停止改写并告知用户，第 5 次在 `secure_tools_node` 中强制终止（`is_complete=True`）。同一轮无 RE 拦截时计数器自动重置。RE 拦截识别用结构化 `block_code == "ROW_ESTIMATION_BLOCKED"`（非字符串特征耦合），advisory 序号按"本轮第 k 个"递增（修复并行旧值问题），不影响 SQLAuditStage
+- **连续拦截保护**（防改写死循环）：`AgentState.consecutive_blocks` 跟踪连续被 RowEstimationStage 拦截次数。第 1-2 次返回普通拦截消息，第 3 次起返回强建议 ToolMessage（含 SQL + EXPLAIN 建议）+ System Prompt 警告引导 LLM 停止改写并告知用户，第 4 次在 `secure_tools_node` 中强制终止（`is_complete=True`）。同一轮无 RE 拦截时计数器自动重置。RE 拦截识别用结构化 `block_code == "ROW_ESTIMATION_BLOCKED"`（非字符串特征耦合），advisory 序号按"本轮第 k 个"递增（修复并行旧值问题），不影响 SQLAuditStage
 - **结果截断**：所有工具返回结果在序列化为 ToolMessage 前经 `truncate_result_for_llm()` 处理，最大 100 行 / 40K 字符，防止 LLM 上下文窗口溢出。截断时附带 `_truncated`、`_original_total_rows` 元信息
 - **统一执行超时保护（execution-timeout-plan）**：三个数据库适配器共用 30s 执行超时（`STATEMENT_EXEC_TIMEOUT_SEC/MS`，定义于 `db/base.py`）。服务器端优先让数据库主动终止超时语句——PG `SET statement_timeout` / MySQL≥5.7.8 `SET SESSION MAX_EXECUTION_TIME`（毫秒，仅 SELECT）/ MariaDB `SET SESSION max_statement_time`（秒，全部语句）/ Oracle `AsyncConnection.call_timeout`（毫秒，中断在途语句，连接仍可用）；客户端兜底防服务器端机制缺失时无限等待——asyncpg `command_timeout` / MySQL `asyncio.wait_for`（35s，略高于服务器端让 DB 先终止，触发时关闭脏连接让池重建）。服务器端终止按错误码识别归为 `TimeoutError`（MySQL 3024 / MariaDB 1969），Oracle call_timeout 超时消息含 "call timeout" 归为 `TimeoutError`。超时后由 Agent 提示 LLM 改写查询而非长时间占用 DB 资源
 - **结果集行数上限（read-limit-pushdown）**：`truncate_result_for_llm` 只保护 LLM 上下文窗口，不保护 Python 进程内存——适配器 fetchall 会把 DB 返回的全部行物化进堆。对只读 SELECT 做 DB 端 LIMIT 下推：`apply_read_limit()`（`db/base.py`，sqlglot 重写）自动追加 `LIMIT max+1`（Oracle 12c+ 用 `FETCH FIRST`），阈值 `STATEMENT_MAX_RESULT_ROWS=1000` hardcode（不依赖 .env）。已自带 ≤1000 的数值 LIMIT 原样返回、超大 LIMIT 收敛到 1001、非 SELECT/解析失败/占位符 LIMIT fail-safe 原样放行。返回 max+1 行时结果附 `truncated_by_db_limit`/`db_row_limit` 元数据，工具 summary 提示"已达 DB 行数上限"。审计仍跑在**原 SQL** 上，重写仅发生在适配器执行路径内部且不改变语句类型

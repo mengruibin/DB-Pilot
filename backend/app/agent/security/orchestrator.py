@@ -18,7 +18,7 @@
     前端重复卡片（chat.py emitted_count 两条路径都对 → 零改动）。
   - consecutive_blocks：读入口值，RE 拦截只认结构化 block_code=="ROW_ESTIMATION_BLOCKED"；
     先算 new 后建 advisory（同一轮内第 k 个被拦工具用递增序号，修复并行旧值问题）；
-    >=5 强制终止（is_complete=True + error 事件）。
+    >=4 强制终止（is_complete=True + error 事件）。
 """
 
 from __future__ import annotations
@@ -51,7 +51,7 @@ logger = structlog.get_logger(__name__)
 _MAX_CONCURRENT_TOOLS = max(1, settings.AGENT_MAX_CONCURRENT_TOOLS)
 
 # 连续 RE 拦截强制终止阈值（防改写死循环）
-_MAX_CONSECUTIVE_BLOCKS = 5
+_MAX_CONSECUTIVE_BLOCKS = 4
 
 # 工具连接注入参数集合（执行前合并到 tool_args）
 _INJECTED_KEYS = (
@@ -757,7 +757,7 @@ async def run_security_pipeline(
         "consecutive_blocks": new_consecutive,
     }
 
-    # ── 连续拦截 >= 5 次：强制终止，不再让 LLM 继续改写 ──
+    # ── 连续拦截 >= 4 次：强制终止，不再让 LLM 继续改写 ──
     if new_consecutive >= _MAX_CONSECUTIVE_BLOCKS:
         logger.warning(
             "连续 RowEstimationStage 拦截已达上限，强制终止 Agent",

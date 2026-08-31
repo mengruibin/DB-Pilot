@@ -9,7 +9,7 @@
   5. 拒绝确认 → 取消消息 + 不执行
   6. 混合「写工具 + 只读工具(row_estimation)」→ 写确认、只读 EXPLAIN 恰一次
   7. resume 遍截断 sse_events（不含历史 tool_call 事件）
-  8. consecutive_blocks 递增 / 重置 / >=5 强制终止
+  8. consecutive_blocks 递增 / 重置 / >=4 强制终止
   9. 工具未注册 → "未注册" 消息
   10. interrupt payload 结构逐字段保留
 """
@@ -461,7 +461,7 @@ class TestMixedRoundAndTruncation:
 
 
 # =============================================================================
-# 8. consecutive_blocks 递增 / 重置 / >=5 强制终止
+# 8. consecutive_blocks 递增 / 重置 / >=4 强制终止
 # =============================================================================
 
 
@@ -574,8 +574,8 @@ class TestConsecutiveBlocks:
         assert res["consecutive_blocks"] == 0
 
     @pytest.mark.asyncio
-    async def test_force_terminate_at_5(self):
-        """连续拦截 >=5 → 强制终止（is_complete=True + error 事件）。"""
+    async def test_force_terminate_at_4(self):
+        """连续拦截 >=4 → 强制终止（is_complete=True + error 事件）。"""
         counter = {"readonly": 0}
         registry = {
             "execute_readonly_sql": _MockTool(lambda **kw: _fake_readonly_sql(counter, **kw)),
@@ -602,14 +602,14 @@ class TestConsecutiveBlocks:
                 tcs,
                 _profiles(tcs),
                 _CONN,
-                _ctx(consecutive_blocks=4),
+                _ctx(consecutive_blocks=3),
                 "r",
                 1,
                 "s1",
                 [],
             )
         assert res["is_complete"] is True
-        assert res["consecutive_blocks"] == 5
+        assert res["consecutive_blocks"] == 4
         assert res["sse_events"][-1]["error_code"] == "CONSECUTIVE_BLOCKS_EXCEEDED"
 
 

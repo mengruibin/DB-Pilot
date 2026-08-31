@@ -135,7 +135,7 @@ async def agent_node(state: AgentState) -> dict[str, Any]:
     run_id = state.get("run_id", "")
     iteration = len(state.get("trace_iterations", [])) + 1
 
-    # 安全保护：safe_tools_node 已强制终止（连续拦截 >= 5 次），跳过 LLM 调用
+    # 安全保护：safe_tools_node 已强制终止（连续拦截 >= 4 次），跳过 LLM 调用
     if state.get("is_complete"):
         logger.info(
             "agent_node 检测到 safe_tools_node 已强制终止，跳过 LLM 调用",
