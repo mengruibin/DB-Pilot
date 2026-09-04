@@ -56,7 +56,7 @@ DB-Pilot 是一个基于大语言模型（LLM）与 LangGraph ReAct Agent 的**�
 
 ### ⚠️ 危险操作确认
 
-写操作在执行前经 sqlglot 安全审计与 EXPLAIN 多维评估，通过后以内联确认卡片等待用户确认——SQL 高亮展示，确认 / 取消一目了然。
+写操作在执行前经 sqlglot 安全审计与 `impact_estimate`（EXPLAIN 影响行数预估），通过后以内联确认卡片等待用户确认——SQL 高亮展示，并附「预计影响约 N 行（EXPLAIN 预估，非精确值）」帮助你在确认前判断操作量级，确认 / 取消一目了然。
 
 ![写操作确认卡片](./docs/screenshots/write-confirm.png)
 
@@ -286,7 +286,8 @@ npm run preview      # 本地预览
 | `list_tables` | 列出数据库中所有表 | — |
 | `describe_table` | 获取指定表结构（含软删除标识标注） | — |
 | `execute_readonly_sql` | 执行只读 SQL（SELECT / SHOW / EXPLAIN） | `sql_audit`(PRE_CONFIRM) + `row_estimation`(PRE_EXECUTE) |
-| `execute_write_sql` | 执行写 SQL（INSERT / UPDATE / DELETE，需用户确认） | `sql_audit`(PRE_CONFIRM) + `confirm`(sql_write) |
+| `execute_write_sql` | 执行写 SQL（INSERT / UPDATE / DELETE，需用户确认） | `sql_audit`(PRE_CONFIRM) + `impact_estimate`(PRE_CONFIRM) + `confirm`(sql_write) |
+| `execute_write_transaction` | 事务型写 SQL（多条语句原子回滚，需用户确认一次） | `transaction_sql_audit`(PRE_CONFIRM) + `impact_estimate`(PRE_CONFIRM) + `confirm`(sql_write) |
 | `get_slow_queries` | 获取慢查询日志（日志检测 / performance_schema 降级 / EXPLAIN 联动） | — |
 | `explain_query` | 分析 SQL 执行计划 | `sql_audit`(PRE_CONFIRM) |
 | `check_connections` | 检查连接池状态 | — |
@@ -305,13 +306,14 @@ npm run preview      # 本地预览
 DB-Pilot 采用**单一声明式安全流水线**（`backend/app/agent/security/` 包）——所有工具的安全策略集中在 `SECURITY_REGISTRY` 声明（SecurityProfile = 有序阶段序列），一个 `secure_tools_node` 按三阶段编排，图结构为 `agent → tools → agent`。
 
 ### 1. 三阶段安全流水线（`secure_tools_node`）
-- **Phase 1 PRE_CONFIRM（并行纯审计）**：每个工具 profile 的 PRE_CONFIRM 阶段（如 sqlglot 审计）在确认前并行执行，无 DB 副作用（interrupt 重放会跑两遍）。红线 DDL 与非 admin 写操作在此被拦，**不再弹确认卡片**。
+- **Phase 1 PRE_CONFIRM（并行审计 + 影响预估）**：每个工具 profile 的 PRE_CONFIRM 阶段（sqlglot 审计等纯函数，interrupt 重放会跑两遍）在确认前并行执行；写工具的 `impact_estimate` 在此用只读 EXPLAIN 产出「预估影响行数」注入确认卡（信息增强、非安全闸门，重放会重复一次只读 EXPLAIN）。红线 DDL 与非 admin 写操作在此被拦，**不再弹确认卡片**。
 - **Phase 2 CONFIRM（批量 interrupt 确认）**：含 `confirm` 阶段的工具（写 SQL / 终止连接）批量 `interrupt()` 等待用户确认，任何工具执行之前。前端按 `confirm_category` 渲染内联确认卡片：`sql_write`（SQL 高亮）/ `connection_kill`（线程详情 + "此操作不可逆"）/ `generic`（降级兜底）。
 - **Phase 3 PRE_EXECUTE + 执行（只跑一遍）**：确认后对幸存者执行 PRE_EXECUTE（如 EXPLAIN 评估）+ 工具执行。interrupt 重放语义保证 Phase 3 只跑一遍——**EXPLAIN / 工具恰执行一次**；resume 遍截断 sse_events，历史 tool_call 事件不重发。
 
 ### 2. 安全阶段（`agent/security/stages.py`）
 - **SQLAuditStage**：sqlglot 解析审计，拦截 DROP / ALTER / TRUNCATE / CREATE / GRANT / REVOKE 等危险 DDL、非 admin 的 DELETE / UPDATE / INSERT / MERGE 与多语句注入。**写操作在确认前先过此关**，审计通过才进确认流。
 - **RowEstimationStage**：EXPLAIN 提取 5 维标准化指标（访问方式 / 扫描行数 / 返回行数 / 查询成本 / 额外操作），7 条 CRITICAL 规则评估，命中则阻断并引导 LLM 改写；EXPLAIN 失败时降级放行。
+- **ImpactEstimateStage**：写工具确认前用只读 EXPLAIN 估算 UPDATE / DELETE / INSERT..SELECT 的影响行数（PG `Plan Rows` / MySQL `rows×filtered` / Oracle 语句节点 Rows），写入确认卡供用户判断量级；失败 / 无法预估（字面量 INSERT 等）时静默降级，不阻断审批。
 - **ConfirmStage**：标记型阶段，驱动批量确认（`sql_write` / `connection_kill` / `generic` 分类）。
 - **连续拦截保护**：防 LLM 反复改写绕过 —— 结构化 `ROW_ESTIMATION_BLOCKED` 识别，第 3 次拦截返回强建议 ToolMessage，第 4 次强制终止。
 

@@ -137,7 +137,8 @@ frontend/
    - **安全注册表**：所有工具的安全行为集中在 `security/registry.py` 的 `SECURITY_REGISTRY`
      （SecurityProfile = 有序阶段序列），禁止在工具 extras/图节点散落安全逻辑。
    - **secure_tools_node**（工具执行，`tool_node.py`）：委托 `security/orchestrator.py` 三阶段编排——
-     Phase 1 PRE_CONFIRM（并行纯审计，interrupt 前重跑两遍，禁止 DB 副作用）
+     Phase 1 PRE_CONFIRM（并行，interrupt 前重跑两遍：审计为纯函数无 DB 副作用——
+       唯一例外：写工具 `impact_estimate` 阶段做只读 EXPLAIN 影响预估，非安全闸门）
      → Phase 2 CONFIRM（含确认阶段的工具批量 `interrupt()` 等待用户确认，任何工具执行之前）
      → Phase 3 PRE_EXECUTE + 执行（确认后只跑一遍，允许 EXPLAIN 副作用，并行最多 5 个并发）。
    - **阶段实现**（`security/stages.py`）：
@@ -145,6 +146,8 @@ frontend/
        非 admin 的 DELETE/UPDATE/INSERT/MERGE。写操作在确认前先过此关，红线 DDL 不进确认流。
      - RowEstimationStage（EXPLAIN 多维度评估，PRE_EXECUTE）：规则引擎阻断大查询，
        失败时降级放行。
+     - ImpactEstimateStage（写影响预估，PRE_CONFIRM）：只读 EXPLAIN 估算影响行数写入
+       evidence → 确认卡展示；恒不拦截、fail-open（见 Key Conventions「写确认影响预估」）。
      - ConfirmStage（标记型，CONFIRM）：orchestrator 据此批量 interrupt，前端按
        `confirm_category`（sql_write / connection_kill / generic）渲染确认卡片。
    - **连续拦截保护**（防改写死循环）：`AgentState.consecutive_blocks` 跟踪连续被
@@ -235,8 +238,8 @@ frontend/
 | `list_tables` | 列出数据库中所有表 | — |
 | `describe_table` | 获取指定表结构 | — |
 | `execute_readonly_sql` | 执行只读 SQL 查询（SELECT / SHOW / EXPLAIN） | `sql_audit`(PRE_CONFIRM) + `row_estimation`(PRE_EXECUTE) |
-| `execute_write_sql` | 执行写 SQL（INSERT / UPDATE / DELETE，需用户确认） | `sql_audit`(PRE_CONFIRM) + `confirm`(sql_write) |
-| `execute_write_transaction` | 事务型写 SQL（多条语句原子回滚，需用户确认一次） | `transaction_sql_audit`(PRE_CONFIRM, 逐条审计) + `confirm`(sql_write) |
+| `execute_write_sql` | 执行写 SQL（INSERT / UPDATE / DELETE，需用户确认） | `sql_audit`(PRE_CONFIRM) + `impact_estimate`(PRE_CONFIRM) + `confirm`(sql_write) |
+| `execute_write_transaction` | 事务型写 SQL（多条语句原子回滚，需用户确认一次） | `transaction_sql_audit`(PRE_CONFIRM, 逐条审计) + `impact_estimate`(PRE_CONFIRM) + `confirm`(sql_write) |
 | `get_slow_queries` | 获取慢查询日志（支持日志检测、performance_schema 降级、EXPLAIN 联动） | — |
 | `explain_query` | 分析 SQL 执行计划 | `sql_audit`(PRE_CONFIRM) |
 | `check_connections` | 检查连接池状态 | — |
@@ -271,6 +274,7 @@ frontend/
 - **无 WHERE 全表删改防护（write-where-guard）**：`execute_write_sql` 的 `sql_audit` 阶段声明 `require_where=True`，对 UPDATE/DELETE 强制要求非恒真 WHERE——无 WHERE 或 WHERE 恒真时在 PRE_CONFIRM 硬拦（block_code=`WRITE_NO_WHERE_BLOCKED`），不进确认流。判定：**WHERE 先经布尔化简 + 常量折叠（`sqlglot.optimizer.simplify`，OR 传播恒真/AND 吸收恒真/恒假湮灭/幂等），化简后不含列引用/子查询即拦**（`check_write_scope`，`sql_auditor.py`）——`WHERE 1=1`/`WHERE TRUE` 拦，`WHERE 1=1 OR id=1` 恒真分支污染整式也拦（化简后 WHERE 被整体丢），`WHERE 1=2 OR id=1` 化简为 `id=1` 正确放行。刻意放过 `WHERE deleted_at IS NOT NULL` 等合法范围删除（含列引用）；`WHERE id>0`、`WHERE id=id` 这类"基于列的恒真/近全表"化简与静态判定均无法识别（需列语义/取值域知识），属接受范围。化简失败回退原始表达式（fail-safe，不因化简 bug 放宽安全）。纯静态 AST 检查，零 DB 开销。
 - **事务写工具（transaction-write）**：`execute_write_transaction(statements: list[str])` 在单次工具调用内完成 `BEGIN → 逐条执行 → 全部成功 COMMIT / 任一失败 ROLLBACK`，解决跨表/多步写操作无回滚的脏数据问题——原子性收在一个调用内，不引入跨轮共享连接的复杂度。适配器层新增 `BaseAdapter.execute_transaction`：MySQL 用 `conn.autocommit(False)` + 显式 commit/rollback，**finally 必须还原 autocommit=True 再 release**（池不重置会话状态，残留 manual-commit 污染下一位 acquire 者），超时关连接由 InnoDB 断连自动回滚；PostgreSQL 用 `async with conn.transaction()`（自动 BEGIN/COMMIT/ROLLBACK）；Oracle 单连接默认手动提交、隐式事务，显式 commit/rollback。安全：SECURITY_REGISTRY 登记 `transaction_sql_audit`(PRE_CONFIRM) 阶段，`TransactionAuditStage` 复用 `SQLAuditStage._audit_single_sql` 对 statements **逐条**执行类型白名单（纯写 INSERT/UPDATE/DELETE，事务内禁止 SELECT）+ sqlglot 审计 + require_where（任一条被拦整事务拦截，block_code 保留原值，reason 带语句索引），+ `confirm`(sql_write) 整个事务一次确认（`ConfirmStage.build_action` 对 statements 注入 `details.sql`，前端确认卡片一个代码块展示全部 SQL，**前端零改动**）。空/非列表 statements 双层 fail-closed（审计层 + 工具层）；`MAX_TRANSACTION_STATEMENTS=50` 限制长事务规模。
 - **写操作确认 UI**：采用内联卡片非模态弹窗，`WriteConfirmation.vue` 组件根据 `chatStore.pendingConfirm` 渲染。tool_call 卡片通过 `isWaitingApproval` computed 响应式判断是否等待审批，显示时钟图标 + "等待用户审批"（由 `pendingConfirm.writes` 驱动，无需手动同步 `stepStatus`）。深色主题强调色浅绿 `#4ADE80`，浅色主题浅蓝 `#60A5FA`，变量定义在 `App.vue` 的 `--confirm-*` CSS 变量中
+- **写确认影响预估（write-confirm-impact-estimate）**：`execute_write_sql` / `execute_write_transaction` 的 PRE_CONFIRM 序列在 `sql_audit` 之后、`confirm` 之前声明只读 `impact_estimate` 阶段（`ImpactEstimateStage`，恒 `blocked=False` 信息增强、非安全闸门，单语句 EXPLAIN 包 ~3s 超时 fail-open）——对 UPDATE/DELETE/INSERT..SELECT 执行 EXPLAIN 估算「预估受影响行数」写入 `SecurityContext.evidence[tool_call_id].impact`；`orchestrator.build_confirm_payload` 在 interrupt 前作为 writes 项**顶层字段 impact** 注入（无预估/EXPLAIN 失败/字面量 INSERT 时省略该键，writes 结构与未接入时逐字节一致、前端零破坏）。估算引擎 `engine/write_impact.py`：PG 取 ModifyTable 子树顶层 `Plan Rows`、MySQL 取目标表访问节点 `rows_examined_per_scan×filtered%`（DML 直接 EXPLAIN 需 8.0.19+，实现直接尝试失败降级）、Oracle 取 Id=0 语句节点 Rows；字段名以真实 DB 抓取对拍为准。警示阈值 `WRITE_IMPACT_WARN_ROWS=10000` 硬编码（不依赖 .env）。DDL/INSERT 字面量/多语句/解析失败一律 None（不阻断审批）。前端 `WriteConfirmation.vue` sql_write 卡在 SQL 下方渲染「预计影响约 N 行（EXPLAIN 预估，非精确值）」，事务写逐语句展示、`high_impact` 转警示色。重放语义：PRE_CONFIRM 在 interrupt 重放时本阶段重复一次只读 EXPLAIN（首遍产卡片内容、resume 遍重算仅开销），写审批低频先接受，后续可按 `(run_id, tool_call_id)` 短 TTL memo 跳过。
 - **MySQL 版本检测**：`MySQLAdapter.connect()` 自动执行 `SELECT VERSION()` 检测 MySQL/MariaDB 版本，存储为 `_db_vendor` 和 `_version_int`，供 `is_mariadb()` / `get_db_version()` 查询
 - **软删除感知**：`describe_table` 输出表级 `soft_delete` 字段（`{column, kind(flag|deleted_at), deleted_value, active_value, note}`），由 `engine/soft_delete.py` 的 `detect_soft_delete_columns()` 以列名关键词 + 列注释关键词启发式识别（零配置）。系统提示词规则 11 强制：表含软删除标识时删除必须用 `UPDATE SET 标识=已删除` 代替 `DELETE` 硬删除。仅感知层引导，不做执行层硬拦截
 - **check_locks 返回结构**：返回 `{held_locks, waiting_locks, total_held, total_waiting, summary}`，每个锁记录含 `table_name`、`lock_mode`、`lock_type`。MySQL 8.0+ 走 `performance_schema.data_locks`，5.7/MariaDB 走 `SHOW ENGINE INNODB STATUS` 回退
@@ -278,7 +282,7 @@ frontend/
 - **run_health_check 关联分析**：检查结果包含 `correlation_notes`（跨项关联分析列表）和 `fix_suggestions`（可执行修复 SQL 命令），从"发现问题"升级到"解决问题"
 - **EXPLAIN 安全拼接**：适配器 `explain()` 方法增加多语句检测和单引号转义，作为 `SQLAuditStage` 之后的第二道防线（EXPLAIN 不支持参数化占位符）
 - **安全流水线统一确认机制**：确认由 `secure_tools_node` 内的三阶段流水线统一编排（不再有独立 confirm_node）。工具含 `confirm` 阶段（CONFIRM 相位）即触发批量 `interrupt()` 等待用户确认，任何工具执行之前。`execute_write_sql` 和 `kill_transaction` 均通过此机制触发确认（分类分别为 `sql_write` / `connection_kill`）。前端按 `confirm_category`（`sql_write` / `connection_kill` / `generic`）分类渲染对应的确认卡片。新增危险操作工具只需在 `security/registry.py` 的 `SECURITY_REGISTRY` 中给工具 profile 加 `confirm` 阶段（含 category 参数）即可接入确认流程
-- **安全行为单一事实源**：安全策略一律经 `app/agent/security/registry.py` 的 `SECURITY_REGISTRY` 声明（SecurityProfile 有序阶段序列），**禁止在工具 extras、图节点里散落安全逻辑**。PRE_CONFIRM 阶段必须纯（无 DB 副作用，interrupt 重放跑两遍）；resume 遍必须截断 sse_events（只返回本遍新事件）。两阶段间的"确认后只跑一遍"由 `interrupt()` 语义天然保证（Phase 3 仅 resume 遍/单遍可达）
+- **安全行为单一事实源**：安全策略一律经 `app/agent/security/registry.py` 的 `SECURITY_REGISTRY` 声明（SecurityProfile 有序阶段序列），**禁止在工具 extras、图节点里散落安全逻辑**。PRE_CONFIRM 审计阶段必须纯（无 DB 副作用，interrupt 重放跑两遍）；**唯一例外是写工具的 `impact_estimate` 阶段（只读 EXPLAIN 信息增强、非安全闸门，重放会重复一次，见「写确认影响预估」）**；resume 遍必须截断 sse_events（只返回本遍新事件）。两阶段间的"确认后只跑一遍"由 `interrupt()` 语义天然保证（Phase 3 仅 resume 遍/单遍可达）
 - **结构化日志字段**：structlog 处理链 `_build_shared_processors()`（`log_setup.py`）自动为每条日志注入 `module/func_name/lineno/layer`。agent 流内日志经 contextvars 自动携带 `session_id/connection_id/user_id/user_role`（`_stream_events` 绑定、`finally` 解绑，保留中间件注入的 `trace_id`）。文件与控制台 JSON 均 `ensure_ascii=False` 输出中文原文
 - **token 消耗统计**：`graph.py._extract_token_usage()` 兼容多 provider（`usage_metadata` → `token_usage` → `usage` 优先级），每轮决策日志与 `trace_iterations` 顶层记录 `input_tokens`/`output_tokens`；`chat.py` Step4 汇总 `total_tokens` 用于 `done.tokens_used` 事件与 `messages.tokens_used` / `sessions.tokens_used_total` 持久化
 - **上下文压缩（context-compression-plan）**：懒触发 + 轮次边界摘要。每次 `agent_node` 决策前用 `_estimate_input_tokens` 估算（**真实锚定 + 增量**：`est = 上次真实 input + 上次 output + 增量×rate`，见 token-estimation-plan），超过 `AGENT_COMPACT_TRIGGER_TOKENS`（默认 0=按模型上下文窗口×0.5 自动推导）才启动压缩；压缩生效后**短路恒压缩**（锚点只在未压缩会话使用，避免锚点语义不一致）。`_partition_turns(messages, k)` 按 HumanMessage 切成（远古历史/近 K 轮窗口/当前轮），历史进摘要、窗口+当前轮逐字保留；`_effective_window_k` 闲置衰减（超 `AGENT_IDLE_DECAY_MINUTES`（默认 60）→ K=0）。摘要缓存键 `digest_upto_msg_id`（历史最后消息 id），同轮迭代复用、新轮重算
