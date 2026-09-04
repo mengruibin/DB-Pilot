@@ -23,6 +23,7 @@ os.environ.setdefault("DATABASE_URL", "sqlite+aiosqlite:///test.db")
 from app.agent.security.models import SecurityContext, StageResult
 from app.agent.security.stages import (
     ConfirmStage,
+    ImpactEstimateStage,
     RowEstimationStage,
     SQLAuditStage,
     TransactionAuditStage,
@@ -464,7 +465,10 @@ class TestRowEstimationStage:
     async def test_blocks_full_scan(self):
         """全表扫描超阈值 → ROW_ESTIMATION_BLOCKED。"""
         stage = RowEstimationStage()
-        with patch.object(stage, "_create_temp_adapter", AsyncMock(return_value=_mock_adapter())):
+        with patch(
+            "app.agent.security.stages._create_temp_adapter",
+            AsyncMock(return_value=_mock_adapter()),
+        ):
             result = await stage.check(
                 _tc("execute_readonly_sql", {"sql": "SELECT * FROM big_table"}, "call_1"),
                 _conn(),
@@ -478,7 +482,10 @@ class TestRowEstimationStage:
     async def test_non_dml_skipped(self):
         """非 DML 语句（SHOW / EXPLAIN）跳过 EXPLAIN。"""
         stage = RowEstimationStage()
-        with patch.object(stage, "_create_temp_adapter", AsyncMock(return_value=_mock_adapter())):
+        with patch(
+            "app.agent.security.stages._create_temp_adapter",
+            AsyncMock(return_value=_mock_adapter()),
+        ):
             result = await stage.check(
                 _tc("execute_readonly_sql", {"sql": "SHOW TABLES"}, "call_1"),
                 _conn(),
@@ -499,7 +506,10 @@ class TestRowEstimationStage:
         """EXPLAIN 执行失败 → fail-open 放行带 warning。"""
         stage = RowEstimationStage()
         adapter = _mock_adapter(explain_error=RuntimeError("db down"))
-        with patch.object(stage, "_create_temp_adapter", AsyncMock(return_value=adapter)):
+        with patch(
+            "app.agent.security.stages._create_temp_adapter",
+            AsyncMock(return_value=adapter),
+        ):
             result = await stage.check(
                 _tc("execute_readonly_sql", {"sql": "SELECT * FROM t"}, "call_1"),
                 _conn(),
@@ -512,8 +522,9 @@ class TestRowEstimationStage:
     async def test_fail_open_on_adapter_create_error(self):
         """临时适配器创建失败 → fail-open 放行带 warning。"""
         stage = RowEstimationStage()
-        with patch.object(
-            stage, "_create_temp_adapter", AsyncMock(side_effect=RuntimeError("no conn"))
+        with patch(
+            "app.agent.security.stages._create_temp_adapter",
+            AsyncMock(side_effect=RuntimeError("no conn")),
         ):
             result = await stage.check(
                 _tc("execute_readonly_sql", {"sql": "SELECT * FROM t"}, "call_1"),
@@ -533,13 +544,144 @@ class TestRowEstimationStage:
             '"rows_produced_per_join": 10}}}'
         )
         adapter = _mock_adapter({"explain_output": low_risk, "format": "json"})
-        with patch.object(stage, "_create_temp_adapter", AsyncMock(return_value=adapter)):
+        with patch(
+            "app.agent.security.stages._create_temp_adapter",
+            AsyncMock(return_value=adapter),
+        ):
             result = await stage.check(
                 _tc("execute_readonly_sql", {"sql": "SELECT * FROM t WHERE id = 1"}, "call_1"),
                 _conn(),
                 _ctx(),
             )
         assert not result.blocked
+
+
+# =============================================================================
+# ImpactEstimateStage（write-impact-estimate-plan Task 3）
+# =============================================================================
+
+# MySQL EXPLAIN JSON：UPDATE 命中 5000 行（< WRITE_IMPACT_WARN_ROWS，high_impact=False）
+_IMPACT_EXPLAIN = (
+    '{"query_block": {"select_id": 1, "table": {"table_name": "t", '
+    '"access_type": "range", "rows_examined_per_scan": 5000, '
+    '"filtered": 100.0}}}'
+)
+
+
+def _impact_adapter(explain_output=None, explain_error=None):
+    """构造 mock 适配器（explain 返回固化样本 / 抛错）。"""
+    adapter = AsyncMock()
+    if explain_error is not None:
+        adapter.explain.side_effect = explain_error
+    else:
+        adapter.explain.return_value = {
+            "explain_output": explain_output or _IMPACT_EXPLAIN,
+            "format": "json",
+        }
+    return adapter
+
+
+class TestImpactEstimateStage:
+    """ImpactEstimateStage：只读 EXPLAIN → ctx.evidence[tool_call_id]["impact"]。
+
+    恒不拦截（信息增强阶段）；EXPLAIN 失败 / 无法预估 → 不写 evidence，不影响审批。
+    """
+
+    @pytest.mark.asyncio
+    async def test_single_update_writes_evidence_and_never_blocks(self):
+        """单语句 UPDATE：EXPLAIN 成功后 evidence 写入预估行数，阶段恒放行。"""
+        stage = ImpactEstimateStage()
+        ctx = _ctx(user_role="admin")
+        adapter = _impact_adapter()
+        with patch(
+            "app.agent.security.stages._create_temp_adapter",
+            AsyncMock(return_value=adapter),
+        ):
+            result = await stage.check(
+                _tc("execute_write_sql", {"sql": "UPDATE t SET a=1 WHERE id>0"}, "call_w"),
+                _conn(user_role="admin"),
+                ctx,
+            )
+        assert not result.blocked  # 信息增强：永不拦截
+        impact = ctx.evidence["call_w"]["impact"]
+        assert impact["available"] is True
+        assert impact["stmt_type"] == "UPDATE"
+        assert impact["target_table"] == "t"
+        assert impact["estimated_rows"] == 5000
+        assert impact["high_impact"] is False
+        assert impact["method"] == "explain"
+
+    @pytest.mark.asyncio
+    async def test_explain_failure_writes_no_evidence(self):
+        """EXPLAIN 失败 → fail-open：不写 evidence、恒放行（不影响审批）。"""
+        stage = ImpactEstimateStage()
+        ctx = _ctx(user_role="admin")
+        adapter = _impact_adapter(explain_error=RuntimeError("db down"))
+        with patch(
+            "app.agent.security.stages._create_temp_adapter",
+            AsyncMock(return_value=adapter),
+        ):
+            result = await stage.check(
+                _tc("execute_write_sql", {"sql": "UPDATE t SET a=1 WHERE id>0"}, "call_w"),
+                _conn(user_role="admin"),
+                ctx,
+            )
+        assert not result.blocked
+        assert "call_w" not in ctx.evidence
+
+    @pytest.mark.asyncio
+    async def test_literal_insert_skipped_no_explain(self):
+        """字面量 INSERT（VALUES）→ 无法预估：跳过且不尝试 EXPLAIN。"""
+        stage = ImpactEstimateStage()
+        ctx = _ctx(user_role="admin")
+        adapter = _impact_adapter()
+        with patch(
+            "app.agent.security.stages._create_temp_adapter",
+            AsyncMock(return_value=adapter),
+        ) as mock_create:
+            result = await stage.check(
+                _tc("execute_write_sql", {"sql": "INSERT INTO t (id) VALUES (1)"}, "call_w"),
+                _conn(user_role="admin"),
+                ctx,
+            )
+        assert not result.blocked
+        assert "call_w" not in ctx.evidence
+        # 静态判定即可跳过，未创建临时适配器
+        mock_create.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_transaction_per_statement_estimate(self):
+        """事务写工具：逐条预估——字面量 INSERT 无预估、UPDATE 有预估。"""
+        stage = ImpactEstimateStage()
+        ctx = _ctx(user_role="admin")
+        statements = [
+            "INSERT INTO orders (id, qty) VALUES (1, 10)",
+            "UPDATE t SET a=1 WHERE id>0",
+        ]
+        adapter = _impact_adapter()
+        with patch(
+            "app.agent.security.stages._create_temp_adapter",
+            AsyncMock(return_value=adapter),
+        ):
+            result = await stage.check(
+                _tc("execute_write_transaction", {"statements": statements}, "call_tx"),
+                _conn(user_role="admin"),
+                ctx,
+            )
+        assert not result.blocked
+        impact = ctx.evidence["call_tx"]["impact"]
+        assert impact["available"] is True
+        assert impact["stmt_count"] == 2
+        per = impact["per_statement"]
+        assert len(per) == 2
+        # 第 1 条：字面量 INSERT 无法预估
+        assert per[0]["idx"] == 1
+        assert per[0]["estimated_rows"] is None
+        # 第 2 条：UPDATE 命中 5000 行
+        assert per[1]["idx"] == 2
+        assert per[1]["stmt_type"] == "UPDATE"
+        assert per[1]["estimated_rows"] == 5000
+        assert impact["high_impact"] is False
 
 
 # =============================================================================

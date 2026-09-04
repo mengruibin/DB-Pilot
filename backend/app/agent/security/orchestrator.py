@@ -249,11 +249,21 @@ def build_confirm_payload(
     pending_ids: set[str],
     profiles: dict[str, SecurityProfile],
     session_id: str | None,
+    ctx: SecurityContext | None = None,
 ) -> dict:
     """构建 interrupt payload（与 confirm_node 现有结构逐字段一致）。
 
     writes 只含通过 PRE_CONFIRM 的 CONFIRM 阶段工具（DDL 被 SQL_AUDIT_BLOCKED
     拦下后不在 pending_ids → 不再弹确认卡片）。
+
+    ImpactEstimateStage（PRE_CONFIRM）把写影响预估写入 ctx.evidence[tool_call_id]
+    ["impact"]；本函数读取并作为 writes 项**顶层字段 impact** 注入（不进 details，
+    不污染 connection_kill/generic 渲染）。无预估（EXPLAIN 失败 / 字面量 INSERT /
+    非预估工具）时不注入该键，writes 结构与未接入预估时逐字节一致（前端零破坏）。
+
+    Args:
+        ctx: 安全上下文（含 impact_estimate 写入的跨阶段 evidence）。缺省为 None
+            时兼容未传 ctx 的调用（不注入 impact）。
 
     Returns:
         {type, writes, safe_tool_count, session_id}。
@@ -269,7 +279,15 @@ def build_confirm_payload(
             if confirm_ref is not None
             else "generic"
         )
-        writes.append(ConfirmStage.build_action(tc, category))
+        action = ConfirmStage.build_action(tc, category)
+        # 写影响预估注入（evidence 由同批 PRE_CONFIRM 的 ImpactEstimateStage 写入）
+        impact = None
+        if ctx is not None:
+            tc_evidence = ctx.evidence.get(tc["id"], {}) or {}
+            impact = tc_evidence.get("impact")
+        if impact is not None:
+            action["impact"] = impact
+        writes.append(action)
     safe_count = len(tool_calls) - len(pending_ids)
     return {
         "type": "confirm_required",
@@ -719,7 +737,7 @@ async def run_security_pipeline(
     resume_pass = False
     denied_calls: list[Mapping[str, Any]] = []
     if pending_ids:
-        payload = build_confirm_payload(tool_calls, pending_ids, profiles, session_id)
+        payload = build_confirm_payload(tool_calls, pending_ids, profiles, session_id, ctx)
         _log_writes_detected(payload, run_id)
         # interrupt() 首遍抛 GraphInterrupt 终止节点；resume 遍返回决策值。
         # 返回 dict 只包含新事件（截断）→ 由调用方据此判断 resume 遍。

@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json as _json
 from collections.abc import Mapping
 from typing import Any
@@ -49,6 +50,44 @@ CONN_INJECTED_PARAMS = frozenset(
         "user_role",
     }
 )
+
+
+# =============================================================================
+# 临时适配器共享 helper（write-impact-estimate-plan Task 2）
+# RowEstimationStage 与 ImpactEstimateStage 共用：从 conn_config 建已连接临时
+# 适配器做 EXPLAIN。模块级单一实现，避免阶段间复制（测试可 patch 本函数注入 mock）。
+# =============================================================================
+
+
+async def _create_temp_adapter(conn_config: dict) -> object:
+    """从连接配置创建临时数据库适配器（已连接）。
+
+    Args:
+        conn_config: 连接配置字典（含 host/port/user/password/db_type 等）。
+
+    Returns:
+        数据库适配器实例（已连接）。
+    """
+    from app.db.factory import AdapterFactory
+    from app.models.schemas import ConnectionCreateRequest
+
+    conn_id = conn_config.get("connection_id", "")
+
+    config = ConnectionCreateRequest(
+        name=f"est_{conn_id}",
+        db_type=conn_config["db_type"],  # type: ignore[arg-type]
+        host=conn_config["host"],
+        port=conn_config["port"],
+        database=conn_config["database"],
+        user=conn_config["user"],
+        password=conn_config.get("password", ""),
+        ssl_enabled=conn_config.get("ssl_enabled", False),
+        ssl_ca_cert=conn_config.get("ssl_ca_cert"),
+    )
+
+    adapter = AdapterFactory.create(conn_config["db_type"], config)
+    await adapter.connect(config, user_role=conn_config.get("user_role", "readonly"))
+    return adapter
 
 
 # =============================================================================
@@ -349,7 +388,7 @@ class RowEstimationStage(SecurityStage):
 
         # ── Step 1: 创建临时适配器并执行 EXPLAIN ──
         try:
-            adapter = await self._create_temp_adapter(conn_config)
+            adapter = await _create_temp_adapter(conn_config)
         except Exception as exc:
             logger.error(
                 "RowEstimationStage 适配器创建失败",
@@ -472,35 +511,198 @@ class RowEstimationStage(SecurityStage):
         )
         return StageResult(blocked=False)
 
-    async def _create_temp_adapter(self, conn_config: dict) -> object:
-        """从连接配置创建临时数据库适配器（已连接）。
 
-        Args:
-            conn_config: 连接配置字典（含 host/port/user/password/db_type 等）。
+# =============================================================================
+# ImpactEstimateStage — 写操作影响范围预估（write-impact-estimate-plan）
+# =============================================================================
 
-        Returns:
-            数据库适配器实例（已连接）。
-        """
-        from app.db.factory import AdapterFactory
-        from app.models.schemas import ConnectionCreateRequest
 
-        conn_id = conn_config.get("connection_id", "")
+class ImpactEstimateStage(SecurityStage):
+    """写操作预估影响范围阶段（PRE_CONFIRM，只读 EXPLAIN，永不拦截）。
 
-        config = ConnectionCreateRequest(
-            name=f"est_{conn_id}",
-            db_type=conn_config["db_type"],  # type: ignore[arg-type]
-            host=conn_config["host"],
-            port=conn_config["port"],
-            database=conn_config["database"],
-            user=conn_config["user"],
-            password=conn_config.get("password", ""),
-            ssl_enabled=conn_config.get("ssl_enabled", False),
-            ssl_ca_cert=conn_config.get("ssl_ca_cert"),
+    对写工具（execute_write_sql / execute_write_transaction）的 UPDATE/DELETE/
+    INSERT..SELECT 执行 EXPLAIN（各引擎只出计划不执行语句），用
+    write_impact.extract_write_impact 换算「预估受影响行数」，写入
+    ctx.evidence[tool_call_id]["impact"]，供 orchestrator 在 interrupt 前组装
+    确认 payload 时读入 writes[].impact → 前端确认卡展示。
+
+    与 RowEstimationStage 的关键差异：
+      - RowEstimationStage 是安全闸门（PRE_EXECUTE，超阈值阻断）；
+        ImpactEstimateStage 是信息增强（PRE_CONFIRM，恒 blocked=False，不拦截）。
+      - 放 PRE_CONFIRM 位置（在 sql_audit 之后、confirm 之前）是为让估算在
+        interrupt 之前产出；红线 DDL / WRITE_NO_WHERE 在 sql_audit 即被拦截，
+        该工具不会进入本阶段（短路，不花 EXPLAIN）。
+
+    重放语义（重要）：PRE_CONFIRM 在 interrupt 重放时跑两遍，本阶段会重复一次
+    只读 EXPLAIN——首遍产出卡片内容，resume 遍重算一次（仅开销、不影响正确性，
+    卡片在首遍已发给用户）。写审批低频，先接受重复；后续可加
+    (run_id, tool_call_id) 短 TTL memo 命中跳过。
+    """
+
+    name = "impact_estimate"
+    phase = StagePhase.PRE_CONFIRM
+
+    # 写估算超时（秒）：EXPLAIN 大表计划可能偏慢，超时即放弃本工具的影响展示
+    # （fail-open，不阻塞确认卡出现与用户确认）。
+    _ESTIMATE_TIMEOUT_SEC = 3.0
+
+    async def check(
+        self,
+        tool_call: Mapping[str, Any],
+        conn_config: dict[str, Any],
+        ctx: SecurityContext,
+    ) -> StageResult:
+        """执行写影响预估（只读 EXPLAIN），写入 ctx.evidence，恒不拦截。"""
+        args = tool_call.get("args") or {}
+        tool_name = tool_call.get("name", "")
+
+        # 事务写工具：statements 逐条预估；单语句写工具：sql 单条预估
+        statements: list[str]
+        if tool_name == "execute_write_transaction":
+            raw_statements = args.get("statements")
+            if isinstance(raw_statements, str):
+                try:
+                    raw_statements = _json.loads(raw_statements)
+                except (_json.JSONDecodeError, TypeError):
+                    raw_statements = None
+            if not isinstance(raw_statements, list) or not raw_statements:
+                return StageResult(blocked=False)
+            statements = [str(s) for s in raw_statements if str(s).strip()]
+        else:
+            sql = args.get("sql", "")
+            if not sql:
+                return StageResult(blocked=False)
+            statements = [str(sql)]
+
+        db_type = conn_config.get("db_type", "mysql")
+
+        impact = await self._estimate_statements(
+            statements, db_type, conn_config, tool_call_id=tool_call.get("id", "")
         )
+        if impact is not None:
+            ctx.evidence[tool_call.get("id", "")] = ctx.evidence.get(tool_call.get("id", ""), {})
+            ctx.evidence[tool_call.get("id", "")]["impact"] = impact
 
-        adapter = AdapterFactory.create(conn_config["db_type"], config)
-        await adapter.connect(config, user_role=conn_config.get("user_role", "readonly"))
-        return adapter
+        # 信息增强阶段：永不拦截
+        return StageResult(blocked=False)
+
+    async def _estimate_statements(
+        self,
+        statements: list[str],
+        db_type: str,
+        conn_config: dict[str, Any],
+        tool_call_id: str,
+    ) -> dict | None:
+        """对一批写语句逐条 EXPLAIN 预估，汇聚成 impact 结构。
+
+        单语句返回：
+            {available, stmt_type, target_table, estimated_rows,
+             method, high_impact, note}
+        多语句（事务）返回：
+            {available, stmt_count, per_statement: [...], high_impact, note}
+        全部无法预估 / 无 DB 依赖可估语句 → 返回 None（卡片不展示 impact）。
+        """
+        single = len(statements) == 1
+
+        if single:
+            sql = statements[0]
+            impact = await self._estimate_one(sql, db_type, conn_config, tool_call_id)
+            if impact is None:
+                return None
+            return {
+                "available": True,
+                "stmt_type": impact["stmt_type"],
+                "target_table": impact["target_table"],
+                "estimated_rows": impact["estimated_rows"],
+                "method": "explain",
+                "high_impact": impact["high_impact"],
+                "note": "EXPLAIN 执行计划预估，非精确值，实际受影响行数可能不同",
+            }
+
+        per_statement: list[dict] = []
+        any_high = False
+        any_estimable = False
+        for idx, sql in enumerate(statements):
+            impact = await self._estimate_one(sql, db_type, conn_config, tool_call_id)
+            if impact is None:
+                per_statement.append({"idx": idx + 1, "stmt_type": None, "estimated_rows": None})
+                continue
+            any_estimable = True
+            any_high = any_high or bool(impact["high_impact"])
+            per_statement.append(
+                {
+                    "idx": idx + 1,
+                    "stmt_type": impact["stmt_type"],
+                    "estimated_rows": impact["estimated_rows"],
+                }
+            )
+        if not any_estimable:
+            return None
+        return {
+            "available": True,
+            "stmt_count": len(statements),
+            "per_statement": per_statement,
+            "high_impact": any_high,
+            "method": "explain",
+            "note": "EXPLAIN 执行计划预估，非精确值，实际受影响行数可能不同",
+        }
+
+    async def _estimate_one(
+        self,
+        sql: str,
+        db_type: str,
+        conn_config: dict[str, Any],
+        tool_call_id: str,
+    ) -> dict | None:
+        """对单条写语句执行只读 EXPLAIN 并预估影响（带超时，失败返回 None）。"""
+        from app.engine.write_impact import extract_write_impact
+
+        adapter: Any = None
+        try:
+            async with asyncio.timeout(self._ESTIMATE_TIMEOUT_SEC):
+                # 先静态判定是否可估（字面量 INSERT / 非写语句 → 无需连库）
+                # 直接交由 extract_write_impact 的 classify_write 兜底：
+                # 但为省一次 EXPLAIN，先试 EXPLAIN 本身不区分——字面量 INSERT 对
+                # MySQL EXPLAIN 可能报错，走 fail-open 即可。为稳妥先 classify。
+                from app.engine.write_impact import classify_write
+
+                info = classify_write(sql, db_type)
+                if info is None:
+                    return None
+                if info["stmt_type"] == "INSERT" and not info["has_select_source"]:
+                    # 字面量 INSERT：可静态数出行数（无需连库），仅当列数有限时展示
+                    return None
+
+                adapter = await _create_temp_adapter(conn_config)
+                explain_result = await adapter.explain(sql)
+                explain_raw = (
+                    explain_result.get("explain_output", "")
+                    if isinstance(explain_result, dict)
+                    else str(explain_result)
+                )
+                return extract_write_impact(sql, db_type, explain_raw)
+        except TimeoutError:
+            logger.debug(
+                "ImpactEstimateStage 估算超时（放弃该语句的影响展示）",
+                tool_call_id=tool_call_id,
+                sql_preview=str(sql)[:120],
+                db_type=db_type,
+            )
+            return None
+        except Exception as exc:
+            logger.debug(
+                "ImpactEstimateStage 估算失败（fail-open，不影响审批）",
+                tool_call_id=tool_call_id,
+                error=str(exc)[:200],
+                db_type=db_type,
+            )
+            return None
+        finally:
+            if adapter is not None:
+                try:  # noqa: SIM105
+                    await adapter.disconnect()
+                except Exception:
+                    pass
 
 
 # =============================================================================

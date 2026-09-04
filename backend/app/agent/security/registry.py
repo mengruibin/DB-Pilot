@@ -20,6 +20,7 @@ from app.agent.security.models import (
 )
 from app.agent.security.stages import (
     ConfirmStage,
+    ImpactEstimateStage,
     RowEstimationStage,
     SQLAuditStage,
     TransactionAuditStage,
@@ -32,6 +33,7 @@ from app.agent.security.stages import (
 STAGE_REGISTRY: dict[str, type[SecurityStage]] = {
     "sql_audit": SQLAuditStage,  # sqlglot 纯审计（PRE_CONFIRM）
     "transaction_sql_audit": TransactionAuditStage,  # 事务写工具逐条审计（PRE_CONFIRM）
+    "impact_estimate": ImpactEstimateStage,  # 写影响预估（PRE_CONFIRM，只读 EXPLAIN→evidence）
     "row_estimation": RowEstimationStage,  # EXPLAIN 多维度评估（PRE_EXECUTE）
     "confirm": ConfirmStage,  # 用户确认标记（CONFIRM）
 }
@@ -62,6 +64,8 @@ SECURITY_REGISTRY: dict[str, SecurityProfile] = {
     # 红线 DDL / 非 admin 写操作在确认流之前即被拦（不再弹确认卡片）
     # + 语句类型白名单（只放行 INSERT/UPDATE/DELETE，同堵 Command 回退绕过）
     # + require_where（无 WHERE 全表删改硬拦，write-where-guard-plan）
+    # + impact_estimate（写影响预估，只读 EXPLAIN→evidence，供确认卡展示预估影响行数）
+    #   ——放在 sql_audit 之后：红线 DDL / WRITE_NO_WHERE 拦截短路，不花 EXPLAIN
     "execute_write_sql": SecurityProfile(
         stages=(
             StageRef(
@@ -72,6 +76,7 @@ SECURITY_REGISTRY: dict[str, SecurityProfile] = {
                     "require_where": True,  # 无 WHERE 全表删改 → WRITE_NO_WHERE_BLOCKED
                 },
             ),
+            StageRef("impact_estimate", StagePhase.PRE_CONFIRM),
             StageRef("confirm", StagePhase.CONFIRM, params={"category": "sql_write"}),
         ),
     ),
@@ -79,6 +84,7 @@ SECURITY_REGISTRY: dict[str, SecurityProfile] = {
     # ★ 逐条审计（transaction_sql_audit）——对 statements 列表逐条复用
     #   execute_write_sql 同一套类型白名单 + require_where（事务审计阶段与
     #   单语句审计共用 _audit_single_sql，单一事实源）
+    # + impact_estimate（事务逐条预估，确认卡展示每语句预估影响行数）
     # + confirm(sql_write)：整个事务一次确认（卡片注入 details.sql 展示全部语句）
     "execute_write_transaction": SecurityProfile(
         stages=(
@@ -90,6 +96,7 @@ SECURITY_REGISTRY: dict[str, SecurityProfile] = {
                     "require_where": True,  # 每条 UPDATE/DELETE 无 WHERE → 拦
                 },
             ),
+            StageRef("impact_estimate", StagePhase.PRE_CONFIRM),
             StageRef("confirm", StagePhase.CONFIRM, params={"category": "sql_write"}),
         ),
     ),

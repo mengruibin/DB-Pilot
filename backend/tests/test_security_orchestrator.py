@@ -17,7 +17,7 @@
 from __future__ import annotations
 
 import os
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -31,6 +31,21 @@ from langgraph.errors import GraphInterrupt
 from app.agent.security.models import SecurityContext
 from app.agent.security.orchestrator import run_security_pipeline
 from app.agent.security.registry import get_security_profile
+
+
+@pytest.fixture(autouse=True)
+def _no_real_db_adapter():
+    """单元测试不连真实 DB：临时适配器创建直接抛错（EXPLAIN 类阶段按 fail-open 降级）。
+
+    写工具 profile 现含 impact_estimate（PRE_CONFIRM 会尝试建临时适配器做 EXPLAIN），
+    统一在此短路，保证断言确定且零网络依赖（只读 RowEstimationStage 同样受益）。
+    """
+    with patch(
+        "app.agent.security.stages._create_temp_adapter",
+        AsyncMock(side_effect=RuntimeError("unit test: no real DB")),
+    ):
+        yield
+
 
 # =============================================================================
 # 辅助函数
@@ -800,3 +815,111 @@ class TestTransactionWriteFlow:
         # 连接注入参数被过滤（details 干净）
         for injected in ("password", "connection_id", "user_role"):
             assert injected not in w["details"]
+
+
+# =============================================================================
+# 确认 payload 写影响预估注入（write-impact-estimate-plan Task 5）
+# =============================================================================
+
+
+# MySQL EXPLAIN FORMAT=JSON 固化样本：UPDATE 命中 5000 行
+_MYSQL_IMPACT_EXPLAIN = (
+    '{"query_block": {"select_id": 1, "table": {"table_name": "t", '
+    '"access_type": "range", "rows_examined_per_scan": 5000, "filtered": 100.0}}}'
+)
+
+
+class TestConfirmPayloadImpact:
+    """ImpactEstimateStage 写入 evidence → build_confirm_payload 注入 writes[].impact。
+
+    本类显式覆盖 _no_real_db_adapter autouse 夹具：为临时适配器注入 mock EXPLAIN
+    （外层夹具先抛错、此处内层 patch 覆盖，模拟预估成功的真实路径）。
+    """
+
+    @pytest.mark.asyncio
+    async def test_payload_includes_impact_when_estimable(self):
+        """UPDATE 可 EXPLAIN 预估 → 确认 payload writes 含 impact（预估行数）。"""
+        counter = {"write": 0}
+        registry = {
+            "execute_write_sql": _MockTool(lambda **kw: _fake_write_sql(counter, **kw)),
+        }
+        tcs = [_tc("execute_write_sql", {"sql": "UPDATE t SET a=1 WHERE id>0"}, "call_w")]
+        adapter = AsyncMock()
+        adapter.explain.return_value = {
+            "explain_output": _MYSQL_IMPACT_EXPLAIN,
+            "format": "json",
+        }
+        captured: dict = {}
+
+        def _capture_interrupt(payload):
+            captured["payload"] = payload
+            raise GraphInterrupt()
+
+        with (
+            _make_tool_registry(registry),
+            patch(
+                "app.agent.security.stages._create_temp_adapter",
+                AsyncMock(return_value=adapter),
+            ),
+            pytest.raises(GraphInterrupt),
+        ):
+            await run_security_pipeline(
+                tcs,
+                _profiles(tcs),
+                _CONN,
+                _ctx(),
+                "r",
+                1,
+                "s1",
+                [],
+                interrupt_fn=_capture_interrupt,
+            )
+
+        writes = captured["payload"]["writes"]
+        assert len(writes) == 1
+        impact = writes[0].get("impact")
+        assert impact is not None
+        assert impact["available"] is True
+        assert impact["estimated_rows"] == 5000
+        assert impact["method"] == "explain"
+        # impact 是顶层字段，不进 details（details 仅 SQL，前端渲染不被污染）
+        assert "impact" not in writes[0]["details"]
+
+    @pytest.mark.asyncio
+    async def test_payload_omits_impact_when_explain_fails(self):
+        """EXPLAIN 失败 → writes 不含 impact（fail-open，确认流程照常）。"""
+        counter = {"write": 0}
+        registry = {
+            "execute_write_sql": _MockTool(lambda **kw: _fake_write_sql(counter, **kw)),
+        }
+        tcs = [_tc("execute_write_sql", {"sql": "UPDATE t SET a=1 WHERE id>0"}, "call_w")]
+        adapter = AsyncMock()
+        adapter.explain.side_effect = RuntimeError("db down")
+        captured: dict = {}
+
+        def _capture_interrupt(payload):
+            captured["payload"] = payload
+            raise GraphInterrupt()
+
+        with (
+            _make_tool_registry(registry),
+            patch(
+                "app.agent.security.stages._create_temp_adapter",
+                AsyncMock(return_value=adapter),
+            ),
+            pytest.raises(GraphInterrupt),
+        ):
+            await run_security_pipeline(
+                tcs,
+                _profiles(tcs),
+                _CONN,
+                _ctx(),
+                "r",
+                1,
+                "s1",
+                [],
+                interrupt_fn=_capture_interrupt,
+            )
+
+        w = captured["payload"]["writes"][0]
+        assert "impact" not in w  # 无预估不注入，writes 结构与未接入预估时一致

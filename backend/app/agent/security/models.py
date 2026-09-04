@@ -23,7 +23,9 @@ class StagePhase(StrEnum):
     """安全阶段相位——决定阶段在 interrupt 前后的执行时序。
 
     - PRE_CONFIRM: 纯审计/无 DB 副作用，位于 interrupt() 之前（重跑两遍）。
-                   sqlglot 语法审计属此类；EXPLAIN 有 DB 副作用，不允许放这里。
+                   sqlglot 语法审计属此类；EXPLAIN 原则上不允许放这里——唯一例外是
+                   写工具的 impact_estimate 影响预估阶段（只读 EXPLAIN、信息增强
+                   非安全闸门，重放会重复一次只读 EXPLAIN，见 Key Conventions）。
     - CONFIRM:     批量 interrupt 确认（orchestrator 特殊编排），标记型阶段。
     - PRE_EXECUTE: 确认之后才执行，允许 DB 副作用（EXPLAIN），只跑一遍。
     """
@@ -75,9 +77,7 @@ class SecurityProfile:
         """加载期校验：确认阶段数与相位顺序。"""
         confirm_count = sum(1 for s in self.stages if s.phase is StagePhase.CONFIRM)
         if confirm_count > 1:
-            raise ValueError(
-                f"SecurityProfile 至多允许一个 CONFIRM 阶段，实际 {confirm_count} 个"
-            )
+            raise ValueError(f"SecurityProfile 至多允许一个 CONFIRM 阶段，实际 {confirm_count} 个")
         prev_order = -1
         for s in self.stages:
             order = _PHASE_ORDER[s.phase]

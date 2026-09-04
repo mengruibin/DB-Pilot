@@ -16,7 +16,7 @@ import { useConnectionStore } from '@/stores/connection'
 import { getSessions, getSessionMessages, renameSession as apiRenameSession, deleteSession as apiDeleteSession } from '@/api/session'
 import type { Session, Message } from '@/types/chat'
 import type { FindingSeverity } from '@/types/report'
-import type { ThinkingEvent, ReasoningEvent, TokenEvent, ToolCallEvent, ToolResultEvent, SqlEvent, ResultEvent, TextEvent, ErrorEvent, DoneEvent, StageChangeEvent, ConfirmRequiredEvent } from '@/types/chat'
+import type { ThinkingEvent, ReasoningEvent, TokenEvent, ToolCallEvent, ToolResultEvent, SqlEvent, ResultEvent, TextEvent, ErrorEvent, DoneEvent, StageChangeEvent, ConfirmRequiredEvent, ConfirmableWrite } from '@/types/chat'
 
 // ─── 内部消息类型（Store 展示用） ───
 
@@ -190,15 +190,7 @@ export const useChatStore = defineStore('chat', () => {
   // 内部：tool_call_id → tool_call message 快速查找表（并行安全匹配用）
   const toolCallMap = new Map<string, StoreMessage>()
   /** 当前待用户确认的危险操作（非空时显示确认对话框） */
-  const pendingConfirm = ref<{
-    writes: Array<{
-      tool_call_id: string
-      tool: string
-      category: import('@/types/chat').ConfirmCategory
-      description: string
-      details: Record<string, unknown>
-    }>
-  } | null>(null)
+  const pendingConfirm = ref<{ writes: ConfirmableWrite[] } | null>(null)
 
   /** SSE 流是否因写操作确认而中断（等待用户决策） */
   const isAwaitingConfirmation = computed(() => pendingConfirm.value !== null)

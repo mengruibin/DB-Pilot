@@ -286,6 +286,30 @@ export type SSEEvent =
 /** 确认操作类别（前端按此分类渲染 UI） */
 export type ConfirmCategory = 'sql_write' | 'connection_kill' | 'generic'
 
+/** 写操作预估影响行数（单语句维度） */
+export interface WriteImpactPerStatement {
+  idx: number
+  stmt_type: string | null
+  estimated_rows: number | null
+}
+
+/** 写操作预估影响范围（后端 ImpactEstimateStage → writes[].impact，可为空表示未能预估） */
+export interface WriteImpact {
+  available: boolean
+  /** 单语句预估：语句类型 / 目标表 / 预估受影响行数 */
+  stmt_type?: string
+  target_table?: string
+  estimated_rows?: number
+  /** 事务写（execute_write_transaction）：逐语句预估 */
+  stmt_count?: number
+  per_statement?: WriteImpactPerStatement[]
+  /** 是否达到后端警示阈值（影响行数较多，建议醒目提示） */
+  high_impact?: boolean
+  method?: string
+  /** 面向用户的估算说明（如 "EXPLAIN 预估，非精确值"） */
+  note?: string
+}
+
 /** 单条需确认操作（与后端 _build_confirmable_action 返回值对应） */
 export interface ConfirmableWrite {
   tool_call_id: string
@@ -295,6 +319,8 @@ export interface ConfirmableWrite {
   description: string
   /** 工具特异性结构化数据（如 {sql: "...", thread_id: "..."}） */
   details: Record<string, unknown>
+  /** 写操作预估影响范围（无预估时省略，纯展示增强，不影响确认逻辑） */
+  impact?: WriteImpact
 }
 
 /** 危险操作确认请求事件（来自 confirm_node interrupt） */

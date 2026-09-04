@@ -71,6 +71,12 @@ function formatDetailValue(key: string, value: unknown): string {
   return s
 }
 
+/** 预估影响行数 → 展示文案（行数缺失时提示无法预估，避免误导） */
+function fmtImpactRows(rows?: number | null): string {
+  if (rows === null || rows === undefined || rows < 0) return '影响行数无法预估'
+  return `预计影响约 ${rows.toLocaleString('zh-CN')} 行`
+}
+
 function startCooldown(): void {
   cooldownRemaining.value = COOLDOWN_MS
   cooldownTimer = setInterval(() => {
@@ -171,15 +177,42 @@ function handleDeny(): void {
 
         <!-- ═══════ 内容区 ═══════ -->
         <div class="confirm-body">
-          <!-- ── sql_write: SQL 代码块 ── -->
+          <!-- ── sql_write: SQL 代码块 + 预估影响范围 ── -->
           <template v-if="category === 'sql_write'">
             <div
               v-for="(w, idx) in writes"
               :key="w.tool_call_id"
-              class="sql-row"
+              class="sql-write-item"
             >
-              <span v-if="pendingCount > 1" class="sql-row-index">#{{ idx + 1 }}</span>
-              <pre class="sql-row-code"><code>{{ w.details?.sql ?? w.description }}</code></pre>
+              <div class="sql-row">
+                <span v-if="pendingCount > 1" class="sql-row-index">#{{ idx + 1 }}</span>
+                <pre class="sql-row-code"><code>{{ w.details?.sql ?? w.description }}</code></pre>
+              </div>
+              <!-- 预估影响范围（后端 ImpactEstimateStage → writes[].impact，纯展示增强） -->
+              <div
+                v-if="w.impact?.available"
+                class="sql-impact"
+                :class="{ 'sql-impact--high': w.impact?.high_impact }"
+              >
+                <template v-if="w.impact?.per_statement?.length">
+                  <!-- 事务写：逐语句预估 -->
+                  <div
+                    v-for="stmt in w.impact!.per_statement!"
+                    :key="stmt.idx"
+                    class="sql-impact-line"
+                  >
+                    <span class="sql-impact-label">#{{ stmt.idx }}</span>
+                    <span class="sql-impact-op">{{ stmt.stmt_type ?? '语句' }}</span>
+                    <span class="sql-impact-rows">{{ fmtImpactRows(stmt.estimated_rows) }}</span>
+                  </div>
+                </template>
+                <template v-else>
+                  <!-- 单语句预估 -->
+                  <span v-if="w.impact?.high_impact" class="sql-impact-warn">⚠</span>
+                  <span class="sql-impact-rows">{{ fmtImpactRows(w.impact?.estimated_rows) }}</span>
+                </template>
+                <span class="sql-impact-note">{{ w.impact?.note ?? 'EXPLAIN 预估，非精确值' }}</span>
+              </div>
             </div>
           </template>
 
@@ -360,6 +393,65 @@ function handleDeny(): void {
 
 .sql-row-code code {
   font-family: inherit;
+}
+
+/* ─── sql_write 影响预估行（ImpactEstimateStage → impact） ─── */
+.sql-write-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.sql-impact {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+  padding: 5px 12px;
+  background: var(--chat-code-bg);
+  border: 1px dashed var(--border-color);
+  border-radius: var(--radius-md);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.sql-impact-line {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.sql-impact-label {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-tertiary);
+}
+
+.sql-impact-op {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.sql-impact-rows {
+  font-family: var(--font-mono);
+  font-weight: 500;
+  color: var(--confirm-accent);
+}
+
+.sql-impact-warn {
+  font-size: 12px;
+}
+
+.sql-impact-note {
+  color: var(--text-tertiary);
+  font-size: 11px;
+}
+
+/* high_impact（预估行数达后端警示阈值）：强调色转警示 */
+.sql-impact--high .sql-impact-rows,
+.sql-impact--high .sql-impact-warn {
+  color: var(--confirm-danger, #e53e3e);
 }
 
 /* ─── 详情表（connection_kill / generic） ─── */

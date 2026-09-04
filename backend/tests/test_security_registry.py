@@ -63,10 +63,11 @@ class TestProfiles:
         )
 
     def test_execute_write_sql_profile_has_pre_confirm_audit(self):
-        """execute_write_sql：★ 审计缺口已补——sql_audit 前置 + confirm。"""
+        """execute_write_sql：sql_audit → impact_estimate → confirm（审计缺口已补 + 影响预估）。"""
         profile = get_security_profile("execute_write_sql")
         assert [(s.name, s.phase) for s in profile.stages] == [
             ("sql_audit", StagePhase.PRE_CONFIRM),
+            ("impact_estimate", StagePhase.PRE_CONFIRM),
             ("confirm", StagePhase.CONFIRM),
         ]
         # sql_audit 声明写语句类型白名单（只放行 DML）
@@ -99,14 +100,15 @@ class TestProfiles:
         assert profile.confirm_ref().params.get("category") == "connection_kill"
 
     def test_execute_write_transaction_profile(self):
-        """execute_write_transaction：transaction_sql_audit 逐条审计 + confirm(sql_write)。
+        """execute_write_transaction：逐条审计 + 影响预估 + confirm(sql_write)。
 
         事务工具复用 execute_write_sql 同一套审计参数（类型白名单 + require_where），
-        阶段名为 transaction_sql_audit（逐条聚合审计）。
+        阶段名为 transaction_sql_audit（逐条聚合审计）；impact_estimate 逐条预估。
         """
         profile = get_security_profile("execute_write_transaction")
         assert [(s.name, s.phase) for s in profile.stages] == [
             ("transaction_sql_audit", StagePhase.PRE_CONFIRM),
+            ("impact_estimate", StagePhase.PRE_CONFIRM),
             ("confirm", StagePhase.CONFIRM),
         ]
         # 逐条审计声明写语句类型白名单（纯写契约，事务内禁止 SELECT）
@@ -197,10 +199,12 @@ class TestProfileInvariants:
 
 class TestStageRegistry:
     def test_stage_registry_keys(self):
-        """STAGE_REGISTRY 注册 sql_audit / transaction_sql_audit / row_estimation / confirm。"""
+        """STAGE_REGISTRY 注册 sql_audit / transaction_sql_audit / impact_estimate /
+        row_estimation / confirm。"""
         assert set(STAGE_REGISTRY) == {
             "sql_audit",
             "transaction_sql_audit",
+            "impact_estimate",
             "row_estimation",
             "confirm",
         }
@@ -209,6 +213,7 @@ class TestStageRegistry:
         """阶段类的相位声明与注册表语义一致。"""
         from app.agent.security.stages import (
             ConfirmStage,
+            ImpactEstimateStage,
             RowEstimationStage,
             SQLAuditStage,
             TransactionAuditStage,
@@ -216,10 +221,12 @@ class TestStageRegistry:
 
         assert STAGE_REGISTRY["sql_audit"].phase is StagePhase.PRE_CONFIRM
         assert STAGE_REGISTRY["transaction_sql_audit"].phase is StagePhase.PRE_CONFIRM
+        assert STAGE_REGISTRY["impact_estimate"].phase is StagePhase.PRE_CONFIRM
         assert STAGE_REGISTRY["row_estimation"].phase is StagePhase.PRE_EXECUTE
         assert STAGE_REGISTRY["confirm"].phase is StagePhase.CONFIRM
         # 实例化后的相位与类声明一致
         assert SQLAuditStage().phase is StagePhase.PRE_CONFIRM
         assert TransactionAuditStage().phase is StagePhase.PRE_CONFIRM
+        assert ImpactEstimateStage().phase is StagePhase.PRE_CONFIRM
         assert RowEstimationStage().phase is StagePhase.PRE_EXECUTE
         assert ConfirmStage().phase is StagePhase.CONFIRM
