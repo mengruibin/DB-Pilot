@@ -186,48 +186,38 @@ frontend/
     └─ 最终回答（绿调，Markdown 渲染 + 打字光标）
 ```
 
-#### 危险操作确认卡片（内联设计，category 分类渲染）
+#### 危险操作确认卡片（操作审批，category 分类渲染 + 二次确认状态机）
 
 确认卡片采用**内联卡片**而非模态弹窗，自然嵌入消息流中，不遮挡界面。  
-按 `confirm_category` 分类渲染三种风格的确认卡片：
+视觉定位「运维确认单」：中性 1px 边框卡片（深色 `#242838` / 浅色白）、8px 圆角、轻微阴影，
+**无彩色左边框、无渐变、无图标堆砌**；语义色克制使用——待确认红点 / 终止连接红 / 高影响行数红 /
+批准青绿 `#34d399` / 取消灰。按 `confirm_category` 分类渲染：
 
 ```
-┌── sql_write ──────────────────────────────┐
-│ ✎ 需要确认执行写操作                       │
-│ ┌─ SQL 代码块（语法高亮）────────────────┐ │
-│ │ INSERT INTO users ...                   │ │
-│ └─────────────────────────────────────────┘ │
-│          [取消]   [确认执行 (1.5s)]         │
-└────────────────────────────────────────────┘
-
-┌── connection_kill ─────────────────────────┐
-│ ⚠ 需要确认终止数据库连接                   │
-│ ┌─ 连接详情 ────────────────────────────┐  │
-│ │ 线程 ID     │ 12345                    │  │
-│ │ 已运行时长  │ 3600s                    │  │
-│ │ 当前 SQL    │ SELECT sleep(...)        │  │
-│ └────────────────────────────────────────┘  │
-│ ⚡ 此操作不可逆，将立即断开该连接            │
-│          [取消]   [确认终止 (1.5s)]          │
-└────────────────────────────────────────────┘
-
-┌── generic（降级兜底）──────────────────────┐
-│ ℹ 需要确认执行操作                          │
-│ 工具: some_new_tool                         │
-│ ┌─ 参数详情 ────────────────────────────┐  │
-│ │ param_a   │ value_a                    │  │
-│ └────────────────────────────────────────┘  │
-│          [取消]   [确认执行 (1.5s)]          │
-└────────────────────────────────────────────┘
+┌─ ● 需要确认执行写操作 ────────────── (已批准) ─┐
+│ ┌─ SQL 代码井（等宽；深色蓝紫底 #1a2040）─────┐ │
+│ │ UPDATE users SET ... WHERE id = 1            │ │
+│ └──────────────────────────────────────────────┘ │
+│ ┌─ 影响预估（中性浅底，与 SQL 区硬区分）────────┐ │
+│ │ 预计影响约 12,430 行   目标表 users            │ │
+│ │ EXPLAIN 估算，非精确值（斜体小字）             │ │
+│ └──────────────────────────────────────────────┘ │
+│ ┌─ 二次确认提示（首次点确认后出现）─────────────┐ │
+│ │ ⚠ 该操作将直接修改数据…不可回滚，请再次确认。  │ │
+│ └──────────────────────────────────────────────┘ │
+│ 57s 后自动取消            [取消]  [再次确认]      │
+└──────────────────────────────────────────────────┘
 ```
 
-- **`sql_write`**：蓝色铅笔图标 + `--confirm-accent` 强调色 + SQL 语法高亮代码块 + "确认执行"
-- **`connection_kill`**：红色三角警告图标 + `--confirm-danger` 强调色 + 线程详情表 + "此操作不可逆"提示 + "确认终止"
-- **`generic`**：灰色信息圆图标 + `--confirm-generic` 强调色 + key-value 参数表 + "确认执行"（未知类别降级兜底）
-- 所有类别共用响应式逻辑：`chatStore.pendingConfirm` 驱动、`isWaitingApproval` computed 自动判断、1.5s 冷却防误触
+- **Header**：左侧语义圆点（6px，待确认红 `#ef4444`；决议后批准转青绿、取消转灰）+ 标题；右侧在决议后出现「已批准 / 已取消」徽章
+- **`sql_write`**：SQL 代码井（深色蓝紫底 `#1a2040`/`#93c5fd`，浅色 `rgba(248,250,252,.55)`/`#334155`）与「影响预估」区做**视觉硬区分**——影响区为中性浅底 + 影响行数红字强调 + 目标表/库 chip + 斜体小字估算说明
+- **`connection_kill`**：键值规格表 + 常驻红色「此操作不可逆，将立即断开该连接」
+- **`generic`**：键值规格表（工具/描述/参数）降级兜底
+- **二次确认状态机**：`pending`（60s 倒计时自动取消）→ 首次点「确认执行」→ `armed`（出现二次确认提示 + 按钮变红，armed 后 ≥350ms 才接受二次点击，防双击绕过）→ 再点一次 → `approved`；点「取消」或倒计时归零 → `cancelled`。倒计时 ≤10s 变红警示。决议后 `chatStore.pendingConfirm` 立即清空（SSE 恢复），组件用**本地快照**短暂展示「已批准/已取消」结果态（≈2.4s）再淡出让位后续消息流
+- 所有类别共用响应式逻辑：`chatStore.pendingConfirm` 驱动、`isWaitingApproval` computed 自动判断消息流 tool_call 卡「等待用户审批」态
 - 后端新增工具只需在 `security/registry.py` 的 `SECURITY_REGISTRY` 中给工具 profile 加 `confirm` 阶段（`params={"category": ...}`）即可自动接入确认流程
 
-设计 token 在 `App.vue` CSS 变量中定义，支持 **深色/浅色** 双主题（通过 `[data-theme="light"]` 切换）。核心变量以 `--chat-*` 和 `--confirm-*` 前缀命名。字体：Satoshi（正文）+ JetBrains Mono（代码）。
+确认卡主题 token 定义在 `WriteConfirmation.vue` scoped CSS（`.write-confirm-card` 根变量 = 深色默认，`[data-theme="light"]` 覆盖），不复用 `--confirm-*`；后者仅保留给 tool_call「等待用户审批」时钟图标（`App.vue`）。字体：Satoshi（正文）+ JetBrains Mono（代码）。
 
 ### Tools Registry
 
@@ -273,8 +263,8 @@ frontend/
 - **语句类型白名单（stmt-type-whitelist）**：两个 SQL 执行工具的 `sql_audit` 阶段声明 `allowed_stmt_types`（只读工具=`SELECT/SHOW/EXPLAIN/UNION/USE/SET`，写工具=`INSERT/UPDATE/DELETE`），按 sqlglot AST 顶层类型强制校验（fail-closed：解析失败 / 多语句 / 未知类型一律拦截，block_code=`SQL_STMT_TYPE_BLOCKED`，在审计之前生效）。堵住 sqlglot 对 GRANT/REVOKE/REPLACE/CREATE USER/RENAME 等的 Command 回退与 MERGE/LOAD DATA 等的解析异常绕过——这些高危语句此前能借解析缺口溜过审计。未声明 `allowed_stmt_types` 的 SQL 工具（如 `explain_query`）保持原审计行为。白名单经 `StageRef.params` 注入（orchestrator 实例化阶段时 `STAGE_REGISTRY[ref.name](**ref.params)`）
 - **无 WHERE 全表删改防护（write-where-guard）**：`execute_write_sql` 的 `sql_audit` 阶段声明 `require_where=True`，对 UPDATE/DELETE 强制要求非恒真 WHERE——无 WHERE 或 WHERE 恒真时在 PRE_CONFIRM 硬拦（block_code=`WRITE_NO_WHERE_BLOCKED`），不进确认流。判定：**WHERE 先经布尔化简 + 常量折叠（`sqlglot.optimizer.simplify`，OR 传播恒真/AND 吸收恒真/恒假湮灭/幂等），化简后不含列引用/子查询即拦**（`check_write_scope`，`sql_auditor.py`）——`WHERE 1=1`/`WHERE TRUE` 拦，`WHERE 1=1 OR id=1` 恒真分支污染整式也拦（化简后 WHERE 被整体丢），`WHERE 1=2 OR id=1` 化简为 `id=1` 正确放行。刻意放过 `WHERE deleted_at IS NOT NULL` 等合法范围删除（含列引用）；`WHERE id>0`、`WHERE id=id` 这类"基于列的恒真/近全表"化简与静态判定均无法识别（需列语义/取值域知识），属接受范围。化简失败回退原始表达式（fail-safe，不因化简 bug 放宽安全）。纯静态 AST 检查，零 DB 开销。
 - **事务写工具（transaction-write）**：`execute_write_transaction(statements: list[str])` 在单次工具调用内完成 `BEGIN → 逐条执行 → 全部成功 COMMIT / 任一失败 ROLLBACK`，解决跨表/多步写操作无回滚的脏数据问题——原子性收在一个调用内，不引入跨轮共享连接的复杂度。适配器层新增 `BaseAdapter.execute_transaction`：MySQL 用 `conn.autocommit(False)` + 显式 commit/rollback，**finally 必须还原 autocommit=True 再 release**（池不重置会话状态，残留 manual-commit 污染下一位 acquire 者），超时关连接由 InnoDB 断连自动回滚；PostgreSQL 用 `async with conn.transaction()`（自动 BEGIN/COMMIT/ROLLBACK）；Oracle 单连接默认手动提交、隐式事务，显式 commit/rollback。安全：SECURITY_REGISTRY 登记 `transaction_sql_audit`(PRE_CONFIRM) 阶段，`TransactionAuditStage` 复用 `SQLAuditStage._audit_single_sql` 对 statements **逐条**执行类型白名单（纯写 INSERT/UPDATE/DELETE，事务内禁止 SELECT）+ sqlglot 审计 + require_where（任一条被拦整事务拦截，block_code 保留原值，reason 带语句索引），+ `confirm`(sql_write) 整个事务一次确认（`ConfirmStage.build_action` 对 statements 注入 `details.sql`，前端确认卡片一个代码块展示全部 SQL，**前端零改动**）。空/非列表 statements 双层 fail-closed（审计层 + 工具层）；`MAX_TRANSACTION_STATEMENTS=50` 限制长事务规模。
-- **写操作确认 UI**：采用内联卡片非模态弹窗，`WriteConfirmation.vue` 组件根据 `chatStore.pendingConfirm` 渲染。tool_call 卡片通过 `isWaitingApproval` computed 响应式判断是否等待审批，显示时钟图标 + "等待用户审批"（由 `pendingConfirm.writes` 驱动，无需手动同步 `stepStatus`）。深色主题强调色浅绿 `#4ADE80`，浅色主题浅蓝 `#60A5FA`，变量定义在 `App.vue` 的 `--confirm-*` CSS 变量中
-- **写确认影响预估（write-confirm-impact-estimate）**：`execute_write_sql` / `execute_write_transaction` 的 PRE_CONFIRM 序列在 `sql_audit` 之后、`confirm` 之前声明只读 `impact_estimate` 阶段（`ImpactEstimateStage`，恒 `blocked=False` 信息增强、非安全闸门，单语句 EXPLAIN 包 ~3s 超时 fail-open）——对 UPDATE/DELETE/INSERT..SELECT 执行 EXPLAIN 估算「预估受影响行数」写入 `SecurityContext.evidence[tool_call_id].impact`；`orchestrator.build_confirm_payload` 在 interrupt 前作为 writes 项**顶层字段 impact** 注入（无预估/EXPLAIN 失败/字面量 INSERT 时省略该键，writes 结构与未接入时逐字节一致、前端零破坏）。估算引擎 `engine/write_impact.py`：PG 取 ModifyTable 子树顶层 `Plan Rows`、MySQL 取目标表访问节点 `rows_examined_per_scan×filtered%`（DML 直接 EXPLAIN 需 8.0.19+，实现直接尝试失败降级）、Oracle 取 Id=0 语句节点 Rows；字段名以真实 DB 抓取对拍为准。警示阈值 `WRITE_IMPACT_WARN_ROWS=10000` 硬编码（不依赖 .env）。DDL/INSERT 字面量/多语句/解析失败一律 None（不阻断审批）。前端 `WriteConfirmation.vue` sql_write 卡在 SQL 下方渲染「预计影响约 N 行（EXPLAIN 预估，非精确值）」，事务写逐语句展示、`high_impact` 转警示色。重放语义：PRE_CONFIRM 在 interrupt 重放时本阶段重复一次只读 EXPLAIN（首遍产卡片内容、resume 遍重算仅开销），写审批低频先接受，后续可按 `(run_id, tool_call_id)` 短 TTL memo 跳过。
+- **写操作确认 UI**：采用内联卡片非模态弹窗，`WriteConfirmation.vue` 根据 `chatStore.pendingConfirm` 渲染（决议后以本地快照短暂展示结果态再淡出，见上方「危险操作确认卡片」）。tool_call 卡片通过 `isWaitingApproval` computed 响应式判断是否等待审批，显示时钟图标 + "等待用户审批"（由 `pendingConfirm.writes` 驱动，无需手动同步 `stepStatus`）。确认卡自身 token 在组件 scoped CSS 定义（深浅主题覆盖）；tool_call 等待图标沿用 `App.vue` 的 `--confirm-accent`
+- **写确认影响预估（write-confirm-impact-estimate）**：`execute_write_sql` / `execute_write_transaction` 的 PRE_CONFIRM 序列在 `sql_audit` 之后、`confirm` 之前声明只读 `impact_estimate` 阶段（`ImpactEstimateStage`，恒 `blocked=False` 信息增强、非安全闸门，单语句 EXPLAIN 包 ~3s 超时 fail-open）——对 UPDATE/DELETE/INSERT..SELECT 执行 EXPLAIN 估算「预估受影响行数」写入 `SecurityContext.evidence[tool_call_id].impact`；`orchestrator.build_confirm_payload` 在 interrupt 前作为 writes 项**顶层字段 impact** 注入（无预估/EXPLAIN 失败/字面量 INSERT 时省略该键，writes 结构与未接入时逐字节一致、前端零破坏）。估算引擎 `engine/write_impact.py`：PG 取 ModifyTable 子树顶层 `Plan Rows`、MySQL 取目标表访问节点 `rows_examined_per_scan×filtered%`（DML 直接 EXPLAIN 需 8.0.19+，实现直接尝试失败降级）、Oracle 取 Id=0 语句节点 Rows；字段名以真实 DB 抓取对拍为准。警示阈值 `WRITE_IMPACT_WARN_ROWS=10000` 硬编码（不依赖 .env）。DDL/INSERT 字面量/多语句/解析失败一律 None（不阻断审批）。前端 `WriteConfirmation.vue` sql_write 卡把「影响预估」渲染为与 SQL 代码井区隔的独立浅底信息区：单语句红字行数 + 目标表/库 chip + 斜体估算说明，事务写逐语句展示；`high_impact` 时行数转警示强调。重放语义：PRE_CONFIRM 在 interrupt 重放时本阶段重复一次只读 EXPLAIN（首遍产卡片内容、resume 遍重算仅开销），写审批低频先接受，后续可按 `(run_id, tool_call_id)` 短 TTL memo 跳过。
 - **MySQL 版本检测**：`MySQLAdapter.connect()` 自动执行 `SELECT VERSION()` 检测 MySQL/MariaDB 版本，存储为 `_db_vendor` 和 `_version_int`，供 `is_mariadb()` / `get_db_version()` 查询
 - **软删除感知**：`describe_table` 输出表级 `soft_delete` 字段（`{column, kind(flag|deleted_at), deleted_value, active_value, note}`），由 `engine/soft_delete.py` 的 `detect_soft_delete_columns()` 以列名关键词 + 列注释关键词启发式识别（零配置）。系统提示词规则 11 强制：表含软删除标识时删除必须用 `UPDATE SET 标识=已删除` 代替 `DELETE` 硬删除。仅感知层引导，不做执行层硬拦截
 - **check_locks 返回结构**：返回 `{held_locks, waiting_locks, total_held, total_waiting, summary}`，每个锁记录含 `table_name`、`lock_mode`、`lock_type`。MySQL 8.0+ 走 `performance_schema.data_locks`，5.7/MariaDB 走 `SHOW ENGINE INNODB STATUS` 回退

@@ -150,7 +150,8 @@ onMounted(() => {
   --conn-card-active-bg: rgba(45, 212, 191, 0.04);
   --conn-card-active-border: rgba(45, 212, 191, 0.3);
 
-  /* 写操作确认卡片 — 绿色强调（深色主题） */
+  /* tool_call「等待用户审批」时钟图标色（深色主题）
+     ⚠ 确认卡片自身视觉已组件内 token 化（WriteConfirmation.vue，不再用此组变量） */
   --confirm-accent: #4ADE80;
   --confirm-accent-hover: #22C55E;
   --confirm-heading: #E2E8F0;
@@ -251,7 +252,7 @@ onMounted(() => {
   --conn-card-active-bg: #f3f4f6;
   --conn-card-active-border: #d1d5db;
 
-  /* 写操作确认卡片 — 浅蓝色强调（浅色主题） */
+  /* tool_call「等待用户审批」时钟图标色（浅色主题） */
   --confirm-accent: #60A5FA;
   --confirm-accent-hover: #3B82F6;
   --confirm-heading: #334155;

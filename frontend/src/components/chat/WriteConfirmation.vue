@@ -1,47 +1,198 @@
 <script setup lang="ts">
 /**
- * WriteConfirmation — 危险操作确认内联卡片（category 分类渲染）
+ * WriteConfirmation — 危险操作确认内联卡片（category 分类渲染 + 二次确认状态机）
  *
- * 按 confirm_category 渲染不同风格的确认卡片：
- *   - sql_write: SQL 代码块 + 蓝色铅笔图标
- *   - connection_kill: 线程详情表 + 红色警告图标 + 不可逆提示
- *   - generic: key-value 参数表 + 灰色信息图标（降级兜底）
+ * 视觉定位：贴近 DB-Pilot 的“运维确认单”，去除旧版 AI 助手的彩色左边框/图标堆砌。
+ *   - 白卡（深色: #242838）中性 1px 边框，8px 圆角，无渐变、无彩色 rail
+ *   - 仅用语义色点缀：等待=红点 / 终止连接=红 / 高影响=警示色 / 批准=绿 / 取消=灰
  *
- * 内联于消息列表中，非模态弹窗，不遮挡界面。
+ * 结构（自上而下）：
+ *   Header（红点 + 标题；决议后右侧出现「已批准 / 已取消」徽章）
+ *   内容区（sql_write：SQL 代码井 + 影响预估行；connection_kill/generic：键值规格表）
+ *   二次确认提示（首次点「确认执行」后出现，条件渲染）
+ *   操作栏（左：60s 自动取消倒计时；右：取消 + 确认按钮）—— 决议后整栏替换为结果行
+ *
+ * 交互状态机：
+ *   pending（待确认，倒计时 60s）
+ *     ├─ 点「确认执行」→ armed（二次确认提示 + 按钮变红）
+ *     │    └─ 再点一次 → approved（通知后端执行）
+ *     ├─ 点「取消」        → cancelled（通知后端拒绝）
+ *     └─ 倒计时归零        → cancelled（自动拒绝，略微早于 store 60s 兜底以抢得渲染时机）
+ *   决议后 store.pendingConfirm 立即清空（SSE 恢复），本卡用本地快照短暂展示结果态再淡出。
  */
 import { ref, computed, watch, nextTick, onUnmounted } from 'vue'
-import { NButton } from 'naive-ui'
 import { useChatStore } from '@/stores/chat'
-import type { ConfirmCategory } from '@/types/chat'
+import type { ConfirmCategory, ConfirmableWrite } from '@/types/chat'
 
 const chatStore = useChatStore()
 
-const COOLDOWN_MS = 1500
-const cooldownRemaining = ref(0)
-let cooldownTimer: ReturnType<typeof setInterval> | null = null
+/** 卡片本地快照：store 清空 pendingConfirm 后仍能渲染结果态 */
+const writes = ref<ConfirmableWrite[]>([])
 
-const isCooldown = computed(() => cooldownRemaining.value > 0)
-const writes = computed(() => chatStore.pendingConfirm?.writes ?? [])
+/** 阶段：pending 待确认 / armed 二次确认已点亮 / resolved 已出结果 */
+type Phase = 'pending' | 'armed' | 'resolved'
+const phase = ref<Phase>('pending')
+/** 决议结果（resolved 时非空） */
+const decision = ref<{ kind: 'approved' | 'cancelled'; reason: 'user' | 'timeout' } | null>(null)
+
+const COOLDOWN_DENY_EPSILON_MS = 1000 // 提前于 store 60s 兜底触发，保证「已取消」结果态可见
+const RESOLVED_HOLD_MS = 2400         // 结果态停留时长，之后淡出让位给后续消息流
+const ARM_APPROVE_GAP_MS = 350        // armed 后最小停留，防止双击瞬间跳过二次确认
+
+// ═══════════ 类别派生（快照首条同批次类别一致） ═══════════
 const pendingCount = computed(() => writes.value.length)
-
-/** 首条操作的 category（同批次所有操作 category 相同） */
 const category = computed<ConfirmCategory>(() => writes.value[0]?.category ?? 'generic')
 
-/** 按钮文案按 category 映射 */
-const buttonLabel = computed(() => {
-  if (isCooldown.value) return `确认 (${(cooldownRemaining.value / 1000).toFixed(1)}s)`
-  if (category.value === 'connection_kill') return '确认终止'
-  return '确认执行'
+const isArmed = computed(() => phase.value === 'armed')
+const isResolved = computed(() => phase.value === 'resolved')
+
+const TITLE_TEXT: Record<ConfirmCategory, string> = {
+  sql_write: '需要确认执行写操作',
+  connection_kill: '需要确认终止数据库连接',
+  generic: '需要确认执行操作',
+}
+const titleText = computed(() => TITLE_TEXT[category.value])
+
+/** 二次确认提示（首次点击确认后出现；语义按类别区分，杜绝错误承诺“可回滚”） */
+const ARMED_HINT_TEXT: Record<ConfirmCategory, string> = {
+  sql_write: '该操作将直接修改数据，确认后立即执行且不可回滚，请再次确认。',
+  connection_kill: '该操作不可逆，将立即断开连接并中断其事务，请再次确认。',
+  generic: '该操作将按下方参数立即执行且不可回滚，请再次确认。',
+}
+const armedHint = computed(() => ARMED_HINT_TEXT[category.value])
+
+/** 确认按钮文案 */
+const baseLabel = computed(() =>
+  pendingCount.value > 1
+    ? `全部确认${category.value === 'connection_kill' ? '终止' : '执行'}`
+    : `确认${category.value === 'connection_kill' ? '终止' : '执行'}`,
+)
+const primaryLabel = computed(() => (isArmed.value ? '再次确认' : baseLabel.value))
+const cancelLabel = computed(() => (pendingCount.value > 1 ? '全部取消' : '取消'))
+
+/** 结果态文字 */
+const resultText = computed(() => {
+  if (!decision.value) return ''
+  const approved = decision.value.kind === 'approved'
+  if (category.value === 'connection_kill') return approved ? '已批准终止该连接' : '已取消终止操作'
+  return approved ? '已批准执行该写操作' : '已取消该操作'
 })
 
-/** 全部确认按钮文案 */
-const confirmAllLabel = computed(() => {
-  if (category.value === 'connection_kill' && pendingCount.value > 1) return '全部确认终止'
-  if (pendingCount.value > 1) return '全部确认执行'
-  return buttonLabel.value
+// ═══════════ 60s 自动取消倒计时 ═══════════
+const COUNTDOWN_TOTAL_MS = 60_000
+const remainingMs = ref(0)
+const countdownSec = computed(() => Math.max(0, Math.ceil(remainingMs.value / 1000)))
+const countdownDanger = computed(() => countdownSec.value <= 10)
+let countdownTimer: ReturnType<typeof setInterval> | null = null
+
+function startCountdown(): void {
+  stopCountdown()
+  remainingMs.value = COUNTDOWN_TOTAL_MS
+  countdownTimer = setInterval(() => {
+    remainingMs.value = Math.max(0, remainingMs.value - 200)
+    // 略微提前于 store 60s 兜底拒绝，保证「已取消」结果态有渲染窗口
+    if (remainingMs.value <= COOLDOWN_DENY_EPSILON_MS) doDeny('timeout')
+  }, 200)
+}
+function stopCountdown(): void {
+  if (countdownTimer) {
+    clearInterval(countdownTimer)
+    countdownTimer = null
+  }
+}
+
+// ═══════════ 决议 + 结果态 ═══════════
+let hideTimer: ReturnType<typeof setTimeout> | null = null
+
+function scheduleHide(): void {
+  hideTimer = setTimeout(clearCard, RESOLVED_HOLD_MS)
+}
+function stopHideTimer(): void {
+  if (hideTimer) {
+    clearTimeout(hideTimer)
+    hideTimer = null
+  }
+}
+
+/** 本地决议：停止倒计时 → 记录结果 → 通知后端恢复 SSE */
+function resolveOutcome(kind: 'approved' | 'cancelled', reason: 'user' | 'timeout'): void {
+  if (decision.value) return
+  stopCountdown()
+  decision.value = { kind, reason }
+  phase.value = 'resolved'
+  remainingMs.value = 0
+  scheduleHide()
+}
+
+function doDeny(reason: 'user' | 'timeout'): void {
+  if (decision.value || !writes.value.length) return
+  const ids = writes.value.map(w => w.tool_call_id)
+  resolveOutcome('cancelled', reason)
+  chatStore.respondToConfirm({ approved_tool_call_ids: [], denied_tool_call_ids: ids })
+}
+
+/** 进入 armed 的时刻（防双击瞬间跳过二次确认） */
+let armedAt = 0
+
+function handleCancel(): void {
+  doDeny('user')
+}
+
+/** 首次点击 → armed（显示二次确认）；二次点击 → 批准 */
+function handleConfirmClick(): void {
+  if (isResolved.value || !writes.value.length) return
+  if (phase.value === 'pending') {
+    armedAt = Date.now()
+    phase.value = 'armed'
+    return
+  }
+  // armed → 批准：需在 armed 态停留 ≥ARM_APPROVE_GAP_MS，双击的第二次点击被忽略
+  if (Date.now() - armedAt < ARM_APPROVE_GAP_MS) return
+  const ids = writes.value.map(w => w.tool_call_id)
+  resolveOutcome('approved', 'user')
+  chatStore.respondToConfirm({ approved_tool_call_ids: ids, denied_tool_call_ids: [] })
+}
+
+/** 完全清空本卡（本地快照 + 定时器） */
+function clearCard(): void {
+  writes.value = []
+  phase.value = 'pending'
+  decision.value = null
+  remainingMs.value = 0
+  stopCountdown()
+  stopHideTimer()
+}
+
+// ═══════════ 监听 store：新确认出现 → 初始化；外部清空 → 未决议则直接收卡 ═══════════
+watch(
+  () => chatStore.pendingConfirm,
+  (val) => {
+    if (val?.writes?.length) {
+      stopHideTimer()
+      writes.value = [...val.writes]
+      phase.value = 'pending'
+      decision.value = null
+      startCountdown()
+      nextTick(() => {
+        document.getElementById('write-confirm-card')?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+      })
+    } else if (!decision.value) {
+      // store 被外部（新发送/取消）清空且非本地决议 → 卡直接消失，不残留结果态
+      clearCard()
+    }
+    // decision 已非空 = 本地决议清空的，保留快照供结果态渲染，由 scheduleHide 收尾
+  },
+  { immediate: true },
+)
+
+onUnmounted(() => {
+  stopCountdown()
+  stopHideTimer()
 })
 
-/** 危险操作详情表的可读字段名映射 */
+// ═══════════ 内容展示辅助 ═══════════
+
+/** 危险操作详情表可读字段名映射 */
 const DETAIL_LABELS: Record<string, string> = {
   sql: 'SQL',
   thread_id: '线程 ID',
@@ -77,215 +228,168 @@ function fmtImpactRows(rows?: number | null): string {
   return `预计影响约 ${rows.toLocaleString('zh-CN')} 行`
 }
 
-function startCooldown(): void {
-  cooldownRemaining.value = COOLDOWN_MS
-  cooldownTimer = setInterval(() => {
-    cooldownRemaining.value = Math.max(0, cooldownRemaining.value - 100)
-  }, 100)
-}
+/** 影响信息兜底说明 */
+const DEFAULT_IMPACT_NOTE = 'EXPLAIN 估算，非精确值'
 
-function stopCooldown(): void {
-  if (cooldownTimer) {
-    clearInterval(cooldownTimer)
-    cooldownTimer = null
-  }
-  cooldownRemaining.value = 0
-}
-
-// 当 pendingConfirm 出现时：启动冷却、滚动到卡片可见
-watch(() => chatStore.pendingConfirm, (val) => {
-  if (val) {
-    startCooldown()
-    nextTick(() => {
-      document.getElementById('write-confirm-card')?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
-    })
-  } else {
-    stopCooldown()
-  }
-}, { immediate: true })
-
-onUnmounted(() => { stopCooldown() })
-
-function handleApprove(): void {
-  if (!writes.value.length || isCooldown.value) return
-  chatStore.respondToConfirm({
-    approved_tool_call_ids: writes.value.map(w => w.tool_call_id),
-    denied_tool_call_ids: [],
-  })
-}
-
-function handleDeny(): void {
-  if (!writes.value.length) return
-  chatStore.respondToConfirm({
-    approved_tool_call_ids: [],
-    denied_tool_call_ids: writes.value.map(w => w.tool_call_id),
-  })
+/** details 中可读出的数据库名（sql_write 通常无该字段，保留兼容） */
+function findDbName(w: ConfirmableWrite): string | undefined {
+  const db = w.details?.database
+  return typeof db === 'string' && db.length ? db : undefined
 }
 </script>
 
 <template>
   <Transition name="confirm-fade">
     <div
-      v-if="chatStore.pendingConfirm"
+      v-if="writes.length > 0"
       id="write-confirm-card"
       class="write-confirm-card"
-      :class="`confirm-category--${category}`"
+      :class="[`wconf-cat-${category}`, { 'is-armed': isArmed, 'is-resolved': isResolved }]"
     >
-      <div class="confirm-card-inner">
-        <!-- ═══════ 头部 ═══════ -->
-        <div class="confirm-header">
-          <!-- sql_write: 蓝色铅笔图标 -->
-          <svg
-            v-if="category === 'sql_write'"
-            class="confirm-header-icon"
-            width="15" height="15" viewBox="0 0 24 24"
-            fill="none" stroke="currentColor" stroke-width="2"
-            stroke-linecap="round" stroke-linejoin="round"
-          >
-            <path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/>
-          </svg>
-          <!-- connection_kill: 红色三角警告图标 -->
-          <svg
-            v-else-if="category === 'connection_kill'"
-            class="confirm-header-icon"
-            width="15" height="15" viewBox="0 0 24 24"
-            fill="none" stroke="currentColor" stroke-width="2"
-            stroke-linecap="round" stroke-linejoin="round"
-          >
-            <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/>
-            <line x1="12" y1="9" x2="12" y2="13"/>
-            <line x1="12" y1="17" x2="12.01" y2="17"/>
-          </svg>
-          <!-- generic: 灰色信息圆图标 -->
-          <svg
-            v-else
-            class="confirm-header-icon"
-            width="15" height="15" viewBox="0 0 24 24"
-            fill="none" stroke="currentColor" stroke-width="2"
-            stroke-linecap="round" stroke-linejoin="round"
-          >
-            <circle cx="12" cy="12" r="10"/>
-            <line x1="12" y1="16" x2="12" y2="12"/>
-            <line x1="12" y1="8" x2="12.01" y2="8"/>
-          </svg>
-
-          <span class="confirm-header-title">
-            {{ category === 'connection_kill' ? '需要确认终止数据库连接' : '需要确认执行写操作' }}
-            <span v-if="pendingCount > 1" class="confirm-header-count">（共 {{ pendingCount }} 条）</span>
+      <!-- ═══════ Header：红点 + 标题；右侧决议徽章/条数 ═══════ -->
+      <div class="wconf-head">
+        <div class="wconf-head-left">
+          <span
+            class="wconf-dot"
+            :class="{ 'is-approved': decision?.kind === 'approved', 'is-cancelled': decision?.kind === 'cancelled' }"
+          ></span>
+          <span class="wconf-title">{{ titleText }}</span>
+        </div>
+        <div class="wconf-head-right">
+          <span v-if="isResolved && decision" class="wconf-badge" :class="`is-${decision.kind}`">
+            {{ decision.kind === 'approved' ? '已批准' : '已取消' }}
           </span>
+          <span v-else-if="pendingCount > 1" class="wconf-count">共 {{ pendingCount }} 条</span>
         </div>
+      </div>
 
-        <!-- ═══════ 内容区 ═══════ -->
-        <div class="confirm-body">
-          <!-- ── sql_write: SQL 代码块 + 预估影响范围 ── -->
-          <template v-if="category === 'sql_write'">
-            <div
-              v-for="(w, idx) in writes"
-              :key="w.tool_call_id"
-              class="sql-write-item"
-            >
-              <div class="sql-row">
-                <span v-if="pendingCount > 1" class="sql-row-index">#{{ idx + 1 }}</span>
-                <pre class="sql-row-code"><code>{{ w.details?.sql ?? w.description }}</code></pre>
-              </div>
-              <!-- 预估影响范围（后端 ImpactEstimateStage → writes[].impact，纯展示增强） -->
-              <div
-                v-if="w.impact?.available"
-                class="sql-impact"
-                :class="{ 'sql-impact--high': w.impact?.high_impact }"
-              >
-                <template v-if="w.impact?.per_statement?.length">
-                  <!-- 事务写：逐语句预估 -->
-                  <div
-                    v-for="stmt in w.impact!.per_statement!"
-                    :key="stmt.idx"
-                    class="sql-impact-line"
-                  >
-                    <span class="sql-impact-label">#{{ stmt.idx }}</span>
-                    <span class="sql-impact-op">{{ stmt.stmt_type ?? '语句' }}</span>
-                    <span class="sql-impact-rows">{{ fmtImpactRows(stmt.estimated_rows) }}</span>
-                  </div>
-                </template>
-                <template v-else>
-                  <!-- 单语句预估 -->
-                  <span v-if="w.impact?.high_impact" class="sql-impact-warn">⚠</span>
-                  <span class="sql-impact-rows">{{ fmtImpactRows(w.impact?.estimated_rows) }}</span>
-                </template>
-                <span class="sql-impact-note">{{ w.impact?.note ?? 'EXPLAIN 预估，非精确值' }}</span>
-              </div>
+      <!-- ═══════ 内容区 ═══════ -->
+      <div class="wconf-body">
+        <!-- ── sql_write：SQL 代码井 + 影响预估行 ── -->
+        <template v-if="category === 'sql_write'">
+          <div v-for="w in writes" :key="w.tool_call_id" class="wconf-item">
+            <!-- SQL 代码区 -->
+            <div class="wconf-sqlblock">
+              <pre class="wconf-sql sql-row-code"><code>{{ w.details?.sql ?? w.description }}</code></pre>
             </div>
-          </template>
 
-          <!-- ── connection_kill: 线程详情表 ── -->
-          <template v-else-if="category === 'connection_kill'">
+            <!-- 影响预估区（ImpactEstimateStage → w.impact，纯展示增强） -->
             <div
-              v-for="w in writes"
-              :key="w.tool_call_id"
-              class="detail-table"
+              v-if="w.impact?.available"
+              class="wconf-impact sql-impact"
+              :class="{ 'sql-impact--high': w.impact?.high_impact }"
             >
+              <template v-if="w.impact?.per_statement?.length">
+                <!-- 事务写：逐语句预估 -->
+                <div
+                  v-for="stmt in w.impact!.per_statement!"
+                  :key="`${w.tool_call_id}-${stmt.idx}`"
+                  class="wconf-improw"
+                >
+                  <span class="wconf-imp-idx">#{{ stmt.idx }}</span>
+                  <span class="wconf-imp-type">{{ stmt.stmt_type ?? '语句' }}</span>
+                  <span class="wconf-imp-rows">{{ fmtImpactRows(stmt.estimated_rows) }}</span>
+                </div>
+              </template>
+              <template v-else>
+                <!-- 单语句预估：影响行数（红字强调）+ 目标表/库 -->
+                <div class="wconf-improw">
+                  <span class="wconf-imp-rows">{{ fmtImpactRows(w.impact?.estimated_rows) }}</span>
+                  <span v-if="w.impact?.target_table" class="wconf-imp-chip">
+                    目标表 <b>{{ w.impact.target_table }}</b>
+                  </span>
+                  <span v-if="findDbName(w)" class="wconf-imp-chip">
+                    库 <b>{{ findDbName(w) }}</b>
+                  </span>
+                </div>
+              </template>
+              <!-- 估算精度说明 -->
+              <p v-if="w.impact?.note || w.impact" class="wconf-impnote">
+                {{ w.impact?.note ?? DEFAULT_IMPACT_NOTE }}
+              </p>
+            </div>
+          </div>
+        </template>
+
+        <!-- ── connection_kill：连接详情规格表 ── -->
+        <template v-else-if="category === 'connection_kill'">
+          <div v-for="w in writes" :key="w.tool_call_id" class="wconf-item">
+            <div class="wconf-spec">
               <template v-for="(label, k) in DETAIL_LABELS" :key="k">
-                <div v-if="k in (w.details ?? {})" class="detail-row">
-                  <span class="detail-label">{{ label }}</span>
-                  <span class="detail-value">{{ formatDetailValue(k, w.details?.[k]) }}</span>
+                <div v-if="k in (w.details ?? {})" class="wconf-spec-row">
+                  <span class="wconf-spec-k">{{ label }}</span>
+                  <span class="wconf-spec-v">{{ formatDetailValue(k, w.details?.[k]) }}</span>
                 </div>
               </template>
-              <!-- 兜底：渲染 details 中已知标签之外的字段 -->
-              <template v-for="(val, k) in w.details" :key="'extra-'+String(k)">
-                <div v-if="!(k in DETAIL_LABELS)" class="detail-row">
-                  <span class="detail-label">{{ k }}</span>
-                  <span class="detail-value">{{ formatDetailValue(k, val) }}</span>
+              <!-- 兜底：渲染已知标签之外的额外字段 -->
+              <template v-for="(val, k) in w.details" :key="'x-' + String(k)">
+                <div v-if="!(k in DETAIL_LABELS)" class="wconf-spec-row">
+                  <span class="wconf-spec-k">{{ k }}</span>
+                  <span class="wconf-spec-v">{{ formatDetailValue(k, val) }}</span>
                 </div>
               </template>
-              <div class="detail-warning">⚡ 此操作不可逆，将立即断开该连接</div>
             </div>
-          </template>
+            <div class="wconf-permaalert">此操作不可逆，将立即断开该连接</div>
+          </div>
+        </template>
 
-          <!-- ── generic: key-value 参数表（降级兜底） ── -->
-          <template v-else>
-            <div
-              v-for="w in writes"
-              :key="w.tool_call_id"
-              class="detail-table"
-            >
-              <div class="detail-row">
-                <span class="detail-label">工具</span>
-                <span class="detail-value">{{ w.tool }}</span>
+        <!-- ── generic：工具 + 参数规格表（降级兜底） ── -->
+        <template v-else>
+          <div v-for="w in writes" :key="w.tool_call_id" class="wconf-item">
+            <div class="wconf-spec">
+              <div class="wconf-spec-row">
+                <span class="wconf-spec-k">工具</span>
+                <span class="wconf-spec-v">{{ w.tool }}</span>
               </div>
-              <div class="detail-row">
-                <span class="detail-label">描述</span>
-                <span class="detail-value">{{ w.description }}</span>
+              <div class="wconf-spec-row">
+                <span class="wconf-spec-k">描述</span>
+                <span class="wconf-spec-v">{{ w.description }}</span>
               </div>
-              <div
-                v-for="(val, k) in w.details"
-                :key="String(k)"
-                class="detail-row"
-              >
-                <span class="detail-label">{{ k }}</span>
-                <span class="detail-value">{{ formatDetailValue(k, val) }}</span>
-              </div>
+              <template v-for="(val, k) in w.details" :key="String(k)">
+                <div class="wconf-spec-row">
+                  <span class="wconf-spec-k">{{ DETAIL_LABELS[k as string] ?? k }}</span>
+                  <span class="wconf-spec-v">{{ formatDetailValue(k as string, val) }}</span>
+                </div>
+              </template>
             </div>
-          </template>
-        </div>
+          </div>
+        </template>
+      </div>
 
-        <!-- ═══════ 操作按钮 ═══════ -->
-        <div class="confirm-footer">
-          <NButton
-            text
-            size="tiny"
-            class="action-btn action-cancel"
-            @click="handleDeny"
+      <!-- ═══════ 二次确认提示（armed 条件显示） ═══════ -->
+      <div v-if="isArmed" class="wconf-armed">
+        <svg
+          class="wconf-armed-icon" width="14" height="14" viewBox="0 0 24 24"
+          fill="none" stroke="currentColor" stroke-width="2"
+          stroke-linecap="round" stroke-linejoin="round"
+        >
+          <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/>
+          <line x1="12" y1="9" x2="12" y2="13"/>
+          <line x1="12" y1="17" x2="12.01" y2="17"/>
+        </svg>
+        <span class="wconf-armed-text">{{ armedHint }}</span>
+      </div>
+
+      <!-- ═══════ 操作栏（决议后替换为结果行） ═══════ -->
+      <div v-if="isResolved" class="wconf-result" :class="`is-${decision?.kind}`">
+        {{ resultText }}
+      </div>
+      <div v-else class="wconf-actions">
+        <span class="wconf-countdown" :class="{ 'is-danger': countdownDanger }">
+          {{ countdownSec }}s 后自动取消
+        </span>
+        <div class="wconf-action-btns">
+          <button class="wconf-btn wconf-btn--ghost" type="button" @click="handleCancel">
+            {{ cancelLabel }}
+          </button>
+          <button
+            class="wconf-btn wconf-btn--primary"
+            :class="{ 'is-danger': isArmed }"
+            type="button"
+            @click="handleConfirmClick"
           >
-            {{ pendingCount > 1 ? '全部取消' : '取消' }}
-          </NButton>
-          <NButton
-            size="tiny"
-            class="action-btn action-confirm"
-            :class="{ 'is-ready': !isCooldown }"
-            :disabled="isCooldown"
-            @click="handleApprove"
-          >
-            {{ pendingCount > 1 ? confirmAllLabel : buttonLabel }}
-          </NButton>
+            {{ primaryLabel }}
+          </button>
         </div>
       </div>
     </div>
@@ -293,305 +397,325 @@ function handleDeny(): void {
 </template>
 
 <style scoped>
-/* ─── 卡片容器 ─── */
+/* ══════════════════════════════════════════════════════════════
+   卡片主题变量 — 深色（DB-Pilot 默认）
+   中性卡 + 克制语义色：不再有蓝/绿彩色左边框与图标堆砌
+   ══════════════════════════════════════════════════════════════ */
 .write-confirm-card {
-  margin: 8px 0 16px;
-  padding: 0;
-}
+  --wconf-bg: #242838;
+  --wconf-border: #2e3347;
+  --wconf-radius: 8px;
+  --wconf-title: #e6ebf5;
+  --wconf-mut: #98a3ba;          /* 次要/说明文字 */
+  --wconf-faint: #6f7a91;        /* 更弱标注（倒计时等） */
+  --wconf-divider: rgba(148, 163, 184, 0.16);
+  --wconf-dot: #ef4444;
+  --wconf-approved: #34d399;     /* 批准：青绿，对齐 ✓ 已完成调用 */
+  --wconf-cancelled: #9aa3b8;
+  --wconf-sql-bg: #1a2040;       /* SQL 代码井：蓝紫底 */
+  --wconf-sql-text: #93c5fd;     /* SQL 代码：与已完成调用代码块同调 */
+  --wconf-impact-bg: #1e2434;    /* 影响预估：中性偏浅，与 SQL 井区隔 */
+  --wconf-improws: #f87171;      /* 影响行数强调 */
+  --wconf-chip: #a7b1c5;
+  --wconf-warn-bg: #2a1f10;      /* 二次确认/危险提示：橙底克制 */
+  --wconf-warn-text: #f6bd6a;
+  --wconf-perma-bg: rgba(239, 68, 68, 0.10);
+  --wconf-perma-text: #f87171;
+  --wconf-btn-bg: #3b82f6;
+  --wconf-btn-text: #ffffff;
+  --wconf-btn-hover: #2563eb;
+  --wconf-btn-danger: #ef4444;
+  --wconf-btn-danger-hover: #dc2626;
+  --wconf-ghost: #aeb8cc;
+  --wconf-ghost-border: rgba(174, 184, 204, 0.4);
+  --wconf-shadow: 0 4px 16px -2px rgba(0, 0, 0, 0.35);
 
-.confirm-card-inner {
-  background: var(--chat-card-bg);
-  border: 1px solid var(--chat-card-border);
-  border-left: 3px solid var(--confirm-accent);
-  border-radius: var(--radius-xl);
-  box-shadow: var(--chat-card-shadow);
+  margin: 4px 0 20px;
+  background: var(--wconf-bg);
+  border: 1px solid var(--wconf-border);
+  border-radius: var(--wconf-radius);
+  box-shadow: var(--wconf-shadow);
   overflow: hidden;
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--wconf-title);
 }
 
-/* category 动态强调色 */
-.confirm-category--sql_write .confirm-card-inner {
-  border-left-color: var(--confirm-accent);
-}
-.confirm-category--connection_kill .confirm-card-inner {
-  border-left-color: var(--confirm-danger, #e53e3e);
-}
-.confirm-category--generic .confirm-card-inner {
-  border-left-color: var(--confirm-generic, #a0aec0);
+/* ═══════ 浅色主题覆盖 ═══════ */
+[data-theme="light"] .write-confirm-card {
+  --wconf-bg: #ffffff;
+  --wconf-border: #e5e7eb;
+  --wconf-title: #111827;
+  --wconf-mut: #6b7280;
+  --wconf-faint: #9ca3af;
+  --wconf-divider: #eceef1;
+  --wconf-dot: #ef4444;
+  --wconf-approved: #16a34a;
+  --wconf-cancelled: #9ca3af;
+  --wconf-sql-bg: rgba(248, 250, 252, 0.55);
+  --wconf-sql-text: #334155;
+  --wconf-impact-bg: #fafafa;
+  --wconf-improws: #ef4444;
+  --wconf-chip: #64748b;
+  --wconf-warn-bg: #fffbeb;
+  --wconf-warn-text: #b45309;
+  --wconf-perma-bg: rgba(239, 68, 68, 0.06);
+  --wconf-perma-text: #dc2626;
+  --wconf-btn-bg: #2563eb;
+  --wconf-btn-text: #ffffff;
+  --wconf-btn-hover: #1d4ed8;
+  --wconf-btn-danger: #ef4444;
+  --wconf-btn-danger-hover: #dc2626;
+  --wconf-ghost: #6b7280;
+  --wconf-ghost-border: transparent;
+  --wconf-shadow: 0 1px 2px rgba(16, 24, 40, 0.05), 0 1px 3px rgba(16, 24, 40, 0.06);
 }
 
-/* ─── 头部 ─── */
-.confirm-header {
+/* ═══════════════ Header ═══════════════ */
+.wconf-head {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 14px 18px 0;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 16px 10px;
+  border-bottom: 1px solid var(--wconf-divider);
 }
-
-.confirm-header-icon {
-  flex-shrink: 0;
+.wconf-head-left {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
 }
-.confirm-category--sql_write .confirm-header-icon {
-  color: var(--confirm-accent);
+.wconf-dot {
+  width: 6px;
+  height: 6px;
+  min-width: 6px;
+  border-radius: 50%;
+  background: var(--wconf-dot);
+  transition: background var(--transition-fast);
 }
-.confirm-category--connection_kill .confirm-header-icon {
-  color: var(--confirm-danger, #e53e3e);
-}
-.confirm-category--generic .confirm-header-icon {
-  color: var(--confirm-generic, #a0aec0);
-}
-
-.confirm-header-title {
+.wconf-dot.is-approved { background: var(--wconf-approved); }
+.wconf-dot.is-cancelled { background: var(--wconf-cancelled); }
+.wconf-title {
   font-size: 13px;
   font-weight: 500;
-  color: var(--confirm-heading);
+  color: var(--wconf-title);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
-
-.confirm-header-count {
-  font-weight: 400;
-  color: var(--text-tertiary);
-}
-
-/* ─── SQL 代码区（sql_write） ─── */
-.confirm-body {
-  padding: 10px 18px 0;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.sql-row {
-  display: flex;
-  gap: 10px;
-  align-items: flex-start;
-}
-
-.sql-row-index {
-  font-family: var(--font-mono);
+.wconf-head-right { flex-shrink: 0; display: flex; }
+.wconf-count {
   font-size: 11px;
-  color: var(--text-tertiary);
-  padding: 9px 0 0;
-  min-width: 22px;
-  text-align: right;
-  flex-shrink: 0;
+  color: var(--wconf-faint);
+  padding: 1px 8px;
+  border: 1px solid var(--wconf-divider);
+  border-radius: 999px;
+  white-space: nowrap;
+}
+.wconf-badge {
+  font-size: 11px;
+  font-weight: 500;
+  padding: 1px 8px;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+.wconf-badge.is-approved { color: var(--wconf-approved); background: color-mix(in srgb, var(--wconf-approved) 14%, transparent); }
+.wconf-badge.is-cancelled { color: var(--wconf-cancelled); background: color-mix(in srgb, var(--wconf-cancelled) 16%, transparent); }
+
+/* ═══════════════ 内容区 ═══════════════ */
+.wconf-body { padding: 12px 16px; display: flex; flex-direction: column; gap: 10px; }
+
+.wconf-item { display: flex; flex-direction: column; gap: 8px; }
+.wconf-item + .wconf-item {
+  padding-top: 10px;
+  border-top: 1px dashed var(--wconf-divider);
 }
 
-.sql-row-code {
-  flex: 1;
+/* ── SQL 代码井：与影响预估区在视觉上做硬区分（等宽 + 蓝紫井） ── */
+.wconf-sqlblock { min-width: 0; }
+.wconf-sql {
   margin: 0;
-  padding: 8px 12px;
-  background: var(--chat-code-bg);
-  border: 1px solid var(--border-color);
-  border-radius: var(--radius-md);
-  font-family: var(--font-mono);
+  padding: 9px 12px;
+  background: var(--wconf-sql-bg);
+  border: 1px solid color-mix(in srgb, var(--wconf-sql-text) 18%, transparent);
+  border-radius: 6px;
+  font-family: var(--font-mono, 'JetBrains Mono', monospace);
   font-size: 12px;
-  line-height: 1.55;
-  color: var(--chat-code-text);
-  overflow-x: auto;
+  line-height: 1.6;
+  color: var(--wconf-sql-text);
   white-space: pre-wrap;
   word-break: break-all;
+  overflow-x: auto;
 }
+.wconf-sql code { font-family: inherit; }
 
-.sql-row-code code {
-  font-family: inherit;
-}
-
-/* ─── sql_write 影响预估行（ImpactEstimateStage → impact） ─── */
-.sql-write-item {
+/* ── 影响预估区：中性浅底 + 红字行数（区别于 SQL 井） ── */
+.wconf-impact {
   display: flex;
   flex-direction: column;
-  gap: 4px;
-}
-
-.sql-impact {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 4px 10px;
-  padding: 5px 12px;
-  background: var(--chat-code-bg);
-  border: 1px dashed var(--border-color);
-  border-radius: var(--radius-md);
-  font-size: 12px;
-  line-height: 1.5;
-}
-
-.sql-impact-line {
-  display: inline-flex;
-  align-items: center;
   gap: 6px;
+  padding: 8px 12px;
+  background: var(--wconf-impact-bg);
+  border-radius: 6px;
 }
-
-.sql-impact-label {
-  font-family: var(--font-mono);
+.wconf-improw {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.wconf-imp-idx {
+  font-family: var(--font-mono, monospace);
   font-size: 11px;
-  color: var(--text-tertiary);
+  color: var(--wconf-faint);
 }
-
-.sql-impact-op {
-  font-family: var(--font-mono);
+.wconf-imp-type {
+  font-family: var(--font-mono, monospace);
   font-size: 11px;
-  color: var(--text-secondary);
+  color: var(--wconf-mut);
+  padding: 0 6px;
+  border: 1px solid var(--wconf-divider);
+  border-radius: 4px;
 }
-
-.sql-impact-rows {
-  font-family: var(--font-mono);
-  font-weight: 500;
-  color: var(--confirm-accent);
+.wconf-imp-rows {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--wconf-improws);
+  font-variant-numeric: tabular-nums;
 }
-
-.sql-impact-warn {
-  font-size: 12px;
+.wconf-imp-chip {
+  font-size: 11.5px;
+  color: var(--wconf-chip);
 }
-
-.sql-impact-note {
-  color: var(--text-tertiary);
+.wconf-imp-chip b { font-weight: 500; color: var(--wconf-title); }
+.wconf-impnote {
+  margin: 0;
   font-size: 11px;
+  font-style: italic;
+  color: var(--wconf-faint);
 }
 
-/* high_impact（预估行数达后端警示阈值）：强调色转警示 */
-.sql-impact--high .sql-impact-rows,
-.sql-impact--high .sql-impact-warn {
-  color: var(--confirm-danger, #e53e3e);
-}
-
-/* ─── 详情表（connection_kill / generic） ─── */
-.detail-table {
-  background: var(--chat-code-bg);
-  border: 1px solid var(--border-color);
-  border-radius: var(--radius-md);
+/* ── 连接/通用参数规格表 ── */
+.wconf-spec {
+  border: 1px solid var(--wconf-divider);
+  border-radius: 6px;
   overflow: hidden;
 }
-
-.detail-row {
+.wconf-spec-row {
   display: flex;
-  border-bottom: 1px solid var(--border-color);
   font-size: 12px;
   line-height: 1.5;
 }
-.detail-row:last-child {
-  border-bottom: none;
-}
-
-.detail-label {
-  flex: 0 0 110px;
+.wconf-spec-row + .wconf-spec-row { border-top: 1px solid var(--wconf-divider); }
+.wconf-spec-k {
+  flex: 0 0 104px;
   padding: 6px 10px;
-  font-weight: 500;
-  color: var(--text-secondary);
-  background: rgba(128, 128, 128, 0.05);
-  border-right: 1px solid var(--border-color);
+  color: var(--wconf-mut);
+  font-size: 11px;
+  border-right: 1px solid var(--wconf-divider);
+  background: color-mix(in srgb, var(--wconf-mut) 6%, transparent);
 }
-
-.detail-value {
+.wconf-spec-v {
   flex: 1;
+  min-width: 0;
   padding: 6px 10px;
-  color: var(--chat-code-text);
-  font-family: var(--font-mono);
+  color: var(--wconf-title);
+  font-family: var(--font-mono, 'JetBrains Mono', monospace);
+  font-size: 12px;
   word-break: break-all;
 }
 
-.detail-warning {
-  padding: 8px 12px;
+/* 终止连接常驻危险提示 */
+.wconf-permaalert {
+  padding: 7px 12px;
   font-size: 12px;
   font-weight: 500;
-  color: var(--confirm-danger, #e53e3e);
-  background: rgba(229, 62, 62, 0.06);
-  text-align: center;
+  color: var(--wconf-perma-text);
+  background: var(--wconf-perma-bg);
+  border-radius: 6px;
 }
 
-/* ─── 操作按钮 ─── */
-.confirm-footer {
+/* ═══════════════ 二次确认提示 ═══════════════ */
+.wconf-armed {
   display: flex;
-  justify-content: flex-end;
-  align-items: center;
-  gap: 10px;
-  padding: 12px 18px 14px;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 0 16px 10px;
+  padding: 8px 12px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--wconf-warn-text);
+  background: var(--wconf-warn-bg);
+  border: 1px solid color-mix(in srgb, var(--wconf-warn-text) 22%, transparent);
+  border-radius: 6px;
 }
+.wconf-armed-icon { flex-shrink: 0; margin-top: 1px; }
+.wconf-armed-text { flex: 1; }
 
-/* 取消按钮 */
-.action-cancel {
-  --n-text-color: var(--text-tertiary) !important;
-  --n-text-color-hover: var(--text-secondary) !important;
-  font-size: 12px !important;
-  padding: 4px 6px !important;
+/* ═══════════════ 操作栏 ═══════════════ */
+.wconf-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 11px 16px 13px;
+  border-top: 1px solid var(--wconf-divider);
+}
+.wconf-countdown {
+  font-size: 11px;
+  color: var(--wconf-faint);
+  font-variant-numeric: tabular-nums;
   transition: color var(--transition-fast);
 }
+.wconf-countdown.is-danger { color: var(--wconf-dot); font-weight: 600; }
+.wconf-action-btns { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
 
-/* 确认按钮 — 冷却中为描边样式，冷却结束为填充样式 */
-.action-confirm {
-  --n-color: transparent !important;
-  --n-color-hover: transparent !important;
-  --n-color-pressed: transparent !important;
-  --n-border: 1px solid var(--confirm-accent) !important;
-  --n-border-hover: 1px solid var(--confirm-accent) !important;
-  --n-text-color: var(--confirm-accent) !important;
-  --n-text-color-hover: var(--confirm-accent) !important;
-  --n-height: 28px !important;
-  font-size: 12px !important;
-  font-weight: 500 !important;
-  padding: 0 12px !important;
-  border-radius: var(--radius-md) !important;
-  transition: all var(--transition-fast);
-  opacity: 0.7;
+.wconf-btn {
+  font-family: var(--font-body, inherit);
+  font-size: 12.5px;
+  font-weight: 500;
+  line-height: 1;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background var(--transition-fast), color var(--transition-fast), border-color var(--transition-fast);
 }
+.wconf-btn:focus-visible { outline: none; box-shadow: 0 0 0 2px var(--wconf-bg), 0 0 0 4px color-mix(in srgb, var(--wconf-btn-bg) 60%, transparent); }
 
-.confirm-category--connection_kill .action-confirm {
-  --n-border: 1px solid var(--confirm-danger, #e53e3e) !important;
-  --n-border-hover: 1px solid var(--confirm-danger, #e53e3e) !important;
-  --n-text-color: var(--confirm-danger, #e53e3e) !important;
-  --n-text-color-hover: var(--confirm-danger, #e53e3e) !important;
+/* 取消：浅色=文字按钮；深色=带描边 */
+.wconf-btn--ghost {
+  padding: 6px 12px;
+  color: var(--wconf-ghost);
+  background: transparent;
+  border: 1px solid var(--wconf-ghost-border);
 }
+.wconf-btn--ghost:hover { color: var(--wconf-title); border-color: var(--wconf-ghost); }
 
-.confirm-category--generic .action-confirm {
-  --n-border: 1px solid var(--confirm-generic, #a0aec0) !important;
-  --n-border-hover: 1px solid var(--confirm-generic, #a0aec0) !important;
-  --n-text-color: var(--confirm-generic, #a0aec0) !important;
-  --n-text-color-hover: var(--confirm-generic, #a0aec0) !important;
+/* 确认：主题蓝 */
+.wconf-btn--primary {
+  padding: 7px 16px;
+  color: var(--wconf-btn-text);
+  background: var(--wconf-btn-bg);
 }
+.wconf-btn--primary:hover { background: var(--wconf-btn-hover); }
+/* armed：二次确认态按钮变红 */
+.wconf-btn--primary.is-danger { background: var(--wconf-btn-danger); }
+.wconf-btn--primary.is-danger:hover { background: var(--wconf-btn-danger-hover); }
 
-.action-confirm.is-ready {
-  --n-color: var(--confirm-accent) !important;
-  --n-color-hover: var(--confirm-accent-hover) !important;
-  --n-color-pressed: var(--confirm-accent) !important;
-  --n-border: 1px solid var(--confirm-accent) !important;
-  --n-border-hover: 1px solid var(--confirm-accent-hover) !important;
-  --n-text-color: #FFFFFF !important;
-  --n-text-color-hover: #FFFFFF !important;
-  opacity: 1;
+/* ═══════════════ 结果行（替换操作栏） ═══════════════ */
+.wconf-result {
+  padding: 11px 16px 13px;
+  border-top: 1px solid var(--wconf-divider);
+  font-size: 12.5px;
+  font-weight: 500;
 }
+.wconf-result.is-approved { color: var(--wconf-approved); }
+.wconf-result.is-cancelled { color: var(--wconf-cancelled); }
 
-.confirm-category--connection_kill .action-confirm.is-ready {
-  --n-color: var(--confirm-danger, #e53e3e) !important;
-  --n-color-hover: #c53030 !important;
-  --n-color-pressed: var(--confirm-danger, #e53e3e) !important;
-  --n-border: 1px solid var(--confirm-danger, #e53e3e) !important;
-  --n-border-hover: 1px solid #c53030 !important;
-  --n-text-color: #FFFFFF !important;
-  --n-text-color-hover: #FFFFFF !important;
-}
-
-.confirm-category--generic .action-confirm.is-ready {
-  --n-color: var(--confirm-generic, #a0aec0) !important;
-  --n-color-hover: #718096 !important;
-  --n-color-pressed: var(--confirm-generic, #a0aec0) !important;
-  --n-border: 1px solid var(--confirm-generic, #a0aec0) !important;
-  --n-border-hover: 1px solid #718096 !important;
-  --n-text-color: #FFFFFF !important;
-  --n-text-color-hover: #FFFFFF !important;
-}
-
-/* ─── 进场过渡 ─── */
-.confirm-fade-enter-active {
-  transition: opacity 0.25s ease, transform 0.25s ease;
-}
-.confirm-fade-leave-active {
-  transition: opacity 0.15s ease, transform 0.15s ease;
-}
-.confirm-fade-enter-from {
-  opacity: 0;
-  transform: translateY(-8px);
-}
-.confirm-fade-leave-to {
-  opacity: 0;
-  transform: translateY(-4px);
-}
+/* ═══════════════ 进场过渡 ═══════════════ */
+.confirm-fade-enter-active { transition: opacity 0.2s ease, transform 0.2s ease; }
+.confirm-fade-leave-active { transition: opacity 0.16s ease, transform 0.16s ease; }
+.confirm-fade-enter-from { opacity: 0; transform: translateY(-6px); }
+.confirm-fade-leave-to { opacity: 0; transform: translateY(-4px); }
 </style>
