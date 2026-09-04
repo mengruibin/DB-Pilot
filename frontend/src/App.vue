@@ -54,7 +54,6 @@ onMounted(() => {
   --font-display: 'Outfit', sans-serif;
   --font-body: 'Satoshi', 'DM Sans', sans-serif;
   --font-mono: 'JetBrains Mono', monospace;
-  --topbar-height: 40px;
   --sidebar-width: 250px;
   --radius-sm: 4px;
   --radius-md: 8px;

@@ -2,12 +2,11 @@
 /**
  * AppLayout — 应用主布局
  *
- * 顶栏 + Sidebar + 内容区 + 空闲超时管理。
+ * Sidebar + 内容区 + 空闲超时管理（无顶栏：品牌/连接状态均收进侧栏底部坞）。
  */
 import { watch, onMounted, onUnmounted } from 'vue'
 import { useNotification } from 'naive-ui'
 import Sidebar from './Sidebar.vue'
-import ConnectionIndicator from './ConnectionIndicator.vue'
 import { useConnectionStore } from '@/stores/connection'
 import { useChatStore } from '@/stores/chat'
 import { useIdleTimeout } from '@/composables/useIdleTimeout'
@@ -95,16 +94,6 @@ function handleDocClick(): void {
 
 <template>
   <div class="layout">
-    <!-- 顶栏 -->
-    <header class="topbar">
-      <div class="topbar-left">
-        <span class="brand-label">DB-Pilot</span>
-      </div>
-      <div class="topbar-right">
-        <ConnectionIndicator />
-      </div>
-    </header>
-
     <!-- 主体 -->
     <div class="layout-body">
       <Sidebar />
@@ -127,41 +116,6 @@ function handleDocClick(): void {
   display: flex;
   flex-direction: column;
   background: var(--bg-primary);
-}
-
-/* ─── 顶栏 ─── */
-.topbar {
-  height: var(--topbar-height);
-  min-height: var(--topbar-height);
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 0 16px;
-  background: var(--bg-surface);
-  border-bottom: 1px solid var(--border-color);
-  z-index: 100;
-}
-
-.topbar-left {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-}
-
-.brand-label {
-  font-family: var(--font-display);
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--text-tertiary);
-  letter-spacing: 0.8px;
-  text-transform: uppercase;
-}
-
-.topbar-right {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  height: 100%;
 }
 
 /* ─── 主体 ─── */
