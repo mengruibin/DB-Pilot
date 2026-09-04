@@ -2,7 +2,7 @@
 
 > AI 驱动的数据库运维智能助手 · AI-Powered Database Operations Assistant
 >
-> 用自然语言对话的方式，完成数据查询、SQL 诊断、故障排查与健康巡检 —— 让每个开发者都拥有一个 7×24 小时在线的 DBA 助手。
+> 用自然语言对话的方式，完成数据查询、SQL 诊断与故障排查 —— 让每个开发者都拥有一个 7×24 小时在线的 DBA 助手。
 
 [![Python](https://img.shields.io/badge/Python-3.12+-blue)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115%2B-009688)](https://fastapi.tiangolo.com/)
@@ -34,14 +34,14 @@
 
 ## 项目简介
 
-DB-Pilot 是一个基于大语言模型（LLM）与 LangGraph ReAct Agent 的**数据库运维智能助手**。它以 Web 应用形态提供自然语言交互界面，帮助 DBA、开发者与运维人员高效完成日常数据库工作：不会写 SQL 就"说出来"，性能问题 AI 自动定位，故障排查引导式进行，巡检报告一键生成。
+DB-Pilot 是一个基于大语言模型（LLM）与 LangGraph ReAct Agent 的**数据库运维智能助手**。它以 Web 应用形态提供自然语言交互界面，帮助 DBA、开发者与运维人员高效完成日常数据库工作：不会写 SQL 就"说出来"，性能问题 AI 自动定位，故障排查引导式进行。
 
 项目由三部分组成：
 
 | 部分 | 说明 |
 |------|------|
 | **后端** | FastAPI + LangGraph 构建的 ReAct Agent 服务，通过 SSE 流式输出；可插拔适配器层连接目标数据库 |
-| **前端** | Vue 3 + TypeScript 单页应用，流式对话界面 + 连接管理 + 巡检报告 |
+| **前端** | Vue 3 + TypeScript 单页应用，流式对话界面 + 连接管理 |
 | **评测** | 两套独立的 Agent 评测体系（Text-to-SQL + 运维场景工具调用链验证） |
 
 ---
@@ -66,12 +66,6 @@ MySQL / PostgreSQL / Oracle 统一适配，连接卡片一键激活目标数据�
 
 ![连接管理](./docs/screenshots/connections.png)
 
-### 📊 数据库健康巡检
-
-一键发起 20 项多维健康检查，结果按类别分组（连接 / 性能 / 慢查询 / 存储 / 安全 / 复制），附优化建议与总结。
-
-![健康巡检结果](./docs/screenshots/health-check.png)
-
 ---
 
 ## 核心功能
@@ -90,11 +84,6 @@ MySQL / PostgreSQL / Oracle 统一适配，连接卡片一键激活目标数据�
 - 死锁 / 锁等待分析（完整锁拓扑：held / waiting 分层）
 - 连接池耗尽诊断、主从复制延迟排查
 - 危险操作（终止事务）需用户确认，自动验证
-
-### 📊 数据库健康巡检
-- **20 项**多维健康检查（连接数、慢查询占比、缓存命中率、复制延迟、表空间、QPS/TPS…）
-- 健康评分 + 跨项关联分析 + 一键修复建议
-- 报告持久化，HTML 查看 / 导出
 
 ### 🔌 多数据库管理
 - MySQL / PostgreSQL / Oracle 统一适配层
