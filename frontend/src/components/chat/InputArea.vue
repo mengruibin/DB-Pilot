@@ -10,7 +10,6 @@
 import { ref, computed, watch, nextTick } from 'vue'
 import type { ConnectionConfig } from '@/types/connection'
 import ConnectionSwitcher from './ConnectionSwitcher.vue'
-import { useSettingsStore } from '@/stores/settings'
 
 const props = defineProps<{
   /** 输入文本（v-model） */
@@ -57,18 +56,14 @@ function handleInput(e: Event): void {
   emit('update:modelValue', target.value)
 }
 
-const settingsStore = useSettingsStore()
-
 function handleKeydown(e: KeyboardEvent): void {
   if (props.isStreaming) return
-  if (e.key !== 'Enter') return
 
-  // Enter 发送模式：Enter=发送，Shift+Enter=换行
-  // 换行模式（enterToSend=false）：Enter=换行，Shift+Enter / Ctrl+Enter / Cmd+Enter=发送
-  const send = settingsStore.settings.enterToSend
-    ? !e.shiftKey
-    : e.shiftKey || e.ctrlKey || e.metaKey
-  if (send) {
+  // Shift+Enter = 换行
+  if (e.key === 'Enter' && e.shiftKey) return
+
+  // Enter = 提交
+  if (e.key === 'Enter' && !e.shiftKey) {
     e.preventDefault()
     submit()
   }
@@ -88,14 +83,11 @@ function handleStop(): void {
   emit('stop')
 }
 
-// ─── placeholder 文字（随连接状态与 Enter 发送设置响应式变化） ───
+// ─── placeholder 文字（随连接状态响应式变化） ───
 
-const placeholderText = computed(() => {
-  if (!props.hasConnection) return '请先选择数据库连接'
-  return settingsStore.settings.enterToSend
-    ? '输入消息，Enter 发送，Shift+Enter 换行…'
-    : '输入消息，Shift+Enter 发送，Enter 换行…'
-})
+const placeholderText = computed(() =>
+  props.hasConnection ? '输入消息，Enter 发送，Shift+Enter 换行…' : '请先选择数据库连接',
+)
 </script>
 
 <template>

@@ -24,8 +24,6 @@ export type ThinkingPanelDefault = 'expanded' | 'collapsed'
 export type AutoScrollMode = 'smart' | 'always'
 
 export interface UserSettings {
-  /** 外观：是否显示流式打字光标 */
-  showTypingCursor: boolean
   /** 对话：思考面板默认展开 / 收起 */
   thinkingPanelDefault: ThinkingPanelDefault
   /** 对话：深度推理模式（端到端）。开启时每轮对话请求携带 enable_reasoning=true，
@@ -34,18 +32,14 @@ export interface UserSettings {
   enableReasoning: boolean
   /** 对话：自动滚动策略 */
   autoScroll: AutoScrollMode
-  /** 对话：true=Enter 发送 Shift+Enter 换行；false=Enter 换行 Shift+Enter 发送 */
-  enterToSend: boolean
   /** 写操作确认自动取消倒计时秒数，0 = 不自动取消（后端 interrupt 将一直等待用户决策） */
   confirmCountdownSec: number
 }
 
 const DEFAULT_SETTINGS: UserSettings = {
-  showTypingCursor: true,
   thinkingPanelDefault: 'expanded',
   enableReasoning: true,
   autoScroll: 'smart',
-  enterToSend: true,
   confirmCountdownSec: 60,
 }
 
@@ -56,7 +50,12 @@ function loadSettings(): UserSettings {
     if (!raw) return { ...DEFAULT_SETTINGS }
     const parsed = JSON.parse(raw) as Partial<UserSettings> | null
     if (!parsed || typeof parsed !== 'object') return { ...DEFAULT_SETTINGS }
-    return { ...DEFAULT_SETTINGS, ...parsed }
+    // 只合并已知字段：历史版本残留的旧键（如已移除的 showTypingCursor）不进入 state
+    const merged = { ...DEFAULT_SETTINGS }
+    for (const key of Object.keys(DEFAULT_SETTINGS) as (keyof UserSettings)[]) {
+      if (key in parsed) (merged as Record<string, unknown>)[key] = parsed[key] as never
+    }
+    return merged
   } catch {
     return { ...DEFAULT_SETTINGS }
   }

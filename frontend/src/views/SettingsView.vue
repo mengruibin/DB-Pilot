@@ -72,18 +72,6 @@ function handleReset(): void {
             </NRadioButton>
           </NRadioGroup>
         </div>
-
-        <div class="settings-row">
-          <div class="row-text">
-            <span class="row-label">流式打字光标</span>
-            <span class="row-desc">回答生成时在文末显示闪烁光标</span>
-          </div>
-          <NSwitch
-            :value="settings.showTypingCursor"
-            size="small"
-            @update:value="(v: boolean) => set({ showTypingCursor: v })"
-          />
-        </div>
       </section>
 
       <!-- ═══════════ 对话行为 ═══════════ -->
@@ -135,18 +123,6 @@ function handleReset(): void {
             <NRadioButton value="smart">智能</NRadioButton>
             <NRadioButton value="always">始终</NRadioButton>
           </NRadioGroup>
-        </div>
-
-        <div class="settings-row">
-          <div class="row-text">
-            <span class="row-label">Enter 发送消息</span>
-            <span class="row-desc">开启 = Enter 发送、Shift+Enter 换行；关闭 = Enter 换行、Shift+Enter 发送</span>
-          </div>
-          <NSwitch
-            :value="settings.enterToSend"
-            size="small"
-            @update:value="(v: boolean) => set({ enterToSend: v })"
-          />
         </div>
       </section>
 

@@ -62,7 +62,7 @@ class AgentState(TypedDict, total=False):
         user_role: 用户角色（readonly / admin；未检测到明确角色时安全兜底为 readonly）。
         conversation_history: 格式化的会话历史文本。
         enable_reasoning: 深度推理模式按请求覆盖（None=回落 .env ENABLE_REASONING；
-            随 checkpoint 持久化，interrupt resume 沿用首次请求取值）。
+            随 checkpoint 持久化，resume 沿用首次请求取值）。
 
         # ── 中间结果（图节点执行过程中填充） ──
         conn_config: 解析后的目标数据库连接配置。
