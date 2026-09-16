@@ -11,6 +11,7 @@
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import type { StoreMessage } from '@/stores/chat'
 import { useChatStore } from '@/stores/chat'
+import { useSettingsStore } from '@/stores/settings'
 import SqlBlock from '@/components/sql/SqlBlock.vue'
 import ResultTable from '@/components/sql/ResultTable.vue'
 import ErrorCard from '@/components/common/ErrorCard.vue'
@@ -37,6 +38,7 @@ const props = withDefaults(
 )
 
 const chatStore = useChatStore()
+const settingsStore = useSettingsStore()
 
 // ─── 完整结果导出（query-result-export-plan） ───
 const { exporting, error: exportError, exportFullCsv } = useExportFull()
@@ -104,9 +106,10 @@ const toolArgsJson = computed(() => {
   return JSON.stringify(props.message.toolArgs, null, 2)
 })
 
-// ─── 光标显示条件：仅流式回答阶段 ───
+// ─── 光标显示条件：仅流式回答阶段（可经设置关闭打字光标） ───
 const showCursor = computed(() => {
-  return props.isStreaming && props.isLast
+  return settingsStore.settings.showTypingCursor
+    && props.isStreaming && props.isLast
     && props.message.type === 'text'
     && props.message.stage !== 'thinking'
 })

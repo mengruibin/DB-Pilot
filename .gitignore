@@ -20,4 +20,11 @@ logs/
 docs/*
 !docs/screenshots/
 !docs/screenshots/*
+
 .claude/
+.workbuddy/
+# Claude Code 个人配置：.mcp.json 不进版本管理。
+# 理由：每位成员的 MCP server 组合不同，且其中常含明文 DSN/密码。
+# 需要共享 server 定义时用仓库根的 .mcp.json.example 作模板（不含真实凭据）。
+.mcp.json
+

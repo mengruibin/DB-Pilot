@@ -13,6 +13,7 @@ import { ref, computed, watch } from 'vue'
 import { useSSE } from '@/composables/useSSE'
 import { cancelChat as apiCancelChat } from '@/api/chat'
 import { useConnectionStore } from '@/stores/connection'
+import { useSettingsStore } from '@/stores/settings'
 import { getSessions, getSessionMessages, renameSession as apiRenameSession, deleteSession as apiDeleteSession } from '@/api/session'
 import type { Session, Message } from '@/types/chat'
 import type { FindingSeverity } from '@/types/report'
@@ -483,6 +484,8 @@ export const useChatStore = defineStore('chat', () => {
         mode: 'natural_language',
         session_id: currentSessionId.value,
         password,  // AGENTS.md §安全与合规红线：密码仅存于内存，每次请求传入
+        // 深度推理模式按请求覆盖（前端设置端到端打通；后端 null 时回落 .env 全局配置）
+        enable_reasoning: useSettingsStore().settings.enableReasoning,
         ...(resume ? { resume } : {}),
       },
       {
@@ -738,16 +741,19 @@ export const useChatStore = defineStore('chat', () => {
           // 保存会话 ID 供恢复请求使用（中断时不触发 onDone，session_id 无法更新）
           currentSessionId.value = event.session_id
 
-          // 60s 超时自动拒绝
-          confirmTimeoutId = setTimeout(() => {
-            if (pendingConfirm.value) {
-              const allDenied = pendingConfirm.value.writes.map(w => w.tool_call_id)
-              respondToConfirm({
-                approved_tool_call_ids: [],
-                denied_tool_call_ids: allDenied,
-              })
-            }
-          }, 60_000)
+          // 超时自动拒绝（时长来自用户设置；0 = 不自动取消，等待用户决策）
+          const countdownSec = useSettingsStore().settings.confirmCountdownSec
+          if (countdownSec > 0) {
+            confirmTimeoutId = setTimeout(() => {
+              if (pendingConfirm.value) {
+                const allDenied = pendingConfirm.value.writes.map(w => w.tool_call_id)
+                respondToConfirm({
+                  approved_tool_call_ids: [],
+                  denied_tool_call_ids: allDenied,
+                })
+              }
+            }, countdownSec * 1000)
+          }
         },
       }
     )

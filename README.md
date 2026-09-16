@@ -20,6 +20,7 @@
 - [系统架构](#系统架构)
 - [技术栈](#技术栈)
 - [快速开始](#快速开始)
+- [MCP 服务（团队接入）](#mcp-服务团队接入)
 - [环境变量配置](#环境变量配置)
 - [Agent 工具集](#agent-工具集)
 - [安全设计](#安全设计)
@@ -236,6 +237,48 @@ cd frontend
 npm run build        # 产物输出到 dist/
 npm run preview      # 本地预览
 ```
+
+---
+
+## MCP 服务
+
+除 Web 界面外，DB-Pilot 的数据库能力还可作为 **MCP（Model Context Protocol）服务**接入 Claude Code / Codex 等 AI 编程工具——在编码助手里直接查表、跑只读 SQL、诊断慢查询、分析锁等待，无需切换到数据库客户端。**MCP 与 Web 共用同一套工具实现和安全审计**，两者互不影响，可同时运行。
+
+**形态**：每位成员在自己机器上本地运行一份（stdio），**各自配置自己的数据库 IP / 账号 / 密码**；凭据只存在本机，不上传任何服务器。默认只读。
+
+| 能力 | 工具 |
+|------|------|
+| 结构探查 | `dbpilot_list_tables` / `dbpilot_describe_table` |
+| 只读查询 | `dbpilot_execute_readonly_sql`（sqlglot 审计 + EXPLAIN 数据量评估） |
+| 性能诊断 | `dbpilot_explain_query` / `dbpilot_get_slow_queries` |
+| 故障排查 | `dbpilot_check_connections` / `dbpilot_check_locks` / `dbpilot_analyze_locks` / `dbpilot_check_replication` |
+| 健康巡检 | `dbpilot_run_health_check`（20 项检查 + 关联分析 + 修复建议） |
+| 写操作（默认关闭） | `dbpilot_execute_write_sql` / `dbpilot_execute_write_transaction` / `dbpilot_kill_transaction`，需设 `DBPILOT_ALLOW_WRITE=1` |
+
+### 三步接入
+
+```powershell
+# ① 安装 uv（Python 解释器由 uv 自动管理，无需单独装 3.12+）
+powershell -c "irm https://astral.sh/uv/install.ps1 | iex"
+
+# ② 克隆仓库
+git clone <仓库地址> D:\work\DB-Pilot
+
+# ③ 注册到自己的 Claude Code（DSN 换成自己的；默认只读）
+claude mcp add db-pilot -s user -e DBPILOT_HEADLESS=1 `
+  -e "DBPILOT_DSN=mysql://你的账号:你的密码@你的数据库IP:3306/你的库名" `
+  -- uv --directory D:/work/DB-Pilot/backend run --extra mcp python -m app.mcp_server
+```
+
+要点与常见坑：
+
+- **`--extra mcp` 不能省**：MCP 包在该可选依赖组里，漏掉会报 `ModuleNotFoundError: No module named 'mcp'`
+- 首次启动会同步依赖（含 Web 侧依赖，几分钟），之后启动是秒级；项目级 `.mcp.json` 首次需在 Claude Code 里批准
+- **多库**：用 `DBPILOT_CONNECTIONS='{"shop":"mysql://...","bill":"postgresql://..."}'`（配 `DBPILOT_DEFAULT_CONNECTION`），工具参数传 `connection`
+- **写权限**：需 `DBPILOT_ALLOW_WRITE=1`（按人按机器单独开）；即便如此，红线 DDL（DROP/ALTER/TRUNCATE/CREATE/GRANT/REVOKE）、无 WHERE 全表删改、多语句仍被审计硬拦
+- **连接来源**：MCP 走环境变量 DSN（`DBPILOT_DSN` / `DBPILOT_CONNECTIONS`），与 Web 端「连接管理」的 connections 表互相独立
+- **`.mcp.json` 属于个人配置，不进版本管理**（每人的 MCP 组合与数据库凭据都不同）；仓库根提供无密钥模板 [`.mcp.json.example`](.mcp.json.example)
+- 完整操作指南、自查三条与排障表见 [docs/mcp-usage.md](docs/mcp-usage.md)
 
 ---
 
@@ -464,6 +507,8 @@ DB-Pilot/
 | 文档 | 说明 |
 |------|------|
 | [CLAUDE.md](CLAUDE.md) | 项目开发指南与架构约定（供 AI 编程助手使用） |
+| [docs/mcp-usage.md](docs/mcp-usage.md) | MCP 服务团队接入指南（Claude Code / Codex） |
+| [.mcp.json.example](.mcp.json.example) | Claude Code 项目级配置模板（无密钥） |
 
 ---
 

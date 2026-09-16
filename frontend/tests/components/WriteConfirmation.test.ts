@@ -26,6 +26,13 @@ vi.mock('@/stores/chat', () => ({
   }),
 }))
 
+// 组件现会读取用户设置（确认倒计时时长）；测试环境无 Pinia，给与历史默认一致的 mock
+vi.mock('@/stores/settings', () => ({
+  useSettingsStore: () => ({
+    settings: { confirmCountdownSec: 60 },
+  }),
+}))
+
 vi.mock('naive-ui', () => ({
   NButton: {
     props: { text: Boolean, size: String, disabled: Boolean },

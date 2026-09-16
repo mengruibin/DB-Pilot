@@ -358,6 +358,8 @@ export interface StreamChatRequest {
   message: string
   session_id: string | null
   password?: string  // 数据库密码，仅存于内存，不落盘（AGENTS.md §安全红线）
+  /** 深度推理模式按请求覆盖：true/false 覆盖服务端 .env 默认；缺省=回落全局配置 */
+  enable_reasoning?: boolean
   context?: {
     selected_table?: string
     user_role?: string

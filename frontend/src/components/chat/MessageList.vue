@@ -14,11 +14,14 @@
 import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue'
 import MessageBubble from './MessageBubble.vue'
 import type { StoreMessage } from '@/stores/chat'
+import { useSettingsStore } from '@/stores/settings'
 
 const props = defineProps<{
   messages: StoreMessage[]
   isStreaming: boolean
 }>()
+
+const settingsStore = useSettingsStore()
 
 // ─── 滚动容器 ───
 const listRef = ref<HTMLElement | null>(null)
@@ -47,6 +50,27 @@ function isThinkingPhaseMessage(msg: StoreMessage): boolean {
 }
 
 /**
+ * 可见消息：深度推理关闭时在 UI 层过滤 reasoning 消息（含历史会话）。
+ * 仅影响渲染，不改 chat store 的消息结构 / SSE 数据 / 历史持久化。
+ * 注意 thinking_group 的 steps 内也嵌有 reasoning，需一并过滤；
+ * steps 清空后整组移除，避免渲染空的思考容器。
+ */
+const visibleMessages = computed<StoreMessage[]>(() => {
+  if (settingsStore.settings.enableReasoning) return props.messages
+  return props.messages
+    .map((m) => {
+      if (m.type === 'thinking_group' && m.thinkingGroup) {
+        const steps = m.thinkingGroup.steps.filter((s) => s.type !== 'reasoning')
+        if (steps.length === m.thinkingGroup.steps.length) return m
+        return { ...m, thinkingGroup: { ...m.thinkingGroup, steps } }
+      }
+      return m
+    })
+    .filter((m) => m.type !== 'reasoning')
+    .filter((m) => !(m.type === 'thinking_group' && (!m.thinkingGroup || m.thinkingGroup.steps.length === 0)))
+})
+
+/**
  * 分组策略（遵照设计规范 — 所有 AI 响应使用统一卡片）：
  *   1. 用户消息 → 独立 'user' 组（右对齐气泡）
  *   2. 连续 assistant 消息 → 'ai_response' 卡片（思考面板 + 最终回答）
@@ -55,11 +79,11 @@ function isThinkingPhaseMessage(msg: StoreMessage): boolean {
  */
 const groupedMessages = computed<MessageGroup[]>(() => {
   const groups: MessageGroup[] = []
-  const len = props.messages.length
+  const len = visibleMessages.value.length
   let i = 0
 
   while (i < len) {
-    const msg = props.messages[i]
+    const msg = visibleMessages.value[i]
 
     // 用户消息：独立气泡
     if (msg.role === 'user') {
@@ -71,8 +95,8 @@ const groupedMessages = computed<MessageGroup[]>(() => {
     // AI 响应卡片：收集当前 user 消息之后的所有连续 assistant 消息
     // 包括 thinking_group、text(stage=answer)、以及独立 text 回答
     const batch: StoreMessage[] = []
-    while (i < len && props.messages[i].role === 'assistant') {
-      batch.push(props.messages[i])
+    while (i < len && visibleMessages.value[i].role === 'assistant') {
+      batch.push(visibleMessages.value[i])
       i++
     }
 
@@ -95,6 +119,15 @@ const groupedMessages = computed<MessageGroup[]>(() => {
   return groups
 })
 
+// ─── 流式光标定位 ───
+// 光标只应出现在「全局最后一条消息」上。此前按「组内最后一条」判断，
+// 导致新一轮回答流式时，上一轮 ai_response 卡片的末尾文本也满足
+// isStreaming && isLast，从而在上一段回答尾部渲染出闪烁光标。
+const lastMessageId = computed(() => {
+  const arr = visibleMessages.value
+  return arr.length > 0 ? arr[arr.length - 1].id : null
+})
+
 // ─── 自动滚动 ───
 function scrollToBottom(smooth = true): void {
   const container = getScrollContainer()
@@ -108,12 +141,17 @@ function handleScroll(e: Event): void {
   isNearBottom.value = nearBottom
 }
 
-watch(() => props.messages.length, () => {
-  if (isNearBottom.value) nextTick(() => scrollToBottom(false))
+// 自动滚动策略：smart=仅用户贴近底部时跟随；always=始终吸底
+const shouldFollowScroll = computed(() =>
+  settingsStore.settings.autoScroll === 'always' || isNearBottom.value,
+)
+
+watch(() => visibleMessages.value.length, () => {
+  if (shouldFollowScroll.value) nextTick(() => scrollToBottom(false))
 })
 
 watch(() => props.isStreaming, (streaming) => {
-  if (streaming && isNearBottom.value) nextTick(() => scrollToBottom(false))
+  if (streaming && shouldFollowScroll.value) nextTick(() => scrollToBottom(false))
 })
 
 onMounted(() => {
@@ -242,8 +280,8 @@ function pairToolSteps(thinkingItems: StoreMessage[]): Array<
   return result
 }
 
-// ─── 思考面板折叠状态 ───
-const thinkingExpanded = ref(true)  // 默认展开
+// ─── 思考面板折叠状态（初始态来自设置：思考面板默认展开 / 收起） ───
+const thinkingExpanded = ref(settingsStore.settings.thinkingPanelDefault === 'expanded')
 </script>
 
 <template>
@@ -400,8 +438,8 @@ const thinkingExpanded = ref(true)  // 默认展开
                   v-for="ansMsg in splitAIResponse(group.items).answerItems"
                   :key="ansMsg.id"
                   :message="ansMsg"
-                  :is-last="ansMsg === group.items[group.items.length - 1]"
-                  :is-streaming="isStreaming && ansMsg === group.items[group.items.length - 1]"
+                  :is-last="ansMsg.id === lastMessageId"
+                  :is-streaming="isStreaming && ansMsg.id === lastMessageId"
                   :is-in-card="true"
                 />
               </div>
@@ -458,8 +496,8 @@ const thinkingExpanded = ref(true)  // 默认展开
             v-for="msg in group.items"
             :key="msg.id"
             :message="msg"
-            :is-last="msg === group.items[group.items.length - 1]"
-            :is-streaming="isStreaming && msg === group.items[group.items.length - 1]"
+            :is-last="msg.id === lastMessageId"
+            :is-streaming="isStreaming && msg.id === lastMessageId"
           />
         </template>
 

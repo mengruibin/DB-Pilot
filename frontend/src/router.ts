@@ -34,7 +34,7 @@ const routes: RouteRecordRaw[] = [
   {
     path: '/settings',
     name: 'settings',
-    component: () => import('@/views/ChatView.vue'),
+    component: () => import('@/views/SettingsView.vue'),
     meta: { title: '设置' },
   },
   // 兜底：不存在的路径重定向到首页

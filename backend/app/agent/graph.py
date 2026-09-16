@@ -172,7 +172,13 @@ async def agent_node(state: AgentState) -> dict[str, Any]:
     )
 
     # ── 构建 LangChain Chat 模型 + bind_tools ──
-    model = build_chat_model(max_tokens=2048, timeout=60)
+    # enable_reasoning 来自请求体（前端设置项按请求覆盖），随 checkpoint 持久化；
+    # 旧 checkpoint / 未传时为 None → build_chat_model 回落 .env 全局配置
+    model = build_chat_model(
+        max_tokens=2048,
+        timeout=60,
+        enable_reasoning=state.get("enable_reasoning"),
+    )
 
     # 抑制 httpx/openai 调试日志（避免全量消息体重复打印）
     for _noisy in ("httpx", "httpx._client", "httpx._config", "httpcore", "openai"):

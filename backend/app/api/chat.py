@@ -629,6 +629,9 @@ async def _stream_events(
                     "is_complete": False,
                     "final_answer": None,
                     "consecutive_blocks": 0,
+                    # 深度推理按请求覆盖（前端设置项端到端）：None=回落 .env 全局配置；
+                    # 随 checkpoint 持久化，interrupt resume 沿用首次请求取值
+                    "enable_reasoning": body.enable_reasoning,
                 }
                 _stream = graph.astream(
                     initial_state,

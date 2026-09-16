@@ -61,6 +61,8 @@ class AgentState(TypedDict, total=False):
         password: 连接密码（仅存于内存 state，不持久化）。
         user_role: 用户角色（readonly / admin；未检测到明确角色时安全兜底为 readonly）。
         conversation_history: 格式化的会话历史文本。
+        enable_reasoning: 深度推理模式按请求覆盖（None=回落 .env ENABLE_REASONING；
+            随 checkpoint 持久化，interrupt resume 沿用首次请求取值）。
 
         # ── 中间结果（图节点执行过程中填充） ──
         conn_config: 解析后的目标数据库连接配置。
@@ -97,6 +99,7 @@ class AgentState(TypedDict, total=False):
     password: str | None
     user_role: str
     conversation_history: str | None
+    enable_reasoning: bool | None  # 深度推理按请求覆盖；None=回落 .env 全局配置
 
     # ── 中间结果 ──
     conn_config: dict[str, Any] | None

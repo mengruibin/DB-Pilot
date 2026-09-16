@@ -204,6 +204,13 @@ class ChatRequest(BaseModel):
         default=None,
         description="前端附加上下文，如 {selected_table, user_role}",
     )
+    enable_reasoning: bool | None = Field(
+        default=None,
+        description="深度推理模式按请求覆盖。true=本请求保留并返回模型推理内容"
+        "（需模型支持深度思考）；false=本请求丢弃 reasoning_content；"
+        "null=回落到服务端 .env 的 ENABLE_REASONING 全局配置。恢复请求忽略此字段"
+        "（沿用首次请求时的取值）",
+    )
     resume: ResumeRequest | None = Field(
         default=None,
         description="中断恢复请求。非空时表示恢复已中断的图执行，message 可为空",

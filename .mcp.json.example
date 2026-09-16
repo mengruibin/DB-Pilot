@@ -1,0 +1,21 @@
+{
+  "mcpServers": {
+    "db-pilot": {
+      "command": "uv",
+      "args": [
+        "--directory",
+        "D:/改成你的仓库路径/DB-Pilot/backend",
+        "run",
+        "--extra",
+        "mcp",
+        "python",
+        "-m",
+        "app.mcp_server"
+      ],
+      "env": {
+        "DBPILOT_HEADLESS": "1",
+        "DBPILOT_DSN": "mysql://你的账号:你的密码@你的数据库IP:3306/你的库名"
+      }
+    }
+  }
+}

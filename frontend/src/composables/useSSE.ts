@@ -32,8 +32,9 @@ export function useSSE() {
   let reader: ReadableStreamDefaultReader<Uint8Array> | null = null
   let timeoutId: ReturnType<typeof setTimeout> | null = null
   let userCallbacks: SSEEventCallbacks | null = null
-  let errorSeen = false // 收到 error 事件后忽略后续事件
-  let manualDisconnect = false // 手动断开标记，用于区分服务端意外关闭
+  let errorSeen = false // 收到 error 事件后忽略后续事件（done 除外，见 dispatchSSEEvent）
+  let manualDisconnect = false // 手动断开标记，用于区分服务端意外关闭（每次 connect 复位）
+  let doneSeen = false // 是否已收到 done 事件：正常收尾后不再触发 onDisconnect
 
   // ─── 超时定时器 ───
 
@@ -66,9 +67,6 @@ export function useSSE() {
    * 实际 type 在 JSON data 内，event 行固定为 "message"
    */
   function dispatchSSEEvent(msg: string): void {
-    // 收到 error 后忽略后续
-    if (errorSeen) return
-
     let eventField = ''
     let dataField = ''
 
@@ -96,6 +94,11 @@ export function useSSE() {
     }
 
     const type = payload.type as string
+
+    // 收到 error 后忽略后续事件，但放行 done：
+    // 后端异常分支（chat.py except Exception）会先发 error 再补发 done 收尾，
+    // 若吞掉 done，isStreaming 将无法通过 onDone 复位
+    if (errorSeen && type !== 'done') return
 
     // 按 type 分发到对应回调
     switch (type) {
@@ -128,6 +131,7 @@ export function useSSE() {
         userCallbacks?.onError?.(payload as any)
         break
       case 'done':
+        doneSeen = true
         userCallbacks?.onDone?.(payload as any)
         break
       case 'stage_change':
@@ -179,8 +183,8 @@ export function useSSE() {
         dispatchSSEEvent(buffer)
       }
 
-      // 流意外结束（非手动断开、非 catch 异常）→ 通知调用方
-      if (!manualDisconnect) {
+      // 流意外结束（非手动断开、非正常 done 收尾、非 catch 异常）→ 通知调用方
+      if (!manualDisconnect && !doneSeen) {
         userCallbacks?.onDisconnect?.('连接已断开')
       }
     } catch (err: unknown) {
@@ -215,6 +219,11 @@ export function useSSE() {
   async function connect(url: string, body: unknown, cb: SSEEventCallbacks): Promise<void> {
     // 断开已有连接
     disconnect()
+
+    // 复位连接级标记：disconnect() 会置 manualDisconnect = true，
+    // 若不复位，服务端关闭流时 onDisconnect 兜底永远不会触发
+    manualDisconnect = false
+    doneSeen = false
 
     userCallbacks = cb
     errorSeen = false

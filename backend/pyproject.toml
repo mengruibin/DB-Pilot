@@ -23,6 +23,9 @@ classifiers = [
 dependencies = [
     "fastapi>=0.115.0",           # REST + SSE API 框架（PRD §6.1）
     "uvicorn[standard]>=0.30.0",  # ASGI 服务器
+    "langchain>=0.3.0",           # LLM 工具绑定/消息标准封装（AGENTS.md §技术栈约束；此前漏声明导致 clean sync 后 Web import 失败）
+    "langchain-anthropic>=0.3.0", # Anthropic Claude Chat 模型（AGENTS.md §技术栈约束）
+    "langchain-openai>=0.3.0",    # OpenAI/百炼兼容 Chat 模型（AGENTS.md §技术栈约束）
     "langgraph>=0.3.0",           # Agent 状态图编排（PRD §6.1）
     "langgraph-checkpoint-postgres>=3.1.0",  # PG checkpointer（checkpointer-redis-migration-plan）
     "psycopg[binary]>=3.3.0",  # psycopg 二进制模式，自带 libpq>=10（SCRAM 认证）
@@ -50,6 +53,10 @@ dev = [
     "pytest-asyncio>=0.23.0",   # 异步测试支持
     "structlog>=24.0.0",        # 结构化日志（链路追踪与可观测性）
 ]
+
+# MCP 无头服务（mcp-extension-plan Task 1）
+# 上限 <2：mcp 2.x 移除 v1 FastMCP API（改名 MCPServer），本计划代码基于 v1（>=1.9）。
+mcp = ["mcp>=1.9,<2"]
 
 [tool.ruff]
 target-version = "py312"

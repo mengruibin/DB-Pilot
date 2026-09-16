@@ -12,7 +12,7 @@ import os
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field, ValidationError, field_validator
+from pydantic import Field, ValidationError, ValidationInfo, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -24,6 +24,11 @@ def _env_file_path() -> Path | None:
     # 默认路径：backend/.env（config.py 位于 backend/app/，所以上两级）
     candidate = Path(__file__).resolve().parent.parent / ".env"
     return candidate if candidate.exists() else None
+
+
+def _headless_enabled() -> bool:
+    """MCP 无头模式判定：环境变量 DBPILOT_HEADLESS ∈ {"1","true"}。"""
+    return os.getenv("DBPILOT_HEADLESS", "").strip().lower() in {"1", "true"}
 
 
 class Settings(BaseSettings):
@@ -125,6 +130,13 @@ class Settings(BaseSettings):
         default=1440,
         ge=5,
         description="JWT 访问令牌过期时间（分钟），默认 1440（24 小时）。",
+    )
+
+    # ==================== 无头模式（MCP 服务） ====================
+    DBPILOT_HEADLESS: bool = Field(
+        default=False,
+        description="无头模式：跳过 LLM/内部库/JWT 必填校验（MCP 服务不依赖这些）。"
+        "仅 DB 能力可用；Web 端启动必须保持 False。",
     )
 
     # ==================== 日志与可观测性 ====================
@@ -261,8 +273,13 @@ class Settings(BaseSettings):
 
     @field_validator("LLM_API_KEY", "LLM_MODEL", "DATABASE_URL", "JWT_SECRET")
     @classmethod
-    def _required_not_empty(cls, v: str, info: Field.field_validator) -> str:
-        """必填字段非空校验。缺失任一字段则拒绝启动（AGENTS.md §安全与合规红线）。"""
+    def _required_not_empty(cls, v: str, info: ValidationInfo) -> str:
+        """必填字段非空校验（AGENTS.md §安全与合规红线）。
+
+        DBPILOT_HEADLESS=1（MCP 无头模式）时跳过——MCP 进程不需要 LLM/内部库/JWT。
+        """
+        if _headless_enabled():
+            return v.strip()
         if not v or not v.strip():
             msg = (
                 f"缺少必填配置项：{info.field_name}。"
@@ -275,9 +292,9 @@ class Settings(BaseSettings):
     @field_validator("JWT_SECRET")
     @classmethod
     def _jwt_secret_min_length(cls, v: str) -> str:
-        """JWT 签名密钥长度至少 32 字符。"""
+        """JWT 签名密钥长度至少 32 字符（headless 模式跳过）。"""
         v_stripped = v.strip()
-        if len(v_stripped) < 32:
+        if not _headless_enabled() and len(v_stripped) < 32:
             raise ValueError(
                 "JWT_SECRET 长度必须至少为 32 字符。"
                 f"当前长度为 {len(v_stripped)}。"

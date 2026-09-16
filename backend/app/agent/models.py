@@ -83,6 +83,7 @@ def build_chat_model(
     model: str | None = None,
     max_tokens: int = 2048,
     timeout: int = 60,
+    enable_reasoning: bool | None = None,
 ) -> BaseChatModel:
     """构建主力 Chat 模型实例（复杂推理任务用）。
 
@@ -93,6 +94,11 @@ def build_chat_model(
         model: 模型名称。None 表示使用 settings.LLM_MODEL。
         max_tokens: 最大输出 token 数（默认 2048）。
         timeout: 请求超时秒数（默认 60s）。
+        enable_reasoning: 深度推理模式按请求覆盖（前端设置项端到端打通）。
+            True=使用 CustomChatOpenAI 保留 reasoning_content；False=强制使用
+            普通 ChatOpenAI 丢弃推理内容；None=回落 settings.ENABLE_REASONING
+            全局配置。仅影响 OpenAI 兼容分支（Anthropic 分支无 reasoning_content
+            通道，维持原行为）。
 
     Returns:
         BaseChatModel 实例（ChatAnthropic 或 ChatOpenAI）。
@@ -132,8 +138,12 @@ def build_chat_model(
 
         # 启用深度思考模式 → 使用 CustomChatOpenAI 保留 reasoning_content
         # 注：thinking 模式需通过模型名（如 deepseek-reasoner）或 API 端配置开启，
-        # model_kwargs 在部分 langchain-openai 版本中不兼容 extra_body 传递
-        if settings.ENABLE_REASONING:
+        # model_kwargs 在部分 langchain-openai 版本中不兼容 extra_body 传递。
+        # enable_reasoning 支持按请求覆盖（前端设置项）：None=回落 .env 全局配置
+        effective_reasoning = (
+            settings.ENABLE_REASONING if enable_reasoning is None else enable_reasoning
+        )
+        if effective_reasoning:
             return CustomChatOpenAI(**_common)  # pyright: ignore[reportCallIssue]
 
         return ChatOpenAI(**_common)  # pyright: ignore[reportCallIssue]

@@ -10,21 +10,23 @@
  *   Header（红点 + 标题；决议后右侧出现「已批准 / 已取消」徽章）
  *   内容区（sql_write：SQL 代码井 + 影响预估行；connection_kill/generic：键值规格表）
  *   二次确认提示（首次点「确认执行」后出现，条件渲染）
- *   操作栏（左：60s 自动取消倒计时；右：取消 + 确认按钮）—— 决议后整栏替换为结果行
+ *   操作栏（左：自动取消倒计时，时长来自用户设置；右：取消 + 确认按钮）—— 决议后整栏替换为结果行
  *
  * 交互状态机：
- *   pending（待确认，倒计时 60s）
+ *   pending（待确认，倒计时时长来自用户设置，0 = 不自动取消）
  *     ├─ 点「确认执行」→ armed（二次确认提示 + 按钮变红）
  *     │    └─ 再点一次 → approved（通知后端执行）
  *     ├─ 点「取消」        → cancelled（通知后端拒绝）
- *     └─ 倒计时归零        → cancelled（自动拒绝，略微早于 store 60s 兜底以抢得渲染时机）
+ *     └─ 倒计时归零        → cancelled（自动拒绝，略微早于 store 同源时长的兜底以抢得渲染时机）
  *   决议后 store.pendingConfirm 立即清空（SSE 恢复），本卡用本地快照短暂展示结果态再淡出。
  */
 import { ref, computed, watch, nextTick, onUnmounted } from 'vue'
 import { useChatStore } from '@/stores/chat'
+import { useSettingsStore } from '@/stores/settings'
 import type { ConfirmCategory, ConfirmableWrite } from '@/types/chat'
 
 const chatStore = useChatStore()
+const settingsStore = useSettingsStore()
 
 /** 卡片本地快照：store 清空 pendingConfirm 后仍能渲染结果态 */
 const writes = ref<ConfirmableWrite[]>([])
@@ -35,7 +37,6 @@ const phase = ref<Phase>('pending')
 /** 决议结果（resolved 时非空） */
 const decision = ref<{ kind: 'approved' | 'cancelled'; reason: 'user' | 'timeout' } | null>(null)
 
-const COOLDOWN_DENY_EPSILON_MS = 1000 // 提前于 store 60s 兜底触发，保证「已取消」结果态可见
 const RESOLVED_HOLD_MS = 2400         // 结果态停留时长，之后淡出让位给后续消息流
 const ARM_APPROVE_GAP_MS = 350        // armed 后最小停留，防止双击瞬间跳过二次确认
 
@@ -78,8 +79,10 @@ const resultText = computed(() => {
   return approved ? '已批准执行该写操作' : '已取消该操作'
 })
 
-// ═══════════ 60s 自动取消倒计时 ═══════════
-const COUNTDOWN_TOTAL_MS = 60_000
+// ═══════════ 自动取消倒计时（时长来自用户设置，弹出时快照；0 = 不自动取消） ═══════════
+const COOLDOWN_DENY_EPSILON_MS = 1000 // UI 倒计时提前于 store 兜底触发的余量，保证「已取消」结果态可见
+/** 本次卡片的倒计时总毫秒数（startCountdown 时快照，弹出期间改设置不影响本卡） */
+let countdownTotalMs = 0
 const remainingMs = ref(0)
 const countdownSec = computed(() => Math.max(0, Math.ceil(remainingMs.value / 1000)))
 const countdownDanger = computed(() => countdownSec.value <= 10)
@@ -87,10 +90,17 @@ let countdownTimer: ReturnType<typeof setInterval> | null = null
 
 function startCountdown(): void {
   stopCountdown()
-  remainingMs.value = COUNTDOWN_TOTAL_MS
+  const sec = settingsStore.settings.confirmCountdownSec
+  countdownTotalMs = sec > 0 ? sec * 1000 : 0
+  if (countdownTotalMs <= 0) {
+    // 不自动取消：不启动倒计时，UI 隐藏倒计时文案（remainingMs 保持 0）
+    remainingMs.value = 0
+    return
+  }
+  remainingMs.value = countdownTotalMs
   countdownTimer = setInterval(() => {
     remainingMs.value = Math.max(0, remainingMs.value - 200)
-    // 略微提前于 store 60s 兜底拒绝，保证「已取消」结果态有渲染窗口
+    // 略微提前于 store 兜底拒绝（同源时长 - 1s 余量），保证「已取消」结果态有渲染窗口
     if (remainingMs.value <= COOLDOWN_DENY_EPSILON_MS) doDeny('timeout')
   }, 200)
 }
@@ -375,7 +385,7 @@ function findDbName(w: ConfirmableWrite): string | undefined {
         {{ resultText }}
       </div>
       <div v-else class="wconf-actions">
-        <span class="wconf-countdown" :class="{ 'is-danger': countdownDanger }">
+        <span v-if="countdownSec > 0" class="wconf-countdown" :class="{ 'is-danger': countdownDanger }">
           {{ countdownSec }}s 后自动取消
         </span>
         <div class="wconf-action-btns">
